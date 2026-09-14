@@ -349,3 +349,36 @@ seconds instead of failing fast. Fixed with `@lru_cache` on the loader.
 95 tests total (was 87), all green: 9 new source_shift-specific tests using synthetic
 pseudo-patient->source dicts injected via `build_partition`'s new `source_labels`
 parameter, independent of the real CSV.
+
+---
+
+## 2026-09-14 — fix: deterministic mode crashed the first real Colab training run
+
+### What happened
+
+The author's first Colab run of `scripts/run_experiment.py` (SimpleCNN, groupnorm,
+seed=0) crashed with a non-zero exit code on the very first training attempt. Root cause,
+found by re-reading `utils/seed.py` rather than guessing: `torch.use_deterministic_algorithms(True)`
+was called without `warn_only=True`. Enabling determinism this way does not raise at
+call time -- it raises **later**, the first time training hits an op with no deterministic
+kernel for the active backend. `SimpleCNN`'s `AdaptiveAvgPool2d` is a well-known example
+of an op whose backward pass historically lacks a deterministic CUDA implementation.
+
+This bug existed since Phase 0.3 but was never triggered locally: this machine has no
+CUDA, and the MPS-avoidance fix from Phase 2.1 meant every local run used CPU, where the
+same op does not hit this limitation. **Colab was the first time this code path actually
+ran on CUDA**, and it broke immediately.
+
+### Fix
+
+`seed_everything()` now calls `torch.use_deterministic_algorithms(True, warn_only=True)`,
+matching the plan's own stated Phase 0.3 design intent ("catch, log a warning, and set
+deterministic: false... rather than crashing") that the original implementation only
+half-delivered -- it caught failures at the *enable* call, not from ops encountered
+during actual training, which is where the real risk always was. Falls back to a
+bare call for a hypothetical torch old enough to lack the `warn_only` kwarg.
+
+4 new tests (99 total): two verify the warn_only call contract via mocking (can't
+reproduce a CUDA-only non-deterministic op on this CPU-only machine), one verifies
+graceful fallback on an old torch, and one trains `SimpleCNN` end-to-end under
+deterministic mode as a direct regression guard on the actual model/layer that broke.
