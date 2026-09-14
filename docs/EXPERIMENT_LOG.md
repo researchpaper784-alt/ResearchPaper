@@ -209,3 +209,62 @@ monotonicity check on α.
 
 `source_shift` raises `NotImplementedError` pointing at `docs/OPEN_QUESTIONS.md` — still
 blocked on the provenance-label decision.
+
+---
+
+## 2026-09-14 — source_shift provenance recovery: Figshare matched, SARTAJ/Br35H pending
+
+### Verifying the three upstream sources actually exist
+
+Before downloading anything, searched to confirm the slugs guessed in the original
+`docs/OPEN_QUESTIONS.md` entry are real (that entry explicitly flagged them as
+unverified). All three confirmed:
+
+- [SARTAJ Bhuvaji's Brain Tumor Classification (MRI)](https://www.kaggle.com/datasets/sartajbhuvaji/brain-tumor-classification-mri)
+  — confirmed, including the documented glioma-mislabeling issue the plan mentions.
+- [Br35H :: Brain Tumor Detection 2020](https://www.kaggle.com/datasets/ahmedhamada0/brain-tumor-detection)
+  — confirmed.
+- [Figshare brain tumor dataset (Cheng et al.)](https://figshare.com/articles/dataset/brain_tumor_dataset/1512427)
+  — confirmed: 3,064 T1-weighted images from 223 patients, DOI 10.6084/m9.figshare.1512427.v5,
+  meningioma 708 / glioma 1426 / pituitary 930. These exact counts independently match the
+  PNG-file counts found weeks earlier in the oversized 903MB zip the author first
+  downloaded by mistake -- confirms that zip's PNG component *was* this Figshare set.
+
+### Figshare: downloaded and matched
+
+Figshare has an open REST API (`api.figshare.com/v2/articles/1512427`), no login needed --
+downloaded all 4 zip parts (~885MB total) directly, MD5-verified against the API's
+reported checksums (all OK), extracted to 3,064 `.mat` files (MATLAB v7.3/HDF5 format,
+needs `h5py` -- added to `pyproject.toml`).
+
+**Bug found and fixed: MATLAB column-major storage.** First matching attempt (naive
+min-max normalization, no transpose) got essentially zero matches: 3/3064 images matched
+against the full 7,200-image manifest at distance <=5, versus Phase 1.2's own
+within-dataset calibration where genuine duplicates sit at that threshold. Distance
+distribution peaked at 12-16 bits (not ~32, so *some* signal existed, just badly offset)
+-- ruled out a bad normalization choice by rendering the images (they looked like clean,
+correctly-windowed MRI scans) and instead found the real cause: h5py reads HDF5 arrays
+row-major, but MATLAB writes them column-major, so every image was being read transposed
+(sideways) relative to its actual orientation. Confirmed the fix on a 300-file sample
+before committing to the full run: 219 *exact* (distance-0) hash matches immediately
+appeared. Full-dataset re-run: **1,829/7,200 manifest images (25.4%) matched to a Figshare
+source**, median match distance 0, max 4 -- among matched images, 75% are byte-for-byte
+identical hashes.
+
+**Sanity check that passed cleanly:** `notumor` gets 3/1,800 matches (Figshare has no
+healthy-scan class -- these 3 are almost certainly coincidental noise, not real matches).
+`glioma` 332, `meningioma` 678, `pituitary` 816 -- all plausible given Figshare's
+708/1426/930 source counts and this dataset's internal duplication.
+
+### Still pending
+
+SARTAJ and Br35H, both on Kaggle -- blocked on Kaggle API credentials (`~/.kaggle/kaggle.json`),
+which the author is setting up. `src/fedswarm/data/source_provenance.py` already supports
+both via `load_flat_image_dir()` (writes to the same schema as Figshare); only the download
+step remains. **`source_shift` partitioning itself is not yet wired up** -- that's next
+once all three sources are matched, since partitioning on ~25% coverage (Figshare only)
+would leave 3/4 of clients' data unlabeled.
+
+Module and 15 unit tests (synthetic `.mat`/image fixtures, including a test that plants an
+asymmetric image and would fail without the transpose fix) committed; 87 tests total, all
+green.

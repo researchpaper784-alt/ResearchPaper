@@ -23,6 +23,7 @@ dependencies = [
   "pillow==11.0.0",
   "imagehash==4.3.1",
   "kaggle==1.6.17",
+  "h5py==3.16.0",  # decodes Figshare's MATLAB v7.3 (.mat) files -- see data/source_provenance.py
 ]
 
 [project.optional-dependencies]

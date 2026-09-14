@@ -53,36 +53,35 @@ Author confirmed a Kaggle account exists and the dataset can be fetched from the
 / `KAGGLE_KEY` env vars) exist before relying on the Kaggle-API download path, and fall back
 to the documented manual-zip path (`data/raw/`) otherwise.
 
-## ⚠️ `source_shift` partitioning has no provenance labels (plan §1.4) — UNRESOLVED
+## `source_shift` partitioning has no provenance labels (plan §1.4) — IN PROGRESS
 
 The plan's `source_shift` regime partitions clients "by original source component
 (Figshare / SARTAJ / Br35H)" and is described as the most clinically honest setting — the
-one that makes this a medical FL paper rather than a CIFAR paper with MRI pasted in.
+one that makes this a medical FL paper rather than a CIFAR paper with MRI pasted in. The
+merged Kaggle dataset does not label which upstream source each image came from, so this
+regime is not implementable from the primary dataset alone.
 
-**Problem: the merged Kaggle dataset does not label which upstream source each image came
-from.** The merge flattens everything into `Training|Testing / {glioma, meningioma,
-notumor, pituitary}`. There is no per-image provenance field to partition on, so
-`source_shift` is not implementable from the primary dataset alone. The plan assumes this
-label exists; it does not.
+**Decision (author, 2026-09-14): hash-match against the upstream sources** (option 1 of
+the original three). All three source slugs are now verified real (previously flagged as
+unverified guesses — see below).
 
-Three options, in descending order of rigour:
+**Status:**
+- **Figshare — done.** Downloaded via Figshare's open API (no login), MD5-verified,
+  3,064 `.mat` files decoded and matched: 1,829/7,200 manifest images (25.4%) matched,
+  median distance 0. Hit and fixed a real bug along the way — MATLAB's column-major array
+  storage meant images were being read transposed; without the fix, match rate was ~0%.
+  Full writeup in `docs/EXPERIMENT_LOG.md`.
+- **SARTAJ and Br35H — pending.** Both on Kaggle, blocked on `~/.kaggle/kaggle.json` being
+  configured (in progress). `src/fedswarm/data/source_provenance.py`'s
+  `load_flat_image_dir()` already supports both — same code path, just needs the files.
+- **`source_shift` partitioning itself is not yet wired into `partition.py`** — still
+  raises `NotImplementedError`. Waiting for all three sources before implementing, since
+  partitioning on Figshare-only coverage (~25%) would leave most clients' data unlabeled.
 
-1. **Hash-match against the upstream sources.** Download the three original datasets and
-   match their images against the merged set by SHA256 and/or phash, recovering a
-   per-image `source_component` label. This is rigorous, reuses the Phase 1.2 hashing
-   machinery almost verbatim, and makes `source_shift` fully defensible. Cost: three extra
-   downloads and a matching pass. Note the figshare set ships as `.mat` files, not JPEGs,
-   so matching it needs a decode step and byte-level SHA256 will not work for it —
-   perceptual hashing would have to carry that case.
-2. **Proxy by image properties.** Sources differ in resolution/aspect conventions, so size
-   clusters may separate them. Cheap but weak, and a reviewer can attack it. Would have to
-   be reported honestly as a proxy, not ground truth.
-3. **Drop `source_shift`** and rely on the other four regimes (iid, dirichlet,
-   pathological, quantity_skew). Loses the paper's most clinically motivated setting.
-
-**Decision needed from the author.** Recommendation: option 1 if `source_shift` is to be
-claimed in the paper, since the labels are recoverable and the machinery already exists.
-Not a blocker for Phases 1.1–1.3 — only for 1.4's fifth regime.
+Confirmed dataset slugs (previously unverified guesses, now checked via search):
+[SARTAJ](https://www.kaggle.com/datasets/sartajbhuvaji/brain-tumor-classification-mri),
+[Br35H](https://www.kaggle.com/datasets/ahmedhamada0/brain-tumor-detection),
+[Figshare](https://figshare.com/articles/dataset/brain_tumor_dataset/1512427).
 
 ## ⚠️ Dataset variant is class-balanced, not the canonical release — DECISION NEEDED
 
