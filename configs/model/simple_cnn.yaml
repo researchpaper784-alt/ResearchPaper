@@ -1,0 +1,5 @@
+model:
+  name: simple_cnn
+  pretrained: false
+  norm: groupnorm
+  num_classes: 4

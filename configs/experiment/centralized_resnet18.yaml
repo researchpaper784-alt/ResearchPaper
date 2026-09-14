@@ -1,0 +1,20 @@
+# Phase 2.1 — secondary "does the ceiling hold with a larger, pretrained backbone" table.
+# Reduced compute relative to the primary SimpleCNN@112 config (docs/EXPERIMENT_LOG.md):
+# fewer max epochs since a pretrained backbone converges faster, and image_size/normalization
+# overridden to the values a pretrained ImageNet backbone expects.
+data:
+  image_size: 224
+  normalization: imagenet
+
+training:
+  optimizer: adamw
+  lr: 0.0001  # lower than the from-scratch config: fine-tuning a pretrained backbone
+  weight_decay: 0.0001
+  batch_size: 32
+  max_epochs: 30
+  early_stop_patience: 6
+  early_stop_metric: macro_f1
+  scheduler: cosine
+  drop_mixed_label: false
+
+output_dir: results/centralized

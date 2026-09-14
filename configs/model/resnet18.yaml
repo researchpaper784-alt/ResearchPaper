@@ -1,0 +1,5 @@
+model:
+  name: resnet18
+  pretrained: true
+  norm: groupnorm
+  num_classes: 4

@@ -1,0 +1,7 @@
+data:
+  manifest: data/processed/manifest.csv
+  cache_dir: data/processed/cache
+  image_size: 112
+  normalization: dataset  # 'dataset' for from-scratch, 'imagenet' for pretrained
+
+seed: 0

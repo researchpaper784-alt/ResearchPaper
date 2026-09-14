@@ -1,0 +1,15 @@
+# Phase 2.1 — centralized reference (the performance ceiling every FL method is measured
+# against, and the debugging oracle: if this doesn't reach sensible performance, the bug
+# is in data or model, not federation).
+training:
+  optimizer: adamw
+  lr: 0.001
+  weight_decay: 0.0001
+  batch_size: 32
+  max_epochs: 60
+  early_stop_patience: 8
+  early_stop_metric: macro_f1
+  scheduler: cosine
+  drop_mixed_label: false
+
+output_dir: results/centralized
