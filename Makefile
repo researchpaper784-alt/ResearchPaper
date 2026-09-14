@@ -1,0 +1,33 @@
+.PHONY: setup data test lint smoke main ablations figures tables clean
+
+setup:
+	uv venv --python 3.12 .venv
+	uv pip install -e ".[dev]" --python .venv/bin/python
+
+data:
+	.venv/bin/python -m fedswarm.data.download --verify
+
+test:
+	.venv/bin/python -m pytest -q
+
+lint:
+	.venv/bin/python -m ruff check src tests scripts
+
+smoke:
+	.venv/bin/python scripts/run_experiment.py --config configs/experiment/smoke.yaml
+
+main:
+	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml
+
+ablations:
+	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml
+
+figures:
+	.venv/bin/python scripts/make_figures.py
+
+tables:
+	.venv/bin/python scripts/make_tables.py
+
+clean:
+	find . -name '__pycache__' -type d -prune -exec rm -rf {} +
+	rm -rf .pytest_cache .mypy_cache .ruff_cache
