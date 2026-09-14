@@ -1,0 +1,29 @@
+{
+  "n_manifest_images": 7200,
+  "n_upstream_records": 10189,
+  "upstream_sources": [
+    "br35h",
+    "figshare",
+    "sartaj"
+  ],
+  "max_distance": 5,
+  "source_component_counts": {
+    "unmatched": 3185,
+    "figshare": 1531,
+    "sartaj": 1262,
+    "br35h": 1222
+  },
+  "match_rate": 0.5576388888888889,
+  "distance_distribution": {
+    "0": 3972,
+    "2": 8,
+    "4": 35,
+    "6": 168,
+    "8": 528,
+    "10": 1041,
+    "12": 982,
+    "14": 368,
+    "16": 90,
+    "18": 8
+  }
+}

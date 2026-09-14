@@ -53,32 +53,40 @@ Author confirmed a Kaggle account exists and the dataset can be fetched from the
 / `KAGGLE_KEY` env vars) exist before relying on the Kaggle-API download path, and fall back
 to the documented manual-zip path (`data/raw/`) otherwise.
 
-## `source_shift` partitioning has no provenance labels (plan §1.4) — IN PROGRESS
+## `source_shift` partitioning — RESOLVED 2026-09-14, with a documented coverage gap
 
 The plan's `source_shift` regime partitions clients "by original source component
-(Figshare / SARTAJ / Br35H)" and is described as the most clinically honest setting — the
-one that makes this a medical FL paper rather than a CIFAR paper with MRI pasted in. The
-merged Kaggle dataset does not label which upstream source each image came from, so this
-regime is not implementable from the primary dataset alone.
+(Figshare / SARTAJ / Br35H)" — the most clinically honest setting, since real
+cross-hospital heterogeneity is feature/acquisition shift, not just label imbalance. The
+merged Kaggle dataset carries no such label natively.
 
-**Decision (author, 2026-09-14): hash-match against the upstream sources** (option 1 of
-the original three). All three source slugs are now verified real (previously flagged as
-unverified guesses — see below).
+**Resolved via hash-matching against all three upstream sources**, all now downloaded,
+verified, and matched (`src/fedswarm/data/source_provenance.py`; full numbers and the
+MATLAB-transpose bug hit along the way in `docs/EXPERIMENT_LOG.md`):
 
-**Status:**
-- **Figshare — done.** Downloaded via Figshare's open API (no login), MD5-verified,
-  3,064 `.mat` files decoded and matched: 1,829/7,200 manifest images (25.4%) matched,
-  median distance 0. Hit and fixed a real bug along the way — MATLAB's column-major array
-  storage meant images were being read transposed; without the fix, match rate was ~0%.
-  Full writeup in `docs/EXPERIMENT_LOG.md`.
-- **SARTAJ and Br35H — pending.** Both on Kaggle, blocked on `~/.kaggle/kaggle.json` being
-  configured (in progress). `src/fedswarm/data/source_provenance.py`'s
-  `load_flat_image_dir()` already supports both — same code path, just needs the files.
-- **`source_shift` partitioning itself is not yet wired into `partition.py`** — still
-  raises `NotImplementedError`. Waiting for all three sources before implementing, since
-  partitioning on Figshare-only coverage (~25%) would leave most clients' data unlabeled.
+| Source | Matched images |
+|---|---|
+| Figshare | 1,531 |
+| SARTAJ | 1,262 |
+| Br35H | 1,222 |
+| **Total** | **4,015 / 7,200 (55.8%)**, median distance 0 |
 
-Confirmed dataset slugs (previously unverified guesses, now checked via search):
+**`source_shift` is implemented in `partition.py`** (`_source_shift()`): clients grouped
+by source, group size proportional to that source's available data, each source with any
+data guaranteed ≥1 client.
+
+**Known, permanent limitation — state this in the paper:** at the pseudo-patient level
+(the actual partitioning unit), coverage is **46.9% of the training split** (1,563/3,330
+placed, K=20). Units with no recovered provenance are excluded from this regime
+specifically, not forced into a bucket, which would blur the cross-site signal the regime
+exists to isolate. **Any `source_shift` result must be reported as computed over this
+~47%-coverage subset**, not the full training set — say so explicitly wherever the regime
+is used (results tables, figures, methods section). This is an honest answer to "how do
+you know the source label," not a hidden assumption, but it does mean `source_shift`'s
+client pool is meaningfully smaller than the other four regimes'.
+
+Confirmed dataset slugs (previously unverified guesses, checked via search and live
+Kaggle API before downloading):
 [SARTAJ](https://www.kaggle.com/datasets/sartajbhuvaji/brain-tumor-classification-mri),
 [Br35H](https://www.kaggle.com/datasets/ahmedhamada0/brain-tumor-detection),
 [Figshare](https://figshare.com/articles/dataset/brain_tumor_dataset/1512427).

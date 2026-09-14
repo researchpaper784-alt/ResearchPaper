@@ -20,6 +20,8 @@ data/processed/*
 !data/processed/manifest.csv
 !data/processed/leakage_report.json
 !data/processed/split_stats.json
+!data/processed/source_provenance.csv
+!data/processed/source_provenance_report.json
 
 results/*
 !results/.gitkeep

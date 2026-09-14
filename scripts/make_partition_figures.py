@@ -31,6 +31,7 @@ REGIMES: dict[str, PartitionSpec] = {
     "dirichlet_1.0": PartitionSpec(regime="dirichlet", alpha=1.0),
     "pathological_2": PartitionSpec(regime="pathological", classes_per_client=2),
     "quantity_skew": PartitionSpec(regime="quantity_skew", skew_sigma=1.0),
+    "source_shift": PartitionSpec(regime="source_shift"),
 }
 
 

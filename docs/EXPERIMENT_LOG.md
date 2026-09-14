@@ -268,3 +268,84 @@ would leave 3/4 of clients' data unlabeled.
 Module and 15 unit tests (synthetic `.mat`/image fixtures, including a test that plants an
 asymmetric image and would fail without the transpose fix) committed; 87 tests total, all
 green.
+
+---
+
+## 2026-09-14 — source_shift wired up; Kaggle auth needed a CLI upgrade
+
+### Kaggle's newer bearer-token auth
+
+The author's new Kaggle API token (`KGAT_...` prefix) didn't work with the pinned
+`kaggle==1.6.17` CLI -- that version only implements the legacy `kaggle.json`
+`{username, key}` scheme. Confirmed via web search and Kaggle's own `kaggle-cli` docs:
+newer tokens use `KAGGLE_API_TOKEN` or `~/.kaggle/access_token`, supported from
+`kaggle==2.x`. Upgraded the pin to `2.2.4` and it authenticated immediately. Token stored
+at `~/.kaggle/access_token` (chmod 600), not `kaggle.json`.
+`fedswarm.data.download.has_kaggle_credentials()` now checks all four forms (legacy
+json/env-pair, new token file/env).
+
+### SARTAJ and Br35H downloaded and matched
+
+With auth working: SARTAJ (3,264 images, `Training|Testing/{glioma,meningioma,
+no_tumor,pituitary}_tumor`) and Br35H (3,861 images, `yes/no/pred` + a nested
+Mask-RCNN train/val/test split) downloaded via `kaggle datasets download`, extracted,
+loaded through the existing `load_flat_image_dir()` path (no code changes needed --
+built generically enough in the earlier Figshare-only checkpoint).
+
+**Full three-source match, replacing the earlier Figshare-only 25.4%:**
+
+| Source | Upstream images | Matched manifest images |
+|---|---|---|
+| Figshare | 3,064 | 1,531 |
+| SARTAJ | 3,264 | 1,262 |
+| Br35H | 3,861 | 1,222 |
+| **Total matched** | | **4,015 / 7,200 (55.8%)** |
+
+Median match distance 0 (exact hash), max 4, mean 0.04 -- overwhelmingly exact matches,
+not threshold-boundary noise.
+
+**Clean validation:** `notumor` reaches **100% match coverage** (1,222 Br35H + 578
+SARTAJ, 0 Figshare) -- exactly consistent with class support (Figshare has no
+healthy-scan class). `glioma`/`meningioma`/`pituitary` match against Figshare+SARTAJ
+only, never Br35H -- meaning Br35H's contribution to this merged dataset is specifically
+its `no` (healthy) folder, not its `yes` (tumor) folder. This is a real, falsifiable
+property of how the merge was constructed, not an artifact of matching quality.
+
+**At the pseudo-patient level (the actual partitioning unit), coverage is lower: 46.5%
+overall, 46.9% within the training split specifically (1,563/3,330).** This is expected,
+not a regression -- a duplicate cluster only needs ONE member to match for the whole
+cluster to count as "matched" at the image level, but counts as exactly one pseudo-patient
+either way. The remaining ~53% genuinely lack recoverable provenance, most likely from
+further reprocessing (resizing/recompression) between the upstream sources and this
+merged variant that pushes them past the phash threshold this method can bridge.
+
+### source_shift regime implemented
+
+`_source_shift()` in `partition.py`: clients are grouped by source, group sizes
+proportional to each source's available pseudo-patient count (each source with any data
+guaranteed >=1 client), and within a group that source's data is split evenly. Units with
+no recovered provenance are **excluded from this regime specifically** (documented in
+`n_units_excluded_no_provenance`), not folded into an arbitrary bucket that would blur
+the cross-site signal the regime exists to isolate.
+
+Real result at K=20: **1,563 training pseudo-patients placed, 1,767 excluded** (46.9%
+coverage), JS divergence 0.247, size Gini 0.072. The class-composition figure
+(`paper/figures/partition_source_shift.pdf`) shows exactly the expected structure:
+Br35H-sourced clients are 100% notumor, Figshare/SARTAJ-sourced clients are a
+glioma/meningioma/pituitary mix with zero notumor -- a clean, visually verifiable
+consequence of Br35H's class support, not a tuning artifact.
+
+**Consequence for the paper:** report `source_shift` results explicitly as computed over
+the ~47%-coverage subset with known provenance, not the full training set. State the
+coverage figure alongside any `source_shift` result. This is honest and defensible --
+A reviewer asking "how do you know the source label" now has a real, quantified answer
+instead of a silent assumption.
+
+Hit and fixed a real performance bug while wiring this up: `build_partition`'s retry loop
+(when a random split doesn't hit `min_client_size`) was re-reading and re-grouping the
+~1.6MB source_provenance.csv from disk on every attempt, causing a test to spin for 90+
+seconds instead of failing fast. Fixed with `@lru_cache` on the loader.
+
+95 tests total (was 87), all green: 9 new source_shift-specific tests using synthetic
+pseudo-patient->source dicts injected via `build_partition`'s new `source_labels`
+parameter, independent of the real CSV.

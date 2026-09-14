@@ -22,7 +22,7 @@ dependencies = [
   "rich>=14.0.0,<15.0.0",
   "pillow==11.0.0",
   "imagehash==4.3.1",
-  "kaggle==1.6.17",
+  "kaggle==2.2.4",  # 1.x only supports the legacy kaggle.json auth; 2.x adds the newer bearer-token auth (KAGGLE_API_TOKEN / ~/.kaggle/access_token)
   "h5py==3.16.0",  # decodes Figshare's MATLAB v7.3 (.mat) files -- see data/source_provenance.py
 ]
 

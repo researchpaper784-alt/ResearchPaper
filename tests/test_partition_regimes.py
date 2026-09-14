@@ -150,13 +150,6 @@ def test_quantity_skew_skews_size_but_not_labels(synthetic_manifest) -> None:
     assert partition.diagnostics["js_divergence"] < 0.1, "labels should stay balanced"
 
 
-def test_source_shift_raises_with_a_pointer_to_the_open_question(synthetic_manifest) -> None:
-    spec = PartitionSpec(regime="source_shift", num_clients=8, seed=0)
-
-    with pytest.raises(NotImplementedError, match="OPEN_QUESTIONS"):
-        build_partition(synthetic_manifest, spec)
-
-
 def test_impossible_min_client_size_raises_rather_than_looping_forever(
     synthetic_manifest,
 ) -> None:

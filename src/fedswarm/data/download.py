@@ -82,23 +82,34 @@ def sha256_file(path: Path, chunk_size: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
-def download_via_kaggle_api(dest_dir: Path) -> Path:
-    """Download the dataset archive with the Kaggle CLI. Returns the archive path."""
-    dest_dir.mkdir(parents=True, exist_ok=True)
+def has_kaggle_credentials() -> bool:
+    """Kaggle has two live auth schemes: the legacy kaggle.json {username, key} pair
+    (kaggle CLI 1.x), and the newer bearer-token scheme (kaggle CLI 2.x+), read from
+    KAGGLE_API_TOKEN or ~/.kaggle/access_token. Both are checked since either works with
+    the pinned kaggle==2.2.4."""
     has_json = (Path.home() / ".kaggle" / "kaggle.json").exists()
-    has_env = bool(os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"))
-    if not (has_json or has_env):
+    has_env_pair = bool(os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"))
+    has_token_env = bool(os.environ.get("KAGGLE_API_TOKEN"))
+    has_token_file = (Path.home() / ".kaggle" / "access_token").exists()
+    return has_json or has_env_pair or has_token_env or has_token_file
+
+
+def download_via_kaggle_api(dest_dir: Path, dataset_slug: str = DATASET_SLUG) -> Path:
+    """Download a dataset archive with the Kaggle CLI. Returns the archive path."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    if not has_kaggle_credentials():
         raise RuntimeError(
             "No Kaggle credentials found.\n"
-            "  Option A: download kaggle.json from https://www.kaggle.com/settings "
-            "(Account -> API -> Create New Token) and save it to ~/.kaggle/kaggle.json "
-            "with chmod 600.\n"
-            "  Option B: set KAGGLE_USERNAME and KAGGLE_KEY environment variables.\n"
+            "  Option A (newer): create a token at https://www.kaggle.com/settings "
+            "(API section) and save it to ~/.kaggle/access_token, or set "
+            "KAGGLE_API_TOKEN.\n"
+            "  Option B (legacy): download kaggle.json from the same page and save it "
+            "to ~/.kaggle/kaggle.json with chmod 600, or set KAGGLE_USERNAME/KAGGLE_KEY.\n"
             f"  Option C: download the zip manually from {DATASET_URL} and run "
             "`--zip <path-to-zip>`."
         )
 
-    cmd = ["kaggle", "datasets", "download", "-d", DATASET_SLUG, "-p", str(dest_dir)]
+    cmd = ["kaggle", "datasets", "download", "-d", dataset_slug, "-p", str(dest_dir)]
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
