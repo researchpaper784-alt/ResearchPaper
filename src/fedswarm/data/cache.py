@@ -75,6 +75,64 @@ def dataset_statistics(array: np.ndarray, manifest: pd.DataFrame) -> dict:
     }
 
 
+def build_and_save_cache(
+    manifest: pd.DataFrame, split_parent: Path, size: int, out_dir: Path = CACHE_DIR
+) -> Path:
+    """Builds the cache array + stats metadata and writes both to disk. Returns the
+    array's path. Shared by the CLI (unconditional rebuild) and `ensure_cache` (build
+    only if missing)."""
+    array = build_cache(manifest, split_parent, size)
+    stats = dataset_statistics(array, manifest)
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    array_path = out_dir / f"images_{size}.npy"
+    np.save(array_path, array)
+
+    meta = {
+        "size": size,
+        "n_images": int(len(manifest)),
+        "dtype": "uint8",
+        "layout": "single-channel (N, size, size); replicate to 3 channels at load time",
+        "manifest_order": "row i of the array corresponds to row i of the manifest",
+        "manifest_sha_of_paths": pd.util.hash_pandas_object(manifest["path"]).sum().item(),
+        "statistics": stats,
+        "bytes": int(array.nbytes),
+    }
+    (out_dir / f"images_{size}_meta.json").write_text(json.dumps(meta, indent=2))
+
+    print(f"\ncached {len(manifest)} images at {size}x{size} ({array.nbytes / 1e6:.1f} MB)")
+    print(f"train-set mean {stats['mean']:.4f}  std {stats['std']:.4f} "
+          f"(over {stats['n_images_used']} training representatives)")
+    print(f"Wrote {array_path}")
+    return array_path
+
+
+def ensure_cache(
+    size: int,
+    manifest_path: Path | str = MANIFEST_CSV,
+    cache_dir: Path | str = CACHE_DIR,
+    root: Path | str | None = None,
+) -> Path:
+    """Returns the cache array's path, building it first if it doesn't exist yet.
+
+    Exists because Colab/Kaggle sessions can reset mid-project (a disconnect wipes
+    /content, a fresh Kaggle session starts clean), silently deleting a previously-built
+    cache while the cloned repo (via git) survives -- the exact failure mode that broke
+    the author's first real Colab run: the cache from an earlier session was gone, and
+    the training script's only response was to raise and explain how to rebuild it by
+    hand. Auto-building removes that manual step entirely.
+    """
+    array_path = Path(cache_dir) / f"images_{size}.npy"
+    if array_path.exists():
+        return array_path
+
+    print(f"No cache at {array_path} -- building it now (this can take a minute)...")
+    manifest = pd.read_csv(manifest_path)
+    split_parent = find_split_parent(resolve_root(root))
+    return build_and_save_cache(manifest, split_parent, size, cache_dir)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default=None)
@@ -85,32 +143,7 @@ def main() -> int:
 
     manifest = pd.read_csv(args.manifest)
     split_parent = find_split_parent(resolve_root(args.root))
-
-    array = build_cache(manifest, split_parent, args.size)
-    stats = dataset_statistics(array, manifest)
-
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    array_path = out_dir / f"images_{args.size}.npy"
-    np.save(array_path, array)
-
-    meta = {
-        "size": args.size,
-        "n_images": int(len(manifest)),
-        "dtype": "uint8",
-        "layout": "single-channel (N, size, size); replicate to 3 channels at load time",
-        "manifest_order": "row i of the array corresponds to row i of the manifest",
-        "manifest_sha_of_paths": pd.util.hash_pandas_object(manifest["path"]).sum().item(),
-        "statistics": stats,
-        "bytes": int(array.nbytes),
-    }
-    (out_dir / f"images_{args.size}_meta.json").write_text(json.dumps(meta, indent=2))
-
-    print(f"\ncached {len(manifest)} images at {args.size}x{args.size} "
-          f"({array.nbytes / 1e6:.1f} MB)")
-    print(f"train-set mean {stats['mean']:.4f}  std {stats['std']:.4f} "
-          f"(over {stats['n_images_used']} training representatives)")
-    print(f"Wrote {array_path}")
+    build_and_save_cache(manifest, split_parent, args.size, args.out_dir)
     return 0
 
 

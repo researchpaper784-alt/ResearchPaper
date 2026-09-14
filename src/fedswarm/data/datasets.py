@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
-from fedswarm.data.cache import CACHE_DIR
+from fedswarm.data.cache import CACHE_DIR, ensure_cache
 from fedswarm.data.download import CLASSES
 from fedswarm.data.splits import MANIFEST_CSV
 
@@ -29,12 +29,23 @@ def load_manifest(path: Path | str = MANIFEST_CSV) -> pd.DataFrame:
     return pd.read_csv(manifest)
 
 
-def load_cache(size: int = 112, cache_dir: Path | str = CACHE_DIR) -> np.ndarray:
+def load_cache(
+    size: int = 112,
+    cache_dir: Path | str = CACHE_DIR,
+    manifest_path: Path | str = MANIFEST_CSV,
+    root: Path | str | None = None,
+    auto_build: bool = True,
+) -> np.ndarray:
+    """Loads the decoded-image cache, building it first if missing (the common case
+    after a Colab/Kaggle session reset wipes /content but the git-cloned repo survives).
+    Pass auto_build=False to get the old fail-fast behaviour instead."""
     array_path = Path(cache_dir) / f"images_{size}.npy"
     if not array_path.exists():
-        raise FileNotFoundError(
-            f"No cache at {array_path}. Run `python -m fedswarm.data.cache --size {size}`."
-        )
+        if not auto_build:
+            raise FileNotFoundError(
+                f"No cache at {array_path}. Run `python -m fedswarm.data.cache --size {size}`."
+            )
+        ensure_cache(size, manifest_path, cache_dir, root)
     return np.load(array_path, mmap_mode="r")
 
 
