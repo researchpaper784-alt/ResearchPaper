@@ -180,8 +180,10 @@ def audit(
     all_edges = list(set(exact_edges) | phash_set)
     labels = components_from_edges(len(records), all_edges)
 
-    for rec, label in zip(records, labels):
+    for rec, label, digest, phash_row in zip(records, labels, sha_list, phash_bits):
         rec["pseudo_patient_id"] = int(label)
+        rec["sha256"] = digest
+        rec["phash"] = "".join(str(int(b)) for b in phash_row.astype(np.uint8))
 
     # Cross-split leakage: a component whose images live in more than one original split.
     splits_per_component: dict[int, set[str]] = defaultdict(set)
@@ -293,7 +295,9 @@ def main() -> int:
     records_path = Path(args.records_out)
     records_path.parent.mkdir(parents=True, exist_ok=True)
     with records_path.open("w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["path", "split", "label", "pseudo_patient_id"])
+        writer = csv.DictWriter(
+            f, fieldnames=["path", "split", "label", "pseudo_patient_id", "sha256", "phash"]
+        )
         writer.writeheader()
         for rec in records:
             writer.writerow({k: rec[k] for k in writer.fieldnames})

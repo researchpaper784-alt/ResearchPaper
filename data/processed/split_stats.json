@@ -1,0 +1,67 @@
+{
+  "seed": 0,
+  "n_images_total": 7200,
+  "n_pseudo_patients": 4755,
+  "n_mixed_label_components": 25,
+  "global_class_fractions": {
+    "glioma": 0.3091,
+    "meningioma": 0.2917,
+    "pituitary": 0.2787,
+    "notumor": 0.1205
+  },
+  "per_split": {
+    "test": {
+      "n_pseudo_patients": 950,
+      "n_images_all": 1415,
+      "class_counts": {
+        "glioma": 295,
+        "meningioma": 274,
+        "pituitary": 266,
+        "notumor": 115
+      },
+      "class_fractions": {
+        "glioma": 0.3105,
+        "meningioma": 0.2884,
+        "pituitary": 0.28,
+        "notumor": 0.1211
+      },
+      "max_deviation_pp": 0.327
+    },
+    "train": {
+      "n_pseudo_patients": 3330,
+      "n_images_all": 5050,
+      "class_counts": {
+        "glioma": 1030,
+        "meningioma": 974,
+        "pituitary": 926,
+        "notumor": 400
+      },
+      "class_fractions": {
+        "glioma": 0.3093,
+        "meningioma": 0.2925,
+        "pituitary": 0.2781,
+        "notumor": 0.1201
+      },
+      "max_deviation_pp": 0.08
+    },
+    "val": {
+      "n_pseudo_patients": 475,
+      "n_images_all": 735,
+      "class_counts": {
+        "glioma": 145,
+        "meningioma": 139,
+        "pituitary": 133,
+        "notumor": 58
+      },
+      "class_fractions": {
+        "glioma": 0.3053,
+        "meningioma": 0.2926,
+        "pituitary": 0.28,
+        "notumor": 0.1221
+      },
+      "max_deviation_pp": 0.389
+    }
+  },
+  "max_class_deviation_pp": 0.389,
+  "n_components_spanning_splits": 0
+}

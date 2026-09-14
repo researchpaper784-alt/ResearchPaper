@@ -10,9 +10,16 @@ venv/
 
 data/raw/*
 !data/raw/.gitkeep
+!data/raw/DATASET_CARD.md
 data/processed/*
 !data/processed/.gitkeep
 !data/processed/partitions/.gitkeep
+# Small, reproducible artifacts the paper cites. The manifest IS the split, so it ships
+# with the paper; pseudo_patients.csv stays out as a regenerable intermediate that the
+# manifest supersedes.
+!data/processed/manifest.csv
+!data/processed/leakage_report.json
+!data/processed/split_stats.json
 
 results/*
 !results/.gitkeep
