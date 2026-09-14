@@ -30,6 +30,21 @@ environment (both Linux), where the `simulation` extra installs cleanly. This is
 blocker for locally running anything from Phase 3 (`ClientApp`/`ServerApp`/`start()`)
 onward — flagged here rather than silently worked around.
 
+Confirmed directly (not just via the resolver): downloaded the official
+`@flwrlabs/quickstart-pytorch` reference app and ran `flwr run . --stream` on this
+machine — it fails with `Unable to launch 'flower-superlink' for local simulation:
+[Errno 2] No such file or directory: 'flower-superlink'`, since that binary ships with the
+`simulation` extra. So the plan's §0.2 acceptance criterion ("run the unmodified Flower
+quickstart ≥2 rounds locally") cannot be satisfied on this machine at all — full detail in
+`docs/FLOWER_API_NOTES.md`. Everything else that criterion was meant to de-risk (the real
+`Strategy`/`FedAvg`/`ArrayRecord` API surface) was verified by reading the installed
+package and the reference app's source directly.
+
+A secondary, unrelated finding from the same install attempts: `torch` has no Intel-macOS
+wheel past `2.2.x`, and `torch==2.2.2` needs `numpy<2` (verified `torch.from_numpy` crashes
+under numpy 2.1.3, works under 1.26.4) — pinned in `pyproject.toml`. Re-evaluate this pin
+in the Linux training environment, where it doesn't apply.
+
 ## Kaggle dataset access
 
 Author confirmed a Kaggle account exists and the dataset can be fetched from there, but
