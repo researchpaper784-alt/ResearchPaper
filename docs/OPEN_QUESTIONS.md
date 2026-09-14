@@ -52,3 +52,100 @@ Author confirmed a Kaggle account exists and the dataset can be fetched from the
 `fedswarm.data.download`. Phase 1 must verify `~/.kaggle/kaggle.json` (or `KAGGLE_USERNAME`
 / `KAGGLE_KEY` env vars) exist before relying on the Kaggle-API download path, and fall back
 to the documented manual-zip path (`data/raw/`) otherwise.
+
+## ⚠️ `source_shift` partitioning has no provenance labels (plan §1.4) — UNRESOLVED
+
+The plan's `source_shift` regime partitions clients "by original source component
+(Figshare / SARTAJ / Br35H)" and is described as the most clinically honest setting — the
+one that makes this a medical FL paper rather than a CIFAR paper with MRI pasted in.
+
+**Problem: the merged Kaggle dataset does not label which upstream source each image came
+from.** The merge flattens everything into `Training|Testing / {glioma, meningioma,
+notumor, pituitary}`. There is no per-image provenance field to partition on, so
+`source_shift` is not implementable from the primary dataset alone. The plan assumes this
+label exists; it does not.
+
+Three options, in descending order of rigour:
+
+1. **Hash-match against the upstream sources.** Download the three original datasets and
+   match their images against the merged set by SHA256 and/or phash, recovering a
+   per-image `source_component` label. This is rigorous, reuses the Phase 1.2 hashing
+   machinery almost verbatim, and makes `source_shift` fully defensible. Cost: three extra
+   downloads and a matching pass. Note the figshare set ships as `.mat` files, not JPEGs,
+   so matching it needs a decode step and byte-level SHA256 will not work for it —
+   perceptual hashing would have to carry that case.
+2. **Proxy by image properties.** Sources differ in resolution/aspect conventions, so size
+   clusters may separate them. Cheap but weak, and a reviewer can attack it. Would have to
+   be reported honestly as a proxy, not ground truth.
+3. **Drop `source_shift`** and rely on the other four regimes (iid, dirichlet,
+   pathological, quantity_skew). Loses the paper's most clinically motivated setting.
+
+**Decision needed from the author.** Recommendation: option 1 if `source_shift` is to be
+claimed in the paper, since the labels are recoverable and the machinery already exists.
+Not a blocker for Phases 1.1–1.3 — only for 1.4's fifth regime.
+
+## ⚠️ Dataset variant is class-balanced, not the canonical release — DECISION NEEDED
+
+The archive obtained on 2026-09-14 is **perfectly class-balanced**: exactly 1400 images per
+class in `Training/` and 400 per class in `Testing/` (7,200 total). The widely-cited
+Nickparvar release is class-*imbalanced* (~1321/1339/1595/1457 train, ~7,023 total). So
+this is a rebalanced variant, not the canonical dataset the plan names.
+
+Why it matters beyond pedantry:
+
+1. **The plan's primary-metric justification assumes imbalance.** §6.3 argues macro-F1 over
+   accuracy because "the dataset is class-imbalanced and the clinical cost of a missed
+   tumor is asymmetric." On a perfectly balanced dataset, macro-F1 and accuracy nearly
+   coincide and that argument evaporates. The metric choice is still defensible (per-class
+   clinical cost is still asymmetric) but the stated reason has to change.
+2. **Comparability to published results is weakened.** Numbers from this variant cannot be
+   directly compared to papers using the canonical release.
+3. **Unknown rebalancing mechanism.** If balance was achieved by oversampling/augmenting
+   minority classes, that is itself a duplication source. The Phase 1.2 audit found 34%
+   redundancy overall, but it has not been checked whether redundancy is *concentrated* in
+   particular classes, which would be the signature of augmentation-based balancing.
+
+Options: (a) keep this variant, document it precisely, and restate the macro-F1 rationale;
+(b) additionally fetch the canonical release and use it as primary; (c) use both and show
+results hold on each (strongest, cheapest as a robustness note since the pipeline is
+dataset-agnostic).
+
+**Not a blocker for building Phases 1.3–1.4** — the pipeline is identical either way. Decide
+before the main sweep (Phase 6) commits GPU-weeks to one variant.
+
+**Next diagnostic to run:** per-class redundancy rate (images per pseudo-patient, broken
+down by class). If one class is markedly more redundant, that is evidence of
+augmentation-based balancing and pushes toward option (b) or (c).
+
+### Diagnostic result (2026-09-14) — the balance is manufactured by duplicating `notumor`
+
+Per-class redundancy (images vs. unique pseudo-patients at t=5):
+
+| Class | Images | Unique pseudo-patients | Redundancy |
+|---|---|---|---|
+| glioma | 1,800 | 1,476 | 18.0% |
+| meningioma | 1,800 | 1,403 | 22.1% |
+| pituitary | 1,800 | 1,326 | 26.3% |
+| **notumor** | **1,800** | **577** | **67.9%** |
+
+`notumor` is 2.6–3.8× more redundant than every tumour class, in both Training (60.9%) and
+Testing (44.8%). The uniform 1400/400 counts are therefore an artifact of **padding the
+`notumor` class with duplicates**, not a property of the underlying data.
+
+Three consequences, one of them good:
+
+1. **The apparent class balance is fake.** In unique-patient terms the dataset is strongly
+   imbalanced — and imbalanced *against* `notumor* (577 vs ~1,300–1,500 per tumour class),
+   which is the opposite direction from the canonical release where `notumor` is the
+   largest class.
+2. **Good news: the plan's macro-F1 justification survives.** After de-duplication the
+   dataset is genuinely imbalanced, so §6.3's argument for macro-F1 over accuracy holds
+   again — just for a different reason than the plan states. Update the wording, keep the
+   metric.
+3. **Any result computed on the raw variant is doubly compromised** — 28% cross-split
+   leakage *and* a majority-duplicate `notumor` class. Our pseudo-patient collapse removes
+   both by construction, which is precisely why Phase 1.2 exists.
+
+This raises the value of option (b)/(c) (also fetching the canonical release): it would
+show whether this duplication is an artifact of *this* variant or inherited from upstream.
+Cheap to check later; not a blocker now, since de-duplication neutralises it either way.

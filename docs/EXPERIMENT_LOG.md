@@ -62,7 +62,7 @@ this table.** Do not cite these numbers anywhere until measured.
 
 5. **Notebook runner deferred to after Phase 1.**
 
-### Consequences for Phase 1 (why this was decided first)
+### Consequences for Phase 1 (why this was decided first, cont. below)
 
 - Preprocess and **cache decoded images as `uint8` arrays at 112²**, not JPEG paths
   re-decoded per round. Decoding ~11,400 images per round through PIL costs an estimated
@@ -73,3 +73,90 @@ this table.** Do not cite these numbers anywhere until measured.
 - **Manifest paths must be relative to a dataset root supplied by an environment
   variable** (`FEDSWARM_DATA_ROOT`), never absolute — the same committed `manifest.csv`
   has to resolve against both the local download and Kaggle's `/kaggle/input/...` mount.
+
+---
+
+## 2026-09-14 — Phase 1.2 leakage audit: the dataset has severe train/test contamination
+
+### What was received
+
+The archive the author downloaded (`archive (2).zip`, 164 MB, 7,200 files) has the
+Nickparvar naming convention (`Tr-gl_*`, `Te-pi_*`) and `Training/`/`Testing/` structure,
+but is **perfectly class-balanced** — exactly 1400 per class in Training and 400 per class
+in Testing. The widely-cited Nickparvar dataset is imbalanced (~1321/1339/1595/1457 train).
+So this is a rebalanced variant, not the canonical release. Flagged; see Open question
+below.
+
+Observed from disk: 447 distinct image sizes; colour modes RGB 4129, L 3067, RGBA 3, P 1.
+
+### Headline finding
+
+| Measurement | Value |
+|---|---|
+| Images | 7,200 |
+| Unique pseudo-patients (t=5) | **4,755** (34% of the dataset is redundant) |
+| Exact byte-identical duplicates | 187 |
+| Largest duplicate component | 28 images |
+| **Cross-split leaked images (original split)** | **2,030 — 28.2% of the dataset** |
+| Cross-split leaked components | 520 |
+| phash/dhash agreement | 0.836 |
+
+**28% of this dataset straddles its own train/test boundary.** Anyone who trains on the
+provided split and reports test metrics is testing on training data. This is the
+mechanism behind the 99%+ accuracies that saturate this dataset's literature.
+
+### Threshold calibration (the plan requires this be chosen by inspection, not assumed)
+
+phash with `hash_size=8` yields only even Hamming distances here, so thresholds pair up
+(t=0≡1, t=2≡3, t=4≡5, ...).
+
+| t | phash edges | components | leaked images | mixed-label components |
+|---|---|---|---|---|
+| 0 | 1,930 | 6,212 | **855** | 1 |
+| 2 | 3,885 | 5,639 | 1,322 | 4 |
+| **4/5 (chosen)** | **5,893** | **4,755** | **2,030** | **25** |
+| 6 | 8,799 | 3,425 | 3,309 | 61 |
+| 8 | 14,853 | 1,877 | 5,098 | 45 |
+| 10 | 31,956 | 722 | 6,411 | 11 |
+
+**Even at t=0 — bit-identical perceptual hashes — 855 images (11.9%) leak across the
+split.** That is an indisputable lower bound requiring no threshold judgement at all, and
+it is the number to quote if a reviewer disputes the calibration.
+
+Visual inspection of sampled pairs (contact sheets regenerate via
+`scripts/audit_threshold.py` into `data/processed/audit/`):
+
+- **d=0:** 8/8 sampled pairs are unambiguous duplicates; 5/8 straddle Training/Testing
+  (e.g. `Training/meningioma/Tr-me_846.jpg` vs `Testing/meningioma/Te-me_117.jpg` —
+  same patient, same tumour, identical image). Zero false positives.
+- **d=6:** degradation begins. 1/8 is a clear false positive (`Tr-no_297` vs `Tr-no_878`
+  — different patients, different sequences entirely). Several others are the same
+  patient's *adjacent slices*, which pseudo-patient grouping is meant to catch and are
+  therefore true positives by our definition.
+- Mixed-label components (a proxy for false merges) rise 25 → 61 between t=4 and t=6.
+
+**Chosen: phash threshold 5 (≡4), hash_size 8.** Estimated false-positive rate at the
+operating point: 0/8 at d≤4 in the inspected sample, with the first clear FP appearing at
+d=6. This coincides with the plan's suggested default, now earned rather than assumed.
+
+### Consequences
+
+1. The paper must report leakage in the original split as a finding, with the t=0 lower
+   bound (855) alongside the operating-point figure (2,030).
+2. All splits are rebuilt at pseudo-patient level in Phase 1.3, making leakage zero by
+   construction. Expect the resulting "clean" accuracy ceiling (Phase 2.1) to be
+   **materially lower** than this dataset's published results — that gap is a feature, and
+   the honest ceiling to measure every FL method against.
+3. 4,755 pseudo-patients (not 7,200 images) is the real unit count for partitioning. At
+   K=20 clients that is ~238 pseudo-patients each — still workable.
+4. The 25 mixed-label components need a look before Phase 1.3: they are either residual
+   threshold error or genuine dataset mislabeling (the SARTAJ component has documented
+   glioma mislabeling).
+
+### Open question raised
+
+Whether to switch to the canonical imbalanced Nickparvar release. Arguments for: it is
+what the literature uses, so results are comparable, and the plan's macro-F1 justification
+rests on class imbalance which this variant has removed. Arguments against: this variant is
+already downloaded and audited, and our re-split discards the provided split anyway. The
+class-balance question matters more than it looks — see `docs/OPEN_QUESTIONS.md`.
