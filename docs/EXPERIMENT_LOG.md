@@ -160,3 +160,52 @@ what the literature uses, so results are comparable, and the plan's macro-F1 jus
 rests on class imbalance which this variant has removed. Arguments against: this variant is
 already downloaded and audited, and our re-split discards the provided split anyway. The
 class-balance question matters more than it looks — see `docs/OPEN_QUESTIONS.md`.
+
+---
+
+## 2026-09-14 — Phase 1.4 partitioning: measured heterogeneity of each regime
+
+Partitions are over the 3,330 **training pseudo-patients** (val/test stay global and
+server-side). K=20, seed=0. Two diagnostics are recorded per partition and carried into
+every result file: mean pairwise Jensen-Shannon divergence between client label
+distributions (label skew) and the Gini coefficient of client sizes (size skew).
+
+| Regime | JS divergence | size Gini | min client | max client |
+|---|---|---|---|---|
+| iid | 0.007 | 0.002 | 166 | 167 |
+| dirichlet α=0.1 | 0.541 | 0.483 | 12 | 647 |
+| dirichlet α=0.3 | 0.435 | 0.326 | 34 | 402 |
+| dirichlet α=0.5 | 0.391 | 0.426 | 19 | 659 |
+| dirichlet α=1.0 | 0.217 | 0.312 | 19 | 419 |
+| pathological (2 cls) | 0.537 | 0.002 | 166 | 168 |
+| quantity_skew σ=1.0 | 0.010 | 0.416 | 14 | 534 |
+
+Sanity checks that the regimes behave as intended:
+
+- `iid` is near-zero on both axes — a genuine control.
+- Dirichlet JS divergence falls monotonically with α (0.541 → 0.435 → 0.391 → 0.217),
+  which is the defining behaviour of the regime.
+- **`pathological` and `quantity_skew` are orthogonal:** pathological has high label skew
+  (0.537) with essentially no size skew (0.002), quantity_skew has the reverse (0.010 /
+  0.416). That separation is what lets the paper attribute a gain to one kind of
+  heterogeneity rather than "non-IID" in general, and it is why `quantity_skew` is the
+  regime to watch — it attacks FedAvg's n_k weighting directly, which is precisely what
+  FedSwarm replaces.
+- Dirichlet size Gini is *not* monotone in α (0.326 at α=0.3 vs 0.426 at α=0.5) because α
+  controls only label proportions; size skew is an uncontrolled by-product of the draw.
+  Expect this to smooth across the 5 seeds. Do not describe Dirichlet α as controlling
+  size skew in the paper.
+
+### Deviation from the plan, recorded
+
+The plan suggests reusing `flwr_datasets.partitioner.*`. Those partition rows of a Hugging
+Face `Dataset`; our unit is a pseudo-patient row in a manifest and the required output is a
+JSON-cacheable index assignment. Converting manifest → HF Dataset → partition → indices is
+more code and more fragile than drawing the Dirichlet directly, and `quantity_skew` needs a
+custom implementation regardless. All regimes are therefore implemented in
+`src/fedswarm/data/partition.py` using the standard formulations (per-class Dir(α) draw;
+FedAvg-style contiguous shards for pathological). Verified by unit tests including a
+monotonicity check on α.
+
+`source_shift` raises `NotImplementedError` pointing at `docs/OPEN_QUESTIONS.md` — still
+blocked on the provenance-label decision.

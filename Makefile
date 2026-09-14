@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke main ablations figures tables clean
+.PHONY: setup data test lint smoke main ablations figures-data figures tables clean
 
 setup:
 	uv venv --python 3.12 .venv
@@ -21,6 +21,9 @@ main:
 
 ablations:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml
+
+figures-data:
+	.venv/bin/python scripts/make_partition_figures.py
 
 figures:
 	.venv/bin/python scripts/make_figures.py
