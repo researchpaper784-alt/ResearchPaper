@@ -3,7 +3,7 @@ name = "fedswarm"
 version = "0.0.1"
 description = "FedSwarm: Adaptive Aggregation Optimization in Federated Learning using Swarm Intelligence for Brain Tumor Diagnosis"
 readme = "README.md"
-requires-python = ">=3.11,<3.13"
+requires-python = ">=3.11,<3.14"
 license = { text = "MIT" }
 dependencies = [
   "flwr==1.36.0",
