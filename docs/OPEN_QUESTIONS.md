@@ -196,3 +196,37 @@ train `ConfigRecord` it builds; SCAFFOLD's control variates are a
 separate, not-yet-designed extension (they need the client to receive *and return*
 extra per-client state beyond the model weights, which changes the `RecordDict` shape
 client and server exchange -- deferred to Phase 5, not stubbed now).
+
+## Phase 3 -- `flwr run` executes an installed copy of the app, not the repo clone
+
+Discovered from a real Colab run, not anticipated in advance: `flwr run .` does not
+execute `fl/app.py` from `/content/ResearchPaper` at all. Its own log says so --
+`Successfully installed fedswarm to /root/.flwr/apps/fedswarm.fedswarm.0.0.1.<hash>`
+-- the Simulation Runtime packages the app and re-installs it into an isolated
+location (plus a separate `uv sync`-built environment for dependencies), then runs
+client/server code from *there*. That installed copy is just the Python package
+(`[tool.hatch.build.targets.wheel] packages = ["src/fedswarm"]`) -- no `data/`, no
+`results/`, both gitignored and outside the wheel's scope regardless.
+
+Consequence, confirmed by the first real run's symptoms matching exactly: every
+relative `run_config` path (`cache-dir`, `manifest-path`, `output-dir`, ...) was
+silently resolving against whatever that isolated process's cwd happened to be, not
+the repo. The run took ~12 minutes (plausibly rebuilding the entire image cache from
+scratch in the wrong location) and produced no `results/fl/*.json` anywhere under the
+actual clone.
+
+**Fixed** with the same pattern this file already used for the *raw dataset* root
+(`FEDSWARM_DATA_ROOT`): a `FEDSWARM_REPO_ROOT` env var, read by a new `_repo_path()`
+helper, anchoring every relative run_config path to the real clone regardless of
+where the installed copy's code executes from. Unset, behavior is unchanged (falls
+back to cwd, which is the repo root for every other entry point). `notebooks/
+colab_fl_smoke.ipynb` now sets it before calling `flwr run`.
+
+**Not yet verified**: whether `os.environ["FEDSWARM_REPO_ROOT"]`, set in the Colab
+kernel process before the `!flwr run` shell-out, actually propagates through
+Flower's own process tree (SuperLink → the `uv sync`-built runtime-env's Python
+interpreter → the installed app). Standard Unix env-var inheritance says it should
+(nothing suggests Flower explicitly filters arbitrary env vars when spawning child
+interpreters), but this machine cannot run the simulation extra to check, and this is
+exactly the kind of assumption that already broke once already this session (the
+per-run install itself). The next real `flwr run .` on Colab is the actual test.

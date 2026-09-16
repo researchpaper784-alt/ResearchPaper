@@ -25,6 +25,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from fedswarm.data.cache import build_and_save_cache
 from fedswarm.fl.app import (
+    _repo_path,
     build_evaluate_fn,
     build_model_from_run_config,
     checkpoint_paths,
@@ -67,6 +68,32 @@ def _tiny_dataset_rows(root: Path, n: int = 40) -> list[dict]:
             }
         )
     return rows
+
+
+# ======================================================================================
+# _repo_path tests -- added 2026-09-16 after a real Colab run demonstrated why this
+# exists: `flwr run` executes app.py's installed copy from a location with no data/
+# or results/ directory next to it at all, so every relative run_config path must
+# anchor to the real repo clone via $FEDSWARM_REPO_ROOT, not to cwd or __file__.
+# ======================================================================================
+
+
+def test_repo_path_passes_absolute_paths_through_unchanged(monkeypatch) -> None:
+    monkeypatch.delenv("FEDSWARM_REPO_ROOT", raising=False)
+    assert _repo_path("/already/absolute/path") == Path("/already/absolute/path")
+
+
+def test_repo_path_anchors_relative_paths_to_the_env_var_when_set(monkeypatch) -> None:
+    monkeypatch.setenv("FEDSWARM_REPO_ROOT", "/content/ResearchPaper")
+    assert _repo_path("data/processed/cache") == Path("/content/ResearchPaper/data/processed/cache")
+
+
+def test_repo_path_falls_back_to_cwd_when_the_env_var_is_unset(monkeypatch) -> None:
+    """The no-op case: local pytest / scripts/run_experiment.py always have cwd ==
+    repo root already, so this must resolve identically to a bare relative Path --
+    zero behavior change for every entry point except `flwr run`."""
+    monkeypatch.delenv("FEDSWARM_REPO_ROOT", raising=False)
+    assert _repo_path("data/processed/cache") == Path(".") / "data/processed/cache"
 
 
 # ======================================================================================

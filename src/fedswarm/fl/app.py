@@ -33,11 +33,38 @@ confirmed by reading their source) -- `tests/test_fl_app.py` calls them directly
 hand-built `Message`/`Context`/`ArrayRecord` objects, exercising every line of this
 file's own logic, minus the runtime's own message routing. The first real `flwr run .`
 (on Colab, CPU or GPU) is what confirms that, not anything this file can self-certify.
+
+⚠️ **2026-09-16, from that first real run**: `flwr run` does not execute this file from
+the cloned repo at all. Its own log makes this explicit -- `Successfully installed
+fedswarm to /root/.flwr/apps/fedswarm.fedswarm.0.0.1.<hash>` -- the Simulation Runtime
+packages the app and re-installs it into an isolated location, then runs client/server
+code from *there*, in a separate `uv sync`-built environment. That installed copy has
+no `data/` or `results/` directory at all (neither is part of the Python package --
+both are gitignored, outside `[tool.hatch.build.targets.wheel]`'s scope). Every
+relative `run_config` path (`cache-dir`, `manifest-path`, `output-dir`, ...) was
+silently resolving against whatever that isolated process's cwd happened to be, not
+the repo -- consistent with what the first run actually did: no visible errors, ~12
+minutes elapsed (plausibly rebuilding the whole cache from scratch in the wrong place),
+and no `results/fl/*.json` ever appearing under the actual clone. Fixed below with the
+same pattern this file already used for the *raw dataset* root (`FEDSWARM_DATA_ROOT`,
+`fedswarm.data.download.resolve_root`) -- an env var, not a relative path, anchoring
+every data/results path to the real clone regardless of where the installed copy's
+code actually executes from. Set once, in the Colab cell that calls `flwr run`:
+
+    import os
+    os.environ["FEDSWARM_REPO_ROOT"] = "/content/ResearchPaper"
+    !flwr run . --stream
+
+Unset (the common case: local pytest, `scripts/run_experiment.py`), every path below
+resolves exactly as it always did -- relative to the current working directory, which
+*is* the repo root for every other entry point this project has. Not yet re-verified
+against a real Colab run; the next one is what actually confirms this fix.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -70,6 +97,26 @@ def _device() -> torch.device:
     device is visible, which is the whole point of this file on an exhausted-GPU-quota
     Colab session."""
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _repo_path(path_str: str) -> Path:
+    """Anchors a `run_config` path string to the real repo clone, not to whatever
+    directory `flwr run` actually executes this file's installed copy from (see the
+    module docstring's 2026-09-16 note) -- and not to an assumption about `__file__`'s
+    own location either, since the installed copy lives somewhere with no `data/` or
+    `results/` directory next to it at all.
+
+    An already-absolute path passes through unchanged. A relative one resolves
+    against `$FEDSWARM_REPO_ROOT` if set, else the current working directory --
+    which *is* the repo root for every other entry point this project has
+    (`scripts/run_experiment.py`, `pytest`), so this is a no-op change for all of
+    those; only `flwr run`'s isolated execution needs the env var set at all.
+    """
+    path = Path(path_str)
+    if path.is_absolute():
+        return path
+    root = Path(os.environ.get("FEDSWARM_REPO_ROOT", "."))
+    return root / path
 
 
 # ======================================================================================
@@ -121,8 +168,8 @@ def load_client_data(partition_id: int, run_config: RunConfig) -> tuple[DataLoad
     90/10 into local-train and local-val (the fraction is itself part of the partition
     spec, cached alongside the assignment)."""
     size = int(run_config.get("image-size", 112))
-    cache_dir = Path(str(run_config.get("cache-dir", "data/processed/cache")))
-    manifest_path = str(run_config.get("manifest-path", str(MANIFEST_CSV)))
+    cache_dir = _repo_path(str(run_config.get("cache-dir", "data/processed/cache")))
+    manifest_path = str(_repo_path(str(run_config.get("manifest-path", str(MANIFEST_CSV)))))
     num_clients = int(run_config.get("num-clients", 20))
     batch_size = int(run_config.get("local-batch-size", 32))
     normalization = str(run_config.get("normalization", "dataset"))
@@ -130,7 +177,7 @@ def load_client_data(partition_id: int, run_config: RunConfig) -> tuple[DataLoad
     manifest = load_manifest(manifest_path)
     images = load_cache(size, cache_dir)
     spec = partition_spec_from_run_config(run_config, num_clients)
-    partition_cache_dir = Path(str(run_config.get("partition-cache-dir", "data/processed/partitions")))
+    partition_cache_dir = _repo_path(str(run_config.get("partition-cache-dir", "data/processed/partitions")))
     partition = load_or_build(manifest, spec, partition_cache_dir)
 
     if partition_id not in partition.client_train:
@@ -267,8 +314,8 @@ def global_test_loader(run_config: RunConfig) -> DataLoader:
     manifest/cache/transform pipeline `scripts/run_experiment.py` uses for centralized
     training, so the FL ceiling and the centralized ceiling are measured identically."""
     size = int(run_config.get("image-size", 112))
-    cache_dir = Path(str(run_config.get("cache-dir", "data/processed/cache")))
-    manifest_path = str(run_config.get("manifest-path", str(MANIFEST_CSV)))
+    cache_dir = _repo_path(str(run_config.get("cache-dir", "data/processed/cache")))
+    manifest_path = str(_repo_path(str(run_config.get("manifest-path", str(MANIFEST_CSV)))))
     normalization = str(run_config.get("normalization", "dataset"))
 
     manifest = load_manifest(manifest_path)
@@ -430,7 +477,7 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
     """
     device = _device()
     test_loader = global_test_loader(run_config)
-    checkpoint_dir = str(run_config.get("checkpoint-dir", "results/fl/_checkpoints"))
+    checkpoint_dir = _repo_path(str(run_config.get("checkpoint-dir", "results/fl/_checkpoints")))
     run_id = str(run_config.get("_run_id", "unknown"))
 
     def evaluate_fn(server_round: int, arrays: ArrayRecord) -> MetricRecord:
@@ -477,7 +524,7 @@ def main(grid: Grid, context: Context) -> None:
     run_config = {**run_config, "_run_id": run_id}  # threaded through to build_evaluate_fn
 
     num_rounds = int(run_config.get("num-rounds", 2))
-    checkpoint_dir = str(run_config.get("checkpoint-dir", "results/fl/_checkpoints"))
+    checkpoint_dir = _repo_path(str(run_config.get("checkpoint-dir", "results/fl/_checkpoints")))
 
     model = build_model_from_run_config(run_config)
     initial_arrays = ArrayRecord(model.state_dict())
@@ -491,7 +538,7 @@ def main(grid: Grid, context: Context) -> None:
         print(f"Resuming {run_id} from round {round_offset} ({len(rounds_log)} rounds already logged)")
 
     remaining_rounds = max(0, num_rounds - round_offset)
-    output_dir = Path(str(run_config.get("output-dir", "results/fl")))
+    output_dir = _repo_path(str(run_config.get("output-dir", "results/fl")))
 
     if remaining_rounds == 0:
         print(f"{run_id} already completed {num_rounds} rounds -- nothing to do.")
