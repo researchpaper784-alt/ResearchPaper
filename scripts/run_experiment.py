@@ -14,10 +14,13 @@ from __future__ import annotations
 
 import argparse
 import copy
+import os
+import random
 import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -56,6 +59,43 @@ def pick_device(deterministic: bool = True) -> torch.device:
     return torch.device("cpu")
 
 
+def _worker_init_fn(worker_id: int) -> None:
+    """Reseed the worker's Python/NumPy RNGs from the seed PyTorch already assigned it.
+
+    DataLoader automatically gives each worker process its own torch RNG stream
+    (base_seed + worker_id), which is all the augmentation pipeline actually needs --
+    every randomized torchvision v1 transform used here (RandomResizedCrop,
+    RandomHorizontalFlip, RandomRotation, ColorJitter) draws from torch's global
+    generator, not Python's `random` or NumPy's. This reseeds those two anyway, at
+    near-zero cost, as insurance against the well-documented gotcha where forked
+    worker processes otherwise inherit and share the *parent's* random/NumPy state --
+    identical across workers -- if anything (now or in a future edit) ever calls them.
+    """
+    seed = torch.initial_seed() % 2**32
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def _num_workers(cfg) -> int:
+    """Parallel data loading workers for the augmentation pipeline (CPU-bound: PIL/
+    torchvision transforms per image, no GPU involved). With num_workers=0 this runs
+    serially in the main process and the GPU sits idle between batches -- for a small
+    model this CPU-bound augmentation cost dominates wall-clock, not the GPU step, which
+    matters because Colab/Kaggle meter *wall-clock* GPU-session time against your quota
+    regardless of GPU utilization.
+
+    Explicit `training.num_workers` in config always wins. Otherwise: 0 unchanged on
+    CPU (this machine's local runs and existing timings stay exactly as measured), a
+    small nonzero default when CUDA is available, capped by actual core count.
+    """
+    configured = cfg.training.get("num_workers", None)
+    if configured is not None:
+        return int(configured)
+    if not torch.cuda.is_available():
+        return 0
+    return max(0, min(4, os.cpu_count() or 0))
+
+
 def build_loaders(cfg) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
     manifest = load_manifest(cfg.data.manifest)
     images = load_cache(cfg.data.image_size, cfg.data.cache_dir)
@@ -73,10 +113,17 @@ def build_loaders(cfg) -> tuple[DataLoader, DataLoader, DataLoader, dict]:
         indices = select(manifest, split=split, representatives_only=True, drop_mixed_label=drop_mixed)
         splits[split] = ManifestDataset(manifest, images, indices, transform)
 
+    num_workers = _num_workers(cfg)
+    loader_kwargs = dict(
+        num_workers=num_workers,
+        worker_init_fn=_worker_init_fn if num_workers > 0 else None,
+        persistent_workers=num_workers > 0,
+        pin_memory=torch.cuda.is_available(),
+    )
     loaders = {
-        "train": DataLoader(splits["train"], batch_size=cfg.training.batch_size, shuffle=True, num_workers=0),
-        "val": DataLoader(splits["val"], batch_size=128, shuffle=False, num_workers=0),
-        "test": DataLoader(splits["test"], batch_size=128, shuffle=False, num_workers=0),
+        "train": DataLoader(splits["train"], batch_size=cfg.training.batch_size, shuffle=True, **loader_kwargs),
+        "val": DataLoader(splits["val"], batch_size=128, shuffle=False, **loader_kwargs),
+        "test": DataLoader(splits["test"], batch_size=128, shuffle=False, **loader_kwargs),
     }
     class_counts = {split: splits[split].class_counts() for split in splits}
     return loaders["train"], loaders["val"], loaders["test"], class_counts
@@ -97,7 +144,14 @@ def train_one_epoch(model, loader, optimizer, device) -> float:
 
 
 def run(cfg, seed: int) -> dict:
-    deterministic = seed_everything(seed, deterministic=True)
+    # `training.deterministic: false` is an explicit escape hatch, not the default --
+    # torch.use_deterministic_algorithms(True) is known (see seed.py, and this repo's
+    # own recorded MPS timings: 152s/epoch deterministic vs 26s/epoch not) to disable
+    # fast cuDNN/MPS kernel paths for some ops, which can dominate epoch wall-clock far
+    # more than anything data-loading-side. Override it to test that on a slow run
+    # instead of guessing; leave it True for any run whose numbers go in the paper.
+    want_deterministic = cfg.training.get("deterministic", True)
+    deterministic = seed_everything(seed, deterministic=want_deterministic)
     device = pick_device(deterministic=deterministic)
 
     train_loader, val_loader, test_loader, class_counts = build_loaders(cfg)
@@ -116,9 +170,11 @@ def run(cfg, seed: int) -> dict:
     t_start = time.time()
 
     for epoch in range(1, cfg.training.max_epochs + 1):
+        t_epoch = time.time()
         train_loss = train_one_epoch(model, train_loader, optimizer, device)
         val_metrics = evaluate(model, val_loader, device)
         scheduler.step()
+        epoch_time_s = time.time() - t_epoch
 
         rounds.append(
             {
@@ -128,6 +184,7 @@ def run(cfg, seed: int) -> dict:
                 "val_macro_f1": val_metrics["macro_f1"],
                 "val_accuracy": val_metrics["accuracy"],
                 "lr": scheduler.get_last_lr()[0],
+                "epoch_time_s": epoch_time_s,
             }
         )
 
@@ -141,7 +198,8 @@ def run(cfg, seed: int) -> dict:
         print(
             f"  epoch {epoch:>3}  train_loss={train_loss:.4f}  "
             f"val_macro_f1={val_metrics['macro_f1']:.4f}  "
-            f"val_acc={val_metrics['accuracy']:.4f}"
+            f"val_acc={val_metrics['accuracy']:.4f}  "
+            f"({epoch_time_s:.1f}s)"
             f"{'  *' if epoch == best_epoch else ''}"
         )
 
