@@ -382,3 +382,72 @@ bare call for a hypothetical torch old enough to lack the `warn_only` kwarg.
 reproduce a CUDA-only non-deterministic op on this CPU-only machine), one verifies
 graceful fallback on an old torch, and one trains `SimpleCNN` end-to-end under
 deterministic mode as a direct regression guard on the actual model/layer that broke.
+
+## 2026-09-16 — Phase 2.1 acceptance met: first real centralized ceiling, from Colab
+
+### The numbers (5 seeds each, SimpleCNN@112; 3 of 5 seeds, ResNet18@224 pretrained)
+
+| model | norm | n | test macro-F1 | test accuracy | mean best_epoch | mean wall_clock |
+|---|---|---|---|---|---|---|
+| simple_cnn | groupnorm | 5 | 0.9203 ± 0.0053 | 0.9211 ± 0.0052 | 41.4 | 450.8s |
+| simple_cnn | batchnorm | 5 | 0.9300 ± 0.0127 | 0.9314 ± 0.0144 | 41.6 | 441.6s |
+| resnet18 (pretrained) | groupnorm | 3 | 0.9701 ± 0.0075 | 0.9705 ± 0.0074 | 21.3 | 650.9s |
+
+**Sanity check against Phase 1.2's leakage fix, per the plan's own acceptance
+criterion:** none of these are implausibly close to 1.00 -- if they were, the
+plan says to go back to Step 1.2. A believable, moderate ceiling (0.91-0.98) is
+itself evidence the de-duplication held. This is now the ceiling every FL method
+is measured against.
+
+**BatchNorm centralized > GroupNorm centralized (0.9300 vs 0.9203) -- expected,
+not a contradiction.** GroupNorm was chosen for the *federated* experiments
+specifically because BatchNorm's running statistics aggregate badly across
+non-IID clients (plan §2.1); nothing about that pathology applies to a single
+machine training on the pooled data, where BatchNorm's per-batch statistics are
+usually a mild edge over GroupNorm. Record both numbers as: BatchNorm centralized
+is a normal, expected centralized-only data point, not the A9 ablation (already
+corrected in the notebook, see the 2026-09-16 phase-2 commit) -- the real A9
+comparison needs actual federated training (Phase 4/7).
+
+**ResNet18 has only 3 of 5 seeds** (0, 1, 2) -- the session apparently stopped
+before seeds 3-4. Not a blocker: it's the secondary/optional table, the notebook's
+per-run checkpointing means seeds 3-4 can be added in any future session without
+recomputing 0-2, and 3 seeds already show a tight spread (std 0.0075) suggestive
+that 2 more won't move the picture much. Queue for later, don't block Phase 3 on it.
+
+### Correcting my own earlier speculation: determinism mode is not the dominant cost here
+
+When diagnosing "is this run going to hit my T4 quota," I named
+`torch.use_deterministic_algorithms(True)` as the leading suspect, based on this
+repo's own recorded *MPS* number (152s/epoch deterministic vs 26s/epoch not --
+a 5.8x gap). The real CUDA numbers now available say that hypothesis does not
+transfer to this hardware: 450s wall-clock over ~41 epochs for SimpleCNN@112 is
+~11s/epoch, not dramatically slow for a T4 running deterministic-mode PyTorch.
+**The actual driver of total wall-clock was epoch *count*, not epoch *speed*:**
+several runs went 44-60 epochs (early_stop_patience=8) before stopping, and
+10 SimpleCNN runs + 3 ResNet18 runs together cost ~1.8 GPU-hours, purely additive
+across many fast-enough epochs. If quota is tight in a future sweep, the
+higher-leverage lever is a smaller `max_epochs`/`early_stop_patience`, not
+`training.deterministic=false` -- though that override still exists
+(`scripts/run_experiment.py`) and costs nothing to leave in place.
+
+### Provenance note: this run predates every Phase 2/3 fix pushed after it
+
+`provenance.git_sha = 725002b` on every file here -- the Colab session cloned
+before `2a615f8`/`bc5d53c`/`de4653a` were committed (and none were pushed to
+origin until after this run started; see docs/OPEN_QUESTIONS.md if that gate
+ever needs re-checking). Consequences, none of them blocking:
+- `provenance.dirty: true` on every file -- exactly the DATASET_CARD.md
+  re-verification bug fixed in `2a615f8`; harmless here since nothing was
+  actually hand-edited, but the next Colab pull won't have this noise.
+- No `epoch_time_s` per-round field (added in `bc5d53c`) -- wall_clock_s at the
+  `final` level was enough to reconstruct the epoch-time story above, but
+  future runs will have the finer-grained field.
+- `flwr`/`flwr-datasets` are `null` in provenance -- expected, this notebook's
+  centralized path never imports them (its own markdown says so).
+
+Real environment, for the record: Linux, Tesla T4, CUDA 12.8, torch 2.11.0+cu128,
+torchvision 0.26.0+cu128, numpy 2.1.3, Python 3.13.15 -- all newer than this
+repo's Intel-macOS pins (torch==2.2.2, numpy<2), exactly as anticipated when the
+compute-environment split was decided (2026-09-14 entry above): Colab's torch/
+numpy, not the local pins, is what actually produced these numbers.
