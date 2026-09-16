@@ -249,3 +249,39 @@ fix it; confirmed `torch.from_numpy` round-trips correctly after the pin. This p
 property of *this machine's* wheel availability, not of Flower or the method — re-evaluate
 when installing in the Linux training environment, where newer `torch` (and NumPy 2.x) are
 available and preferred.
+
+**2026-09-16 — this pin turned out to be load-bearing in a place `--no-deps` cannot
+reach.** `colab_centralized_training.ipynb` always installed with `pip install -e .
+--no-deps` specifically to avoid re-resolving this Mac's pinned versions on Colab. That
+sidesteps `pip`, but `flwr run` does not go through it at all: the Simulation Runtime
+creates its own isolated per-run environment via `uv sync`, reading `[project.
+dependencies]` **directly**, unfiltered by anything `--no-deps` skipped. First real
+Colab run of `flwr run .` failed exactly there:
+
+```
+error: Distribution `torch==2.2.2` can't be installed because it doesn't have a source
+distribution or wheel for the current platform
+hint: You're using CPython 3.13 (`cp313`), but `torch` (v2.2.2) only has wheels with the
+following Python ABI tags: `cp311`, `cp312`
+```
+
+Fix: split `torch`/`torchvision`/`numpy` into two PEP 508 entries each, gated on
+mutually exclusive `platform_system`/`platform_machine` markers (Intel macOS gets the
+old pin this repo needs locally; everything else gets a modern, unpinned-above lower
+bound) — a single dependency list that resolves differently, correctly, per platform.
+Verified: `packaging.requirements.Requirement` parses every entry without error, the
+markers evaluate to the expected branch on this machine (`platform.system()/machine()`
+= `Darwin`/`x86_64`), `flwr build` still succeeds, and `uv pip install -e ".[dev]"`
+still resolves torch==2.2.2 locally, unchanged. **Not verified**: that `uv sync` on
+Colab's Linux/cp313 actually picks the `torch>=2.5.0` branch and installs cleanly --
+markers evaluating correctly in isolation is not the same as the real runtime-env
+install succeeding, and this machine cannot run that install to check. The next real
+`flwr run .` on Colab is what actually confirms it.
+
+Every other dependency in `[project.dependencies]` was loosened from an exact `==` pin
+to a lower bound only, same commit, same reasoning: `uv sync` reads that list too, and
+none of those pins were chosen for a *discovered* platform gap the way torch's was --
+they were pinned for plain reproducibility on a machine running Python 3.12, never
+tested against Colab's Python 3.13. A lower bound can only add compatibility, never
+remove what already worked, and whatever actually resolves is still captured per-run in
+`provenance.packages` regardless of how loose the spec in this file is.

@@ -10,23 +10,47 @@ dependencies = [
   # requires an inclusive ">=" lower bound (caught by `flwr build`, not assumed). This
   # range still resolves to exactly 1.36.0 today; re-check before 1.37.0 is adopted.
   "flwr>=1.36.0,<1.37.0",
-  "flwr-datasets[vision]==0.5.0",
-  "torch==2.2.2",
-  "torchvision==0.17.2",
-  "numpy>=1.26,<2",
-  "scipy==1.14.1",
-  "scikit-learn==1.5.2",
-  "pandas==2.2.3",
-  "pyyaml==6.0.2",
-  "omegaconf==2.3.0",
-  "matplotlib==3.9.2",
-  "seaborn==0.13.2",
-  "tqdm==4.67.1",
+  "flwr-datasets[vision]>=0.5.0",
+  # torch/torchvision/numpy are platform-split, not just pinned -- and this is now a
+  # hard *correctness* requirement, not a style choice. `flwr run` creates its own
+  # isolated per-run environment via `uv sync` against exactly this dependency list
+  # (confirmed: a real Colab run failed here, 2026-09-16 -- "torch==2.2.2 ... doesn't
+  # have a source distribution or wheel for the current platform", cp313). A single
+  # `torch==2.2.2` pin -- chosen only because this dev machine is Intel macOS, which
+  # has no newer wheel at all (docs/FLOWER_API_NOTES.md) -- was silently shipping that
+  # constraint into every environment the app ever runs in, including Colab/Kaggle,
+  # which need a modern torch and have no reason to be limited by this machine's
+  # wheel gap. Two entries per package, split by a mutually exclusive marker, is the
+  # standard PEP 508 pattern for exactly this ("no unary `not` in marker grammar" --
+  # `!=`/`or` express the negation instead).
+  "torch==2.2.2 ; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+  "torch>=2.5.0 ; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+  "torchvision==0.17.2 ; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+  "torchvision>=0.20.0 ; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+  # numpy<2 is specifically required by torch==2.2.2's ABI (docs/FLOWER_API_NOTES.md) --
+  # only the Intel-macOS branch above uses that torch, so only it needs the cap.
+  "numpy>=1.26,<2 ; platform_system == 'Darwin' and platform_machine == 'x86_64'",
+  "numpy>=1.26 ; platform_system != 'Darwin' or platform_machine != 'x86_64'",
+  # Everything below was pinned for plain reproducibility, not a discovered wheel gap
+  # -- loosened to a lower bound only (2026-09-16, alongside the torch fix above) so
+  # the same list also resolves cleanly under `uv sync` on Colab's Python 3.13, which
+  # this repo has never been able to test an exact pin against locally (this dev
+  # machine is Python 3.12). Whatever actually resolves is still captured per-run by
+  # utils/provenance.py, which is what "no silent fabrication" actually depends on --
+  # not the exactness of the spec in this file.
+  "scipy>=1.14.1",
+  "scikit-learn>=1.5.2",
+  "pandas>=2.2.3",
+  "pyyaml>=6.0.2",
+  "omegaconf>=2.3.0",
+  "matplotlib>=3.9.2",
+  "seaborn>=0.13.2",
+  "tqdm>=4.67.1",
   "rich>=14.0.0,<15.0.0",
-  "pillow==11.0.0",
-  "imagehash==4.3.1",
-  "kaggle==2.2.4",  # 1.x only supports the legacy kaggle.json auth; 2.x adds the newer bearer-token auth (KAGGLE_API_TOKEN / ~/.kaggle/access_token)
-  "h5py==3.16.0",  # decodes Figshare's MATLAB v7.3 (.mat) files -- see data/source_provenance.py
+  "pillow>=11.0.0",
+  "imagehash>=4.3.1",
+  "kaggle>=2.2.4",  # 1.x only supports the legacy kaggle.json auth; 2.x adds the newer bearer-token auth (KAGGLE_API_TOKEN / ~/.kaggle/access_token)
+  "h5py>=3.16.0",  # decodes Figshare's MATLAB v7.3 (.mat) files -- see data/source_provenance.py
 ]
 
 [project.optional-dependencies]
