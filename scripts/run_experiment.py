@@ -1,8 +1,12 @@
-"""Phase 2.1 — train and evaluate a single model configuration.
+"""Phase 2.1 — train and evaluate a single centralized model configuration (the
+performance ceiling every FL method is measured against).
 
-Currently implements centralized training (the performance ceiling). FL dispatch is added
-in Phase 3+ once ClientApp/ServerApp exist; this script is the single entry point either
-way, per the plan's §15 usage example.
+Correction to this file's own earlier claim: FL runs do **not** dispatch through this
+script. `Strategy.start()` (Phase 3, `fl/server_app.py`) needs a real `Grid`, which only
+Flower's own runtime supplies -- an FL experiment is launched with `flwr run .`, reading
+`[tool.flwr.app.config]` in `pyproject.toml` (override via `flwr run . --run-config
+"..."`), not via `--config` YAML layers. This script stays the single entry point for
+centralized training only.
 
 Run:
   .venv/bin/python scripts/run_experiment.py \

@@ -196,6 +196,41 @@ run itself (and all of Phase 3 onward — `ClientApp`/`ServerApp`/`Strategy.star
 happen in the author's Colab/Kaggle environment (both Linux, where `ray` has wheels).
 Logged in `docs/OPEN_QUESTIONS.md`.
 
+## Phase 3 -- `[tool.flwr]` app config schema, verified via `flwr build`
+
+**Verified 2026-09-16**, two ways: (1) re-ran `flwr new @flwrlabs/quickstart-pytorch`
+fresh (same `flwr==1.36.0` install) and read its generated `pyproject.toml` and
+`pytorchexample/{client_app,server_app}.py` directly -- confirms `client_app.py`/
+`server_app.py`'s structure (this repo's `fl/`) matches the current real pattern
+exactly: `context.node_config["partition-id"]`/`["num-partitions"]` for per-client
+identity, `context.run_config[...]` for static settings, `msg.content["config"][...]`
+for per-round overrides, `Message(content=..., reply_to=msg)` replies. (2) `flwr build`
+(packaging only -- does **not** need the `simulation` extra) against this repo's own
+`pyproject.toml`, which caught two real errors before Colab ever would have:
+
+1. `fab-format-version = 1` rejects `[project].license = {text = "MIT"}` -- requires
+   `{file = "LICENSE"}` referencing a real root-level file.
+2. `fab-format-version = 1` rejects an exact `==` pin on the `flwr` dependency itself --
+   requires an inclusive `>=` lower bound. Changed to `flwr>=1.36.0,<1.37.0` (still
+   resolves to exactly the installed 1.36.0 today).
+
+After both fixes, `flwr build` succeeds and resolves both component paths
+(`fedswarm.fl.server_app:app`, `fedswarm.fl.client_app:app`) -- real confirmation the
+`[tool.flwr.app.components]` strings are correct, not an assumption. The reference
+app's README confirms `flwr run . --stream` (no `--federation` flag, no
+`[tool.flwr.federations]` section) uses a default local/CPU federation -- matches this
+repo's `make smoke` target.
+
+**What `flwr build` cannot verify** (needs the `simulation` extra, i.e. Colab/Kaggle):
+whether `strategy.start()`'s actual round-by-round `Grid` behavior, `node_config`
+population per SuperNode, and message routing match what `fl/client_app.py` and
+`fl/server_app.py` assume. `ClientApp.train()`/`.evaluate()` and `ServerApp.main()`'s
+decorators are confirmed (by reading their source) to register and return the function
+*unmodified* -- so `tests/test_client_app.py` and `tests/test_server_app.py` call the
+handlers directly with hand-built `Message`/`Context`/`ArrayRecord` objects, which
+exercises every line of this repo's own logic but not Flower's runtime routing itself.
+The first real `flwr run .` on Colab is what confirms that; nothing local can.
+
 ## torch/numpy pin note
 
 `torch` has no Intel-macOS wheel past the `2.2.x` line (tried `2.4.1`: no wheel; `2.2.2`:

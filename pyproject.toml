@@ -4,9 +4,12 @@ version = "0.0.1"
 description = "FedSwarm: Adaptive Aggregation Optimization in Federated Learning using Swarm Intelligence for Brain Tumor Diagnosis"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
-license = { text = "MIT" }
+license = { file = "LICENSE" }  # fab-format-version=1 (Phase 3's [tool.flwr.app]) requires a root-level license file, not inline text -- caught by `flwr build`, not assumed
 dependencies = [
-  "flwr==1.36.0",
+  # fab-format-version=1 (Phase 3's [tool.flwr.app]) rejects an exact "==" pin here --
+  # requires an inclusive ">=" lower bound (caught by `flwr build`, not assumed). This
+  # range still resolves to exactly 1.36.0 today; re-check before 1.37.0 is adopted.
+  "flwr>=1.36.0,<1.37.0",
   "flwr-datasets[vision]==0.5.0",
   "torch==2.2.2",
   "torchvision==0.17.2",
@@ -53,3 +56,70 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Phase 3 -- the Flower Message API app config `flwr run` reads. Schema confirmed
+# against a freshly re-downloaded `@flwrlabs/quickstart-pytorch` (2026-09-16, same
+# flwr==1.36.0 install) rather than assumed: `[tool.flwr.app]`/`.components`/`.config`
+# is exactly what that reference app's own generated pyproject.toml uses, and its
+# README confirms a bare `flwr run . --stream` picks the default (local, CPU-only unless
+# GPU-visible) federation with no `[tool.flwr.federations]` section required.
+#
+# ⚠️ Only the schema is verified locally -- `flwr build`/`flwr run` themselves need the
+# `simulation` extra (`ray`, no Intel-macOS wheel; see the platform-blocker note in
+# docs/FLOWER_API_NOTES.md), so the values below have never actually been run through
+# the Flower runtime on this machine. `num-clients`/`num-rounds` are set to a genuine
+# 2-client/2-round smoke size, matching the plan's Step 3.1 acceptance criterion --
+# the first real `flwr run .` on Colab is what actually confirms this config end-to-end,
+# not this comment.
+[tool.flwr.app]
+publisher = "fedswarm"
+fab-format-version = 1
+flwr-version-target = "1.36.0"
+
+[tool.flwr.app.components]
+serverapp = "fedswarm.fl.server_app:app"
+clientapp = "fedswarm.fl.client_app:app"
+
+[tool.flwr.app.config]
+# Partitioning (fedswarm.data.partition.PartitionSpec, flattened -- Context.run_config
+# is dict[str, bool|float|int|str] only, verified, no nested structures allowed).
+regime = "iid"
+num-clients = 2
+min-client-size = 5
+partition-seed = 0
+local-val-fraction = 0.1
+partition-cache-dir = "data/processed/partitions"
+# alpha / classes-per-client / skew-sigma: regime-specific, deliberately absent from
+# the smoke default (regime="iid" doesn't read any of them) -- override alongside
+# `regime` together, e.g. --run-config "regime='dirichlet' alpha=0.3".
+
+# Data.
+image-size = 112
+normalization = "dataset"
+cache-dir = "data/processed/cache"
+manifest-path = "data/processed/manifest.csv"
+
+# Model.
+model-name = "simple_cnn"
+model-pretrained = false
+model-norm = "groupnorm"
+num-classes = 4
+
+# Local training (fl/task.py's local_train).
+local-epochs = 1
+local-lr = 0.01
+local-batch-size = 32
+mu = 0.0  # FedProx proximal coefficient; 0.0 = off. No FedProx strategy wires this yet (Phase 5) -- see docs/OPEN_QUESTIONS.md.
+
+# FedAvg strategy (flwr.serverapp.strategy.FedAvg).
+fraction-train = 1.0
+min-train-nodes = 2
+min-evaluate-nodes = 2
+min-available-nodes = 2
+
+# Run-level.
+num-rounds = 2
+seed = 0
+deterministic = true
+output-dir = "results/fl"
+checkpoint-dir = "results/fl/_checkpoints"

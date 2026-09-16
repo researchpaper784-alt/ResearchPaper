@@ -39,3 +39,6 @@ paper/tables/*.tex
 .idea/
 .vscode/
 *.log
+
+# Flower App Bundle build artifacts (flwr build)
+*.fab

@@ -13,8 +13,12 @@ test:
 lint:
 	.venv/bin/python -m ruff check src tests scripts
 
+# Phase 3 FL smoke run (2 clients, 2 rounds -- the plan's Step 3.1 acceptance size,
+# set as the [tool.flwr.app.config] defaults in pyproject.toml). Needs the `simulation`
+# extra (`ray`, no Intel-macOS wheel -- Colab/Kaggle only, see docs/FLOWER_API_NOTES.md),
+# so this only actually runs there, not on this machine.
 smoke:
-	.venv/bin/python scripts/run_experiment.py --config configs/experiment/smoke.yaml
+	.venv/bin/flwr run . --stream
 
 main:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml
