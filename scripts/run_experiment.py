@@ -190,7 +190,7 @@ def main() -> int:
 
     outcome = run(cfg, args.seed)
 
-    out_path = Path(cfg.output_dir) / f"{cfg.model.name}_{cfg.model.norm}_{args.seed}.json"
+    out_path = Path(cfg.output_dir) / f"{cfg.model.name}_{cfg.data.image_size}_{cfg.model.norm}_{args.seed}.json"
     write_result(
         out_path,
         config=resolved,
