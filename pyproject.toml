@@ -77,8 +77,8 @@ fab-format-version = 1
 flwr-version-target = "1.36.0"
 
 [tool.flwr.app.components]
-serverapp = "fedswarm.fl.server_app:app"
-clientapp = "fedswarm.fl.client_app:app"
+serverapp = "fedswarm.fl.app:server_app"
+clientapp = "fedswarm.fl.app:client_app"
 
 [tool.flwr.app.config]
 # Partitioning (fedswarm.data.partition.PartitionSpec, flattened -- Context.run_config

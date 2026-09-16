@@ -159,14 +159,16 @@ Cheap to check later; not a blocker now, since de-duplication neutralises it eit
 
 ## Phase 3 -- the FL harness is unverified end-to-end pending the first real Colab run
 
-Built `fl/task.py`, `fl/client_app.py`, `fl/server_app.py`, `fl/checkpoint.py` against
-the verified `flwr==1.36.0` API (`docs/FLOWER_API_NOTES.md`), and confirmed as much as
-possible locally:
+Built `fl/app.py` (originally four modules -- task/client_app/server_app/checkpoint,
+consolidated 2026-09-16 into one file at the author's request for a single file that's
+easy to hand to Colab; see the note in `docs/FLOWER_API_NOTES.md`) against the verified
+`flwr==1.36.0` API (`docs/FLOWER_API_NOTES.md`), and confirmed as much as possible
+locally:
 
-- Every handler (`train`/`evaluate`/`build_evaluate_fn`'s closure) is directly
-  unit-tested by calling it with hand-built `Message`/`Context`/`ArrayRecord` objects
-  (confirmed: `ClientApp`'s and `ServerApp.main()`'s decorators register and return the
-  function *unmodified*, by reading their source, not assumed).
+- Every handler (`train_handler`/`evaluate_handler`/`build_evaluate_fn`'s closure) is
+  directly unit-tested by calling it with hand-built `Message`/`Context`/`ArrayRecord`
+  objects (confirmed: `ClientApp`'s and `ServerApp.main()`'s decorators register and
+  return the function *unmodified*, by reading their source, not assumed).
 - `flwr build` (packaging only, no `simulation` extra needed) validates the
   `[tool.flwr]` schema and resolves both component import paths successfully.
 
@@ -174,22 +176,23 @@ possible locally:
 against a real `Grid` -- whether `node_config["partition-id"]` is populated the way
 this code assumes across however many SuperNodes the simulation spins up, whether
 `min_train_nodes=2`/`min_available_nodes=2` behaves as expected at `num-clients=2`,
-whether the checkpoint/resume round-remapping in `fl/server_app.py` (`round_offset`)
+whether the checkpoint/resume round-remapping in `fl/app.py`'s `main()` (`round_offset`)
 is actually exercised correctly by a real interrupted-and-resumed run. This machine
 cannot install `flwr[simulation]` (no `ray` wheel for Intel macOS -- platform blocker,
 `docs/FLOWER_API_NOTES.md`). **The first real `flwr run .` on Colab is Phase 3's actual
 acceptance test**, not anything built so far -- treat the code as reviewed-and-tested-
-as-far-as-locally-possible, not as verified.
+as-far-as-locally-possible, not as verified. Runs on CPU with no code changes (see
+`fl/app.py`'s module docstring) if GPU quota is the blocker rather than correctness.
 
 ## Phase 3 -- FedProx's `mu` is read by the client but nothing sends it yet
 
-`fl/task.py::local_train` and `fl/client_app.py::train` already support a FedProx
-proximal term (`mu > 0`, read from the per-round `ConfigRecord`), per the plan's Step
-3.1 design goal ("one client serves all strategies"). `pyproject.toml`'s
-`[tool.flwr.app.config]` default is `mu = 0.0` (off), and no strategy on the server
-side ever sets it to anything else yet -- `fl/server_app.py` only drives the built-in
-`FedAvg`. A real `FedProx(Strategy)` (Phase 5) still needs to be written and wired to
-set `mu` in the train `ConfigRecord` it builds; SCAFFOLD's control variates are a
+`fl/app.py`'s `local_train` and `train_handler` already support a FedProx proximal
+term (`mu > 0`, read from the per-round `ConfigRecord`), per the plan's Step 3.1 design
+goal ("one client serves all strategies"). `pyproject.toml`'s `[tool.flwr.app.config]`
+default is `mu = 0.0` (off), and no strategy on the server side ever sets it to
+anything else yet -- `fl/app.py`'s `main()` only drives the built-in `FedAvg`. A real
+`FedProx(Strategy)` (Phase 5) still needs to be written and wired to set `mu` in the
+train `ConfigRecord` it builds; SCAFFOLD's control variates are a
 separate, not-yet-designed extension (they need the client to receive *and return*
 extra per-client state beyond the model weights, which changes the `RecordDict` shape
 client and server exchange -- deferred to Phase 5, not stubbed now).

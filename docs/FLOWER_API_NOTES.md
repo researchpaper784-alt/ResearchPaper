@@ -214,22 +214,30 @@ for per-round overrides, `Message(content=..., reply_to=msg)` replies. (2) `flwr
    requires an inclusive `>=` lower bound. Changed to `flwr>=1.36.0,<1.37.0` (still
    resolves to exactly the installed 1.36.0 today).
 
-After both fixes, `flwr build` succeeds and resolves both component paths
-(`fedswarm.fl.server_app:app`, `fedswarm.fl.client_app:app`) -- real confirmation the
-`[tool.flwr.app.components]` strings are correct, not an assumption. The reference
-app's README confirms `flwr run . --stream` (no `--federation` flag, no
+After both fixes, `flwr build` succeeds and resolves both component paths -- real
+confirmation the `[tool.flwr.app.components]` strings are correct, not an assumption.
+The reference app's README confirms `flwr run . --stream` (no `--federation` flag, no
 `[tool.flwr.federations]` section) uses a default local/CPU federation -- matches this
-repo's `make smoke` target.
+repo's `make smoke` target, and works on a CPU-only Colab runtime unchanged (see
+`fl/app.py`'s module docstring: nothing here requires a GPU).
+
+**2026-09-16, consolidated:** `fl/task.py`, `fl/client_app.py`, `fl/server_app.py`, and
+`fl/checkpoint.py` were merged into one file, `fl/app.py` (at the author's request, for
+a single file that's easy to read start-to-finish and easy to hand to Colab -- no
+behavior change). `[tool.flwr.app.components]` now points both component strings at it:
+`fedswarm.fl.app:server_app` / `fedswarm.fl.app:client_app` (two distinctly-named
+objects in the one file, re-verified with `flwr build` after the move). `tests/
+test_fl_app.py` replaces the four now-deleted test files with the same 23 tests.
 
 **What `flwr build` cannot verify** (needs the `simulation` extra, i.e. Colab/Kaggle):
 whether `strategy.start()`'s actual round-by-round `Grid` behavior, `node_config`
-population per SuperNode, and message routing match what `fl/client_app.py` and
-`fl/server_app.py` assume. `ClientApp.train()`/`.evaluate()` and `ServerApp.main()`'s
-decorators are confirmed (by reading their source) to register and return the function
-*unmodified* -- so `tests/test_client_app.py` and `tests/test_server_app.py` call the
-handlers directly with hand-built `Message`/`Context`/`ArrayRecord` objects, which
-exercises every line of this repo's own logic but not Flower's runtime routing itself.
-The first real `flwr run .` on Colab is what confirms that; nothing local can.
+population per SuperNode, and message routing match what `fl/app.py` assumes.
+`ClientApp.train()`/`.evaluate()` and `ServerApp.main()`'s decorators are confirmed (by
+reading their source) to register and return the function *unmodified* -- so
+`tests/test_fl_app.py` calls the handlers directly with hand-built `Message`/`Context`/
+`ArrayRecord` objects, which exercises every line of this repo's own logic but not
+Flower's runtime routing itself. The first real `flwr run .` on Colab is what confirms
+that; nothing local can.
 
 ## torch/numpy pin note
 
