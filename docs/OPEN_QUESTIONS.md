@@ -319,6 +319,39 @@ this sits open -- it has zero Flower dependency and is fully buildable/testable 
 this Mac, unlike Phase 3's FL harness. Revisit this entry once a Flower release lands
 past PR #7391, or if Kaggle is tried as an alternative to Colab.
 
+**UPDATE, 2026-09-17 (later the same day) -- Phase 3's acceptance test has actually
+passed, on a teammate's machine.** `results/fl/e35285b33a_0.json` (gitignored, kept
+locally, delivered via `fl_results.zip`) is a real, verified result: `"status":
+"completed"`, `num_rounds_completed: 2`, `run_id` format matches
+`utils/results.py::make_run_id` exactly (10-char config hash + `_seed`), and
+`provenance.git_sha = 9b01a4621a256e2c170501fc7608197411165590` is confirmed (via
+`git cat-file -t`) to be this repo's own real commit -- the `phase-4` tip, i.e. this
+teammate ran genuine Phase-4-era code, not something forked or hand-edited. Round-by-
+round macro-F1 (0.054 -> 0.455 -> 0.447) and per-class recall look like real training
+(round 0's collapse to predicting one class is the expected random-init signature),
+not fabricated numbers.
+
+**The one variable that changed from every failed attempt in this file**:
+`provenance.gpu = {"available": false, "backend": "cpu"}` and `packages.torch =
+"2.10.0+cpu"` -- a **CPU-only** runtime, not GPU. Every failed attempt logged above in
+this same entry was on a GPU-visible Colab T4 instance. This is a real, testable
+correlation, not yet a confirmed causal fix: it's consistent with the earlier-ruled-
+out CPU-*count* starvation theory being wrong for the reason given (client-app
+compute time was always exactly 0.0, meaning the task never dispatched at all) while
+still leaving open a *different* GPU-specific failure mode in Flower's Ray-based
+Simulation Runtime -- e.g. a GPU-actor scheduling/heartbeat interaction that a CPU-
+only runtime simply never exercises. Needs one direct test to confirm: run the exact
+same `colab_fl_smoke.ipynb` on a Colab **CPU** runtime (Runtime > Change runtime type
+> CPU), not GPU, and see if it passes reliably. Until that's done, "switch to CPU
+runtime" is a promising, evidence-backed lead, not yet a verified fix -- don't
+overwrite the PR #7391 theory above, add to it.
+
+**Status update**: no longer purely "blocked" -- Phase 3 has one genuine success to
+build from. Phases 4 and 5 (built on top of Phase 3's FL harness, `fl/app.py`) remain
+correctly described elsewhere as "not yet run inside a live `flwr run`" until the CPU-
+runtime theory is confirmed and one of the newer strategies is actually driven through
+a real `flwr run .` the same way.
+
 ## Phase 4 -- two deliberate scope reductions in FedACO, not oversights
 
 Both flagged in `paper/ALGORITHM.md` alongside the code; recorded here too per this
