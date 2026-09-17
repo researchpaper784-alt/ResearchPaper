@@ -283,3 +283,33 @@ Colab (blocked itself, separately, on missing phone verification -- see the Kagg
 dataset access entry above); (c) proceed with Phase 4 (`aco/` -- pure tensor math, no
 Flower dependency, fully buildable and testable on this Mac) while this sits open,
 since it doesn't block that work at all.
+
+**2026-09-17 follow-up -- two more documented workarounds tried, both ruled out with
+real evidence, not assumption:**
+
+- `FLWR_DISABLE_RUNTIME_DEPENDENCY_INSTALLATION=1` (env var, set before `flwr run .`,
+  confirmed real in the Flower docs -- `how-to-install-app-dependencies-at-runtime.html`,
+  verified against raw HTML, not a search summary): **no effect**. The per-run
+  isolated `uv sync` environment (`Created env for run in: /root/.flwr/runtime-envs/...`,
+  full ~190-package install list) still runs in full on every attempt with this var
+  set. Caveat that turned out correct: that doc describes a long-running
+  `SuperLink`/`SuperNode` deployment; `flwr run`'s ad-hoc local `SuperLink` (used for
+  `Simulation`) apparently does not read the same flag.
+- `--federation-config="client-resources-num-cpus=1"` (per-run override, confirmed
+  real syntax in `how-to-run-simulations.html`): also **no effect**. Motivating
+  theory was CPU starvation -- the docs state the *default* Simulation Runtime
+  assigns 2 CPU cores per `ClientApp` for 2 simulated SuperNodes (4 total needed to
+  run both at once), and this Colab instance's `nproc` reports only 2 -- a plausible
+  deadlock. Downsizing to 1 CPU/client did not change the outcome at all: same
+  `"No heartbeat received from the task"`, same `clientapp-seconds: 0.0`.
+
+**The clincher, from `flwr ls --format json` across all 8 attempts so far**:
+`compute-time.clientapp-seconds` is exactly `0.0` on *every single run*, including one
+that ran for 752s (12.5 minutes, run `1134741074203875862`) before failing. 12 minutes
+is far longer than any plausible CPU-queueing delay on a 2-core box -- if this were
+resource contention, the ClientApp actor would have gotten scheduled well before then.
+Zero client-side compute time, regardless of how long the run is left running, points
+at the ClientApp task never being dispatched at the protocol level at all -- consistent
+with the open PR #7391 heartbeat-RPC gap, not with any resource-sizing knob this repo
+or a `flwr run` flag controls. CPU-resource starvation is now a ruled-out theory, not
+an open one.
