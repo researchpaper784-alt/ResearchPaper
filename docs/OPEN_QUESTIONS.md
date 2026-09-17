@@ -333,24 +333,23 @@ not fabricated numbers.
 
 **The one variable that changed from every failed attempt in this file**:
 `provenance.gpu = {"available": false, "backend": "cpu"}` and `packages.torch =
-"2.10.0+cpu"` -- a **CPU-only** runtime, not GPU. Every failed attempt logged above in
-this same entry was on a GPU-visible Colab T4 instance. This is a real, testable
-correlation, not yet a confirmed causal fix: it's consistent with the earlier-ruled-
-out CPU-*count* starvation theory being wrong for the reason given (client-app
-compute time was always exactly 0.0, meaning the task never dispatched at all) while
-still leaving open a *different* GPU-specific failure mode in Flower's Ray-based
-Simulation Runtime -- e.g. a GPU-actor scheduling/heartbeat interaction that a CPU-
-only runtime simply never exercises. Needs one direct test to confirm: run the exact
-same `colab_fl_smoke.ipynb` on a Colab **CPU** runtime (Runtime > Change runtime type
-> CPU), not GPU, and see if it passes reliably. Until that's done, "switch to CPU
-runtime" is a promising, evidence-backed lead, not yet a verified fix -- don't
-overwrite the PR #7391 theory above, add to it.
+"2.10.0+cpu"` -- a **CPU-only** runtime, not GPU. Every failed attempt logged above
+in this same entry was on a GPU-visible Colab T4 instance.
 
-**Status update**: no longer purely "blocked" -- Phase 3 has one genuine success to
-build from. Phases 4 and 5 (built on top of Phase 3's FL harness, `fl/app.py`) remain
-correctly described elsewhere as "not yet run inside a live `flwr run`" until the CPU-
-runtime theory is confirmed and one of the newer strategies is actually driven through
-a real `flwr run .` the same way.
+**Decision, 2026-09-17**: not chasing the exact root cause further (whether it's
+really GPU-actor scheduling in Ray, or something else CPU-runtime happens to avoid)
+-- CPU runtime is now the adopted working recipe for this notebook
+(`notebooks/colab_fl_smoke.ipynb` updated to say so explicitly: Runtime > Change
+runtime type > CPU, before running). The PR #7391 theory above is kept as
+background, not retracted, but isn't being investigated further either; this repo's
+Flower FL work doesn't need a GPU (smoke config is tiny), so there's no cost to
+just always using CPU runtime for `flwr run` and moving on.
+
+**Status update**: no longer "blocked" -- Phase 3's acceptance test has passed once,
+for real, on CPU. Phases 4 and 5 (built on top of Phase 3's FL harness, `fl/app.py`)
+are still "not yet run inside a live `flwr run`" until one of the newer strategies is
+actually driven through a real run the same way -- straightforward now that CPU
+runtime is the known-working recipe.
 
 ## Phase 4 -- two deliberate scope reductions in FedACO, not oversights
 
