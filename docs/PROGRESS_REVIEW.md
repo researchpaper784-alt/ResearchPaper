@@ -1,10 +1,12 @@
 # Progress review — 2026-09-17
 
 Where the project stands. Phases 0–3 in brief; Phases 4 and 5 in detail, since that is
-what changed.
+what this review was originally written about; Phases 6, 7 and 9 appended at the end,
+built after it.
 
-Two commits: `0bb64b7` (Phase 4) and `1deb1b9` (Phase 5). 19 files, +1969 / −42 lines.
-Tests went from 175 to 194, all passing. Ruff clean.
+Eight commits from `637ec02` through `d517633`: Phase 4, Phase 5, this review, the health
+check, the sweep runner, the ablation config and table builder, and the figures.
+31 files, +5328 / −49 lines. Tests went from 175 to 251, all passing. Ruff clean.
 
 ---
 
@@ -18,13 +20,16 @@ Tests went from 175 to 194, all passing. Ruff clean.
 | 3 — FL harness | Done (3 fixes this session) |
 | 4 — FedACO | **Done** |
 | 5 — baselines | **Done** |
-| 6 — main sweep | Not started |
-| 7 — ablations | Not started |
+| 6 — main sweep | **Built, never run** |
+| 7 — ablations | **Built, never run** |
 | 8 — robustness | Not started |
-| 9 — analysis | Not started |
+| 9 — analysis | **Built, never run on real results** |
 
-The line is between 5 and 6. Everything up to 5 is built and tested. Phase 6 is the first
-phase that spends GPU-hours instead of writing code.
+The line is no longer between phases — it is between *code* and *evidence*. Every phase
+except 8 now has working, tested infrastructure, and the project has **zero federated
+results**. Every FL run so far has been against a synthetic pixel cache (the real Phase-1
+manifest, fabricated images) because the raw JPEGs need Kaggle credentials the build
+environment does not have. The plumbing is proven end to end; not one number is.
 
 ---
 
@@ -257,8 +262,42 @@ this for the search grids, but not for sweep configs that do not exist yet.
 
 ---
 
+## Phases 6, 7 and 9 — added after the original review
+
+- **`scripts/run_sweep.py`** (Phase 6). 360 cells, resumable via `results/manifest.jsonl`.
+  Four of its design choices are failure-driven rather than stylistic: `--stream` always
+  (a bare `flwr run` returns before the run starts); exit codes ignored entirely (it lies
+  in both directions); preflight refuses to start on CPU oversubscription; result matching
+  includes seed and regime, because matching on less silently reuses one seed's result for
+  another and destroys the variance every error bar depends on.
+- **`configs/experiment/ablation_all.yaml`** (Phase 7). 150 cells. Only the ablations this
+  repo actually names — A1, A3, A9 — plus the knobs `OPEN_QUESTIONS.md` defers here. A2
+  and A4–A8 are deliberately absent: the implementation plan is not in the repository, and
+  labelling a guessed ablation with the plan's number would be worse than the gap.
+- **`scripts/make_tables.py`** (Phase 9). Incomplete cells are marked with their real `n`,
+  never dropped. Deltas are paired by seed and say so. FedACO rows carry `fallback` and
+  `τ entropy` beside the score, because a macro-F1 column cannot show that the colony
+  never searched.
+- **`scripts/make_figures.py`** (Phase 9). Emphasis encoding — FedACO and FedAvg take the
+  two validated categorical slots, the other ten baselines fold into one muted field,
+  because a palette carries ~8 hues before adjacent ones blur. `colony_health.png` is the
+  only figure that can show the mechanism did not run.
+
+Also fixed along the way: the strategy's own diagnostics (`pheromone_entropy`,
+`best_fitness`, `fallback_used`, `delta_mean_sq_norm`) were never written to the result
+file at all — they went to Flower's console and nowhere a checker could read them, despite
+Phase 4 having added `delta_mean_sq_norm` specifically to diagnose the degenerate regime.
+
 ## Next
 
-Phase 6. Two things to settle first: how client CPU is sized, and whether the missing
-`scripts/run_sweep.py`, `make_figures.py` and `make_tables.py` get built now — the
-Makefile already refers to all three.
+**One real-data run, before the sweep.** `make validate-fedaco K=4` then `make health`,
+in an environment with the dataset. It is roughly twenty minutes against the sweep's
+several hundred projected hours, and it settles three things at once: whether FedACO's
+mechanism actually runs, what a round really costs (the compute table is still estimates
+and says in bold not to cite them), and whether client CPU sizing holds at the target K.
+
+The one measurement available says **INERT** — τ 0.92% below uniform while the deposit
+floor was clear, which points at deposit *magnitude* rather than the floor. K=2 on
+synthetic pixels with a reduced budget proves nothing, which is exactly why the real run
+matters: the sweep will faithfully produce 360 cells whether or not the colony is
+searching.

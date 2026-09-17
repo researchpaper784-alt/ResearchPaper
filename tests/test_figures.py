@@ -173,3 +173,25 @@ def test_diverging_poles_are_two_hues_not_one_ramp() -> None:
     """Ablation deltas carry polarity, so the two arms must read as opposite. One hue
     would encode only magnitude and lose the better/worse distinction entirely."""
     assert make_figures.DIVERGING_BETTER != make_figures.DIVERGING_WORSE
+
+
+def test_round_axis_ticks_as_integers_on_short_runs(tmp_path: Path) -> None:
+    """Rounds are integers. Matplotlib's default locator picks fractional ticks when the
+    range is short -- a real 2-round run came out labelled 0.0, 0.2, 0.4, 0.6, 0.8, 1.0:
+    five rounds that do not exist. Harmless-looking on a 100-round sweep, nonsense on the
+    short runs people look at first."""
+    import matplotlib.pyplot as plt
+
+    results = [_run("fedaco", "iid", 0, [0.5, 0.6]), _run("fedavg", "iid", 0, [0.4, 0.5])]
+
+    out = figure_convergence(results, tmp_path / "c.png")
+    assert out is not None
+
+    # Re-plot the same data to inspect the locator the figure applies.
+    fig, ax = plt.subplots()
+    make_figures._integer_rounds(ax)
+    ax.plot([0, 1], [0.5, 0.6])
+    ticks = [t for t in ax.get_xticks() if 0 <= t <= 1]
+    plt.close(fig)
+
+    assert all(float(t).is_integer() for t in ticks), ticks

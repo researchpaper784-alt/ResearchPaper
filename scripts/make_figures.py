@@ -115,6 +115,17 @@ def _despine(ax) -> None:
         ax.spines[side].set_visible(False)
 
 
+def _integer_rounds(ax) -> None:
+    """Round numbers are integers, so the round axis must tick as integers.
+
+    Matplotlib's default locator picks fractional ticks when the range is short -- a
+    2-round smoke run came out labelled 0.0, 0.2, 0.4, 0.6, 0.8, 1.0, i.e. five rounds
+    that do not exist. Harmless-looking on a 100-round sweep, nonsense on the short runs
+    that get looked at first.
+    """
+    ax.xaxis.set_major_locator(plt.MaxNLocator(integer=True))
+
+
 def _regimes_of(results: list[dict]) -> list[str]:
     return sorted({cell_key(r)[1] for r in results})
 
@@ -160,6 +171,7 @@ def figure_convergence(results: list[dict], out: Path) -> Path | None:
         ax.set_title(regime)
         ax.set_xlabel("round")
         ax.set_ylabel("test macro-F1")
+        _integer_rounds(ax)
 
         # Field first, so the two series under discussion draw on top of it.
         for (strategy, cell_regime), curves in sorted(by_cell.items()):
@@ -434,6 +446,7 @@ def figure_colony_health(results: list[dict], out: Path, num_levels: int) -> Pat
         ax.set_title(regime)
         ax.set_xlabel("round")
         ax.set_ylabel("pheromone entropy")
+        _integer_rounds(ax)
 
         mean_curve = _mean_curve(series[regime])
         ax.plot(range(len(mean_curve)), mean_curve, color=SERIES_1, linewidth=2.0, zorder=3)

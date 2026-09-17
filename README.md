@@ -50,4 +50,41 @@ for the verified, installed Flower API this codebase targets.
 
 ## Figure/table → command map
 
-Populated as each phase lands; empty during Phase 0.
+Every artefact the paper cites, and the command that produces it. Each command is
+resumable and skips work already done, so re-running one after an interruption costs only
+what is missing.
+
+| Artefact | Command | Phase |
+|---|---|---|
+| Partition heterogeneity figures | `make figures-data` | 1 |
+| Centralized ceiling table | `make test` then `scripts/summarize_centralized.py` | 2 |
+| Per-baseline hyperparameter search | `make hparam-search` (`make hparam-search-plan` to cost it) | 5 |
+| IID narrow-band acceptance gate | `make iid-band` | 5 |
+| Main sweep, all cells | `make main` (`make main-plan` first — it prints the cost) | 6 |
+| Ablation sweep | `make ablations` (`make ablations-plan` first) | 7 |
+| `paper/tables/main.{md,csv}` | `make tables` | 9 |
+| `paper/tables/ablation.{md,csv}` | `make tables-ablation` | 9 |
+| `convergence.png`, `comparison.png`, `colony_health.png` | `make figures` | 9 |
+| `ablations.png` | `make figures-ablation` | 9 |
+
+### Before the sweep
+
+```bash
+make validate-fedaco K=4    # two short runs: FedACO and FedAvg, same seed and partition
+make health                 # does FedACO's mechanism actually do anything?
+```
+
+`make health` answers three questions the accuracy columns cannot: whether the colony is
+searching at all (pheromone entropy against its `log(L)` ceiling), whether the deposit
+floor has engaged, and whether the safety fallback — not the colony — is carrying any
+margin over FedAvg. A sweep run before that check can produce 360 cells of numbers about
+a mechanism that was never running. It costs about twenty minutes against the sweep's
+several hundred hours.
+
+⚠️ **Set client resources once per machine first.** The Flower Simulation Runtime assigns
+**2 CPUs per ClientApp**, so `K=20` requests 40 cores; oversubscription does not queue, it
+stalls at round 0 with idle actors and no error. `make validate-fedaco` runs this for you:
+
+```bash
+flwr federation simulation-config --client-resources-num-cpus 1
+```
