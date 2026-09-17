@@ -738,3 +738,27 @@ def test_merge_train_metrics_skips_rounds_absent_from_the_log() -> None:
     rounds_log = [{"round": 1, "test_macro_f1": 0.1}]
     merge_train_metrics(rounds_log, _FakeResult({1: {"a": 1.0}, 99: {"a": 2.0}}), round_offset=0)
     assert len(rounds_log) == 1
+
+
+def test_client_app_decorators_are_bound_to_the_real_handlers() -> None:
+    """Regression guard: a helper inserted between `@client_app.train()` and
+    `train_handler` silently rebinds the decorator to the helper.
+
+    That happened while wiring Phase 8's attacks. Flower then called the helper with a
+    `Message`, every client reply failed with `'Message' object is not iterable`, and the
+    global model never moved off its random initialization -- while `flwr run` still
+    exited 0 and wrote a complete-looking result file. The only visible symptom was an
+    accuracy that never improved, which on a 2-round smoke is indistinguishable from a
+    hard problem. Nothing else in this suite tests which function the decorator captured.
+    """
+    import inspect
+
+    from fedswarm.fl import app as app_module
+
+    for name in ("train_handler", "evaluate_handler"):
+        handler = getattr(app_module, name)
+        parameters = list(inspect.signature(handler).parameters)
+        assert parameters[:2] == ["msg", "context"], (
+            f"{name} has signature {parameters} -- a decorator is bound to the wrong "
+            "function, or the handler's arguments changed"
+        )

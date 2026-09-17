@@ -664,3 +664,21 @@ points at this command (and at `--federation-config`) instead.
 Unverified: whether pinning to 1 CPU is *sufficient* for K=20 on a 4-core box, or merely
 necessary. The failure mode is a silent stall, so this wants an explicit check at the
 target K before the sweep is launched, not an assumption.
+
+## Phase 8 -- `train_is_malicious` counts examples, not clients
+
+The per-reply `is_malicious` flag aggregates into the round metrics as
+`train_is_malicious`, and Flower aggregates client metrics **weighted by `num-examples`**.
+So the value is the fraction of malicious *examples*, not of malicious *clients*, and the
+two diverge exactly where this project operates -- under label/quantity skew, clients hold
+very different amounts of data.
+
+Measured on a verified live run: `attack-fraction=0.5` over 2 dirichlet-skewed clients
+reported `train_is_malicious = 0.293`, because the compromised client held 29% of the
+examples. Reading that number as "29% of clients were malicious" would be wrong by a
+factor of nearly two.
+
+Use it to confirm an attack fired at all; read `attack-fraction` from the run config for
+the client fraction. Not changed, because overriding Flower's aggregation for one key is
+more intrusive than the note is worth -- but any Phase 8 analysis that quotes a malicious
+*client* fraction has to take it from the config.

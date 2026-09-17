@@ -85,6 +85,12 @@ from fedswarm.data.partition import PartitionSpec, load_or_build
 from fedswarm.data.splits import MANIFEST_CSV
 from fedswarm.data.transforms import build_transforms
 from fedswarm.eval.evaluator import evaluate as evaluate_model
+from fedswarm.fl.attacks import (
+    attack_from_run_config,
+    is_malicious,
+    poison_labels,
+    poison_update,
+)
 from fedswarm.models.factory import build_model
 from fedswarm.strategies.factory import strategy_from_run_config
 from fedswarm.utils.results import make_run_id, write_result
@@ -430,6 +436,24 @@ _SCAFFOLD_CONTROL_PREFIX = "scaffold_c/"
 _SCAFFOLD_DELTA_PREFIX = "scaffold_dc/"
 
 
+def _poisoned_loader(loader: DataLoader, num_classes: int) -> DataLoader:
+    """Re-wrap a loader so its labels are cyclically shifted (Phase 8 `label_flip`).
+
+    Materializes the tensors rather than wrapping lazily: the underlying dataset reads
+    from a memory-mapped cache shared with every other client, so mutating it in place
+    would poison honest clients too -- a bug that would look like a devastatingly
+    effective attack.
+    """
+    images, labels = [], []
+    for batch_images, batch_labels in loader:
+        images.append(batch_images)
+        labels.append(poison_labels(batch_labels, num_classes))
+    if not images:
+        return loader
+    dataset = torch.utils.data.TensorDataset(torch.cat(images), torch.cat(labels))
+    return DataLoader(dataset, batch_size=loader.batch_size or 32, shuffle=True, num_workers=0)
+
+
 @client_app.train()
 def train_handler(msg: Message, context: Context) -> Message:
     model = build_model_from_run_config(context.run_config)
@@ -439,6 +463,20 @@ def train_handler(msg: Message, context: Context) -> Message:
 
     train_loader, _ = load_client_data(_partition_id(context), context.run_config)
     config = msg.content["config"]
+
+    # Phase 8. `attack="none"` (the default) leaves every path below untouched, so a
+    # non-robustness run behaves exactly as it did before this existed.
+    attack, attack_fraction, attack_scale = attack_from_run_config(context.run_config)
+    compromised = attack != "none" and is_malicious(
+        _partition_id(context),
+        int(context.run_config.get("num-clients", 20)),
+        attack_fraction,
+    )
+    if compromised and attack == "label_flip":
+        # Data poisoning: corrupt before training, so the client honestly reports a model
+        # trained on a lie. The update itself is well-formed, which is exactly why
+        # aggregation-level defences have little grip on it.
+        train_loader = _poisoned_loader(train_loader, int(context.run_config.get("num-classes", 4)))
 
     # SCAFFOLD (strategies/scaffold.py): present only when that strategy is active.
     scaffold_keys = [k for k in full_state if k.startswith(_SCAFFOLD_CONTROL_PREFIX)]
@@ -477,8 +515,31 @@ def train_handler(msg: Message, context: Context) -> Message:
     )
     metrics["client_id"] = _partition_id(context)
     metrics["server_round"] = int(config.get("server_round", -1))
+    # Recorded per reply so a result file says who attacked, rather than leaving it to be
+    # inferred from the run config and a rule about which ids are compromised.
+    #
+    # ⚠️ In the *aggregated* round metrics this lands as `train_is_malicious`, and Flower
+    # aggregates client metrics weighted by `num-examples` -- so it is the fraction of
+    # malicious **examples**, not of malicious **clients**. A verified live run at
+    # attack-fraction=0.5 over 2 dirichlet-skewed clients reported 0.293, because the
+    # compromised client happened to hold 29% of the data. Use it to confirm the attack
+    # fired; read `attack-fraction` from the config for the client fraction itself.
+    metrics["is_malicious"] = int(compromised)
 
-    arrays_out = ArrayRecord(model.state_dict())
+    local_state = model.state_dict()
+    if compromised and attack != "label_flip":
+        # Update poisoning: train honestly, then corrupt what gets sent. This is the
+        # threat model Krum, FedTrimmedAvg and FedMedian exist to survive.
+        local_state = poison_update(
+            OrderedDict((k, full_state[k]) for k in model_keys),
+            local_state,
+            attack,
+            attack_scale,
+            generator=torch.Generator().manual_seed(
+                int(context.run_config.get("seed", 0)) * 7919 + _partition_id(context)
+            ),
+        )
+    arrays_out = ArrayRecord(local_state)
     if global_c is not None and local_c is not None and params_before is not None:
         lr = float(config.get("lr", context.run_config.get("local-lr", 0.01)))
         tau = max(metrics["num_batches"], 1)

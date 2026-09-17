@@ -912,3 +912,68 @@ code and are not results**; they were written to a scratch directory, never to `
 
 `make figures` / `make figures-ablation`. Every Makefile target now points at a file that
 exists.
+
+---
+
+## 2026-09-17 — Phase 8: adversarial clients
+
+`src/fedswarm/fl/attacks.py` + `configs/experiment/robustness.yaml` (225 cells).
+
+### The gap this closes
+
+**There was no way to make a client behave maliciously anywhere in the codebase.** Three
+of this project's baselines — Krum, FedTrimmedAvg and FedMedian — are robust-aggregation
+rules whose entire justification is surviving Byzantine clients, and nothing could put one
+in front of them. Every number they would have earned in the main table comes from an
+entirely honest federation, where they have nothing to do but lose a little accuracy to
+their own trimming.
+
+`num-malicious-nodes`, which reads like the missing piece, is *Krum's own hyperparameter*
+— how many Byzantine clients Krum should assume are present. It makes nobody misbehave.
+The two are easy to confuse and were.
+
+FedACO has a stake as well: its desirability heuristic scores clients on alignment with
+the robust consensus and on update magnitude against the median, both explicitly anomaly
+signals, and `test_planted_bad_client` already asserts the unit-scale version of the
+claim. This is what lets it be made about a real run.
+
+### Two kinds of attack, kept apart
+
+`sign_flip`, `scaled` and `gaussian` poison the **update** after honest training — the
+threat model robust aggregation addresses. `label_flip` poisons the **data** before it, so
+the client sends a perfectly well-formed update computed from a lie, and aggregation-level
+defences have far less grip. A defence that handles one says nothing about the other, so a
+robustness claim has to name which it was tested against.
+
+Who is compromised is deterministic (the lowest `ceil(f·K)` partition ids), not resampled
+per round: a rotating attacker set measures something quite different from a fixed
+compromised subset, and a seeded-random choice would make the result depend on a seed the
+analysis never sees.
+
+### A decorator silently bound to the wrong function
+
+The first live attacked run exposed a bug worth recording for its failure mode rather than
+its cause. The new `_poisoned_loader` helper was inserted between `@client_app.train()`
+and `train_handler`, so **Flower registered the helper as the train handler**. It was
+called with a `Message`, every client reply failed with `'Message' object is not
+iterable`, and the global model never moved off its random initialization.
+
+`flwr run` still **exited 0 and wrote a complete-looking result file**. The only visible
+symptom was a test macro-F1 frozen at 0.054 — on a short run, indistinguishable from a
+hard problem. This is the third distinct time this session that `flwr run`'s exit code has
+been actively misleading. Fixed, and guarded by
+`test_client_app_decorators_are_bound_to_the_real_handlers`, since nothing in the suite
+previously tested *which* function a decorator captured.
+
+### Verified live
+
+`attack='sign_flip' attack-fraction=0.5 attack-scale=2.0`, K=2, 3 rounds: clients trained,
+no errors, and the result file records the attack config alongside a per-round
+`train_is_malicious` confirming the poisoned path executed.
+
+⚠️ That value came back **0.293, not 0.5** — Flower aggregates client metrics weighted by
+`num-examples`, so it is the fraction of malicious *examples*, not *clients*; the
+compromised client held 29% of the data. Recorded in docs/OPEN_QUESTIONS.md. Any Phase 8
+analysis quoting a malicious client fraction must take it from `attack-fraction`.
+
+`make robustness-plan` / `make robustness` / `make tables-robustness`.

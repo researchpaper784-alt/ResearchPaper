@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke validate-fedaco health hparam-search hparam-search-plan iid-band main main-plan ablations ablations-plan figures-data figures figures-ablation tables tables-ablation clean
+.PHONY: setup data test lint smoke validate-fedaco health hparam-search hparam-search-plan iid-band main main-plan ablations ablations-plan robustness robustness-plan tables-robustness figures-data figures figures-ablation tables tables-ablation clean
 
 setup:
 	uv venv --python 3.12 .venv
@@ -79,6 +79,19 @@ ablations-plan:
 
 ablations:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml
+
+# Phase 8. Robustness: adversarial clients (fl/attacks.py) and partial participation.
+# 225 cells. Three baselines here -- krum, trimmed-mean, median -- are robust-aggregation
+# rules whose entire justification is this sweep; every number they have so far was earned
+# against an entirely honest federation.
+robustness-plan:
+	.venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness.yaml --dry-run
+
+robustness:
+	.venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness.yaml
+
+tables-robustness:
+	.venv/bin/python scripts/make_tables.py --results-dir results/fl/robustness
 
 figures-data:
 	.venv/bin/python scripts/make_partition_figures.py

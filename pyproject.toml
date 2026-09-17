@@ -244,6 +244,25 @@ min-train-nodes = 2
 min-evaluate-nodes = 2
 min-available-nodes = 2
 
+# Phase 8 -- adversarial clients (fl/attacks.py). `attack="none"` leaves every code path
+# untouched, so a non-robustness run behaves exactly as it did before this existed.
+#   attack           none | sign_flip | scaled | gaussian | label_flip
+#                    sign_flip/scaled/gaussian poison the *update* after honest training
+#                    (what Krum/FedTrimmedAvg/FedMedian defend against); label_flip
+#                    poisons the *data* before it, so the update is well-formed and
+#                    aggregation-level defences have far less grip. A robustness claim has
+#                    to name which of the two it was tested against.
+#   attack-fraction  share of clients compromised; the lowest ceil(f*K) partition ids,
+#                    fixed rather than resampled per round so the result file identifies
+#                    exactly who attacked.
+#   attack-scale     amplification for sign_flip/scaled, noise multiple for gaussian.
+#
+# NOT to be confused with `num-malicious-nodes` above, which is Krum's own hyperparameter
+# -- how many Byzantine clients Krum should *assume* -- and makes nobody misbehave.
+attack = "none"
+attack-fraction = 0.0
+attack-scale = 1.0
+
 # Run-level.
 num-rounds = 2
 seed = 0
