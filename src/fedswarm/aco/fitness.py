@@ -33,12 +33,33 @@ class DataFreeFitnessConfig:
     gamma_alignment: float = 1.0  # gamma_1
     gamma_dispersion: float = 1.0  # gamma_2
     gamma_entropy: float = 0.1  # gamma_3
+    # Divide the dispersion term by trace(G)/K (`GramPrecompute.mean_sq_norm`) so it is
+    # dimensionless like the other two terms. Left configurable rather than hard-wired
+    # purely so the pre-normalization behavior stays reproducible for anyone re-running
+    # results produced before 2026-09-17; there is no experimental reason to set it
+    # False. See docs/EXPERIMENT_LOG.md for the measured justification.
+    normalize_dispersion: bool = True
 
 
 class DataFreeFitness:
     """F(alpha) from plan §4.5, evaluated in O(K) via the Gram trick (§4.6) -- the
     default and the method as proposed. No client data or extra round-trip needed
-    beyond what FedAvg already collects."""
+    beyond what FedAvg already collects.
+
+    The dispersion term is divided by `gram.mean_sq_norm` (trace(G)/K). Without that
+    division the three terms are not on comparable scales: alignment is a cosine in
+    [-1, 1] and the entropy penalty is in [0, log K], but dispersion is a raw squared
+    norm whose magnitude tracks the local-training step size. Measured over the
+    (lr, local_epochs) grid Phases 6-7 sweep, dispersion at the FedAvg point ranged
+    0.40 to 266.7 -- a 660x swing -- which drove F negative for every candidate in 6 of
+    9 configs. Because `colony.py` floors deposits at `max(F, 0)`, that silently zeroed
+    every pheromone deposit, leaving tau uniform and collapsing `tau^a * eta^b` to
+    `eta^b`: no colony search, no cross-round stigmergy, just deterministic
+    heuristic-greedy weighting, while the run still reported `fallback_used=0` (the
+    safety fallback compares F_best against F_fedavg under the *same* fitness, so it
+    cannot detect this). With the division, the same sweep holds dispersion in
+    [0.763, 0.933] and tau develops real spread in all 9 configs.
+    """
 
     def __init__(self, gram: GramPrecompute, config: DataFreeFitnessConfig | None = None) -> None:
         self.gram = gram
@@ -51,6 +72,8 @@ class DataFreeFitness:
             torch.sqrt(a_g_a) * math.sqrt(max(self.gram.rob_norm_sq, eps))
         )
         dispersion = weighted_dispersion(alpha, self.gram.gram)
+        if self.config.normalize_dispersion:
+            dispersion = dispersion / max(self.gram.mean_sq_norm, eps)
         concentration_penalty = math.log(alpha.numel()) - _entropy(alpha)
 
         f = (

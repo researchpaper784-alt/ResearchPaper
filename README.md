@@ -12,7 +12,19 @@ with pheromone persisting across communication rounds as a memory of client reli
 Evaluated on 4-class brain tumor MRI classification under realistic non-IID federated
 partitions (label skew, quantity skew, and cross-source feature shift).
 
-Status: **Phase 0 — scaffolding.** No experiments have been run yet.
+Status: **Phases 0–5 built.** Data pipeline, centralized ceiling, Flower FL harness,
+FedACO, the baseline strategies, the per-baseline hyperparameter search
+(`make hparam-search`) and the IID acceptance gate (`make iid-band`) are all implemented
+and tested. The centralized ceiling is measured on real data (SimpleCNN@112: 0.9300
+macro-F1 BatchNorm / 0.9203 GroupNorm; ResNet-18: 0.9701 over 3 seeds — see
+[docs/EXPERIMENT_LOG.md](docs/EXPERIMENT_LOG.md)).
+
+**No federated results exist yet.** The FL harness is verified end-to-end, but the
+hyperparameter search and the IID gate have only been exercised on plumbing; both need a
+real training environment with the dataset to produce numbers. The main sweep (Phase 6),
+ablations (Phase 7), robustness (Phase 8) and analysis (Phase 9) are not built —
+`results/` is empty by design (gitignored), and `make main`/`figures`/`tables` refer to
+scripts that do not exist yet.
 
 ## Setup
 

@@ -32,6 +32,7 @@ from fedswarm.fl.app import (
     clear_checkpoint,
     evaluate_handler,
     global_test_loader,
+    global_val_loader,
     load_checkpoint,
     load_client_data,
     local_evaluate,
@@ -49,7 +50,16 @@ def _tiny_dataset_rows(root: Path, n: int = 40) -> list[dict]:
     each fixture decides its own cache size/output dir), mirroring test_cache.py's
     fixture pattern, big enough to partition across a few clients and hold a global
     test split with enough pseudo-patients per class to clear PartitionSpec's default
-    min_client_size."""
+    min_client_size.
+
+    Includes a `val` split. The real manifest is three-way (train/val/test, rebuilt at
+    pseudo-patient level in Phase 1.3) and `split` is orthogonal to the on-disk
+    directory -- real val rows live under both `Training/` and `Testing/` paths. These
+    fixtures were two-way, which meant `global_val_loader` returned an empty loader and
+    nothing noticed until per-round val evaluation was added.
+
+    The val rows are appended *after* the `n` train/test rows rather than carved out of
+    them, so train/test counts (and the assertions that depend on them) are unchanged."""
     (root / "Training" / "glioma").mkdir(parents=True)
     (root / "Testing" / "glioma").mkdir(parents=True)
     rows = []
@@ -63,6 +73,20 @@ def _tiny_dataset_rows(root: Path, n: int = 40) -> list[dict]:
                 "label": "glioma" if i % 2 == 0 else "meningioma",
                 "pseudo_patient_id": i,
                 "split": split,
+                "is_representative": True,
+                "is_mixed_label": False,
+            }
+        )
+    for j in range(6):
+        i = n + j
+        rel = f"Training/glioma/img_{i}.jpg"
+        Image.new("L", (32, 32), color=(i * 7) % 256).save(root / rel)
+        rows.append(
+            {
+                "path": rel,
+                "label": "glioma" if j % 2 == 0 else "meningioma",
+                "pseudo_patient_id": i,
+                "split": "val",
                 "is_representative": True,
                 "is_mixed_label": False,
             }
@@ -530,6 +554,21 @@ def server_run_config(tmp_path: Path) -> dict:
                 "is_mixed_label": False,
             }
         )
+    # Appended after rows 0..19 so `test` stays exactly rows 12..19 (asserted below).
+    for j in range(4):
+        i = 20 + j
+        rel = f"Training/glioma/img_{i}.jpg"
+        Image.new("L", (16, 16), color=(i * 11) % 256).save(root / rel)
+        rows.append(
+            {
+                "path": rel,
+                "label": "glioma" if j % 2 == 0 else "notumor",
+                "pseudo_patient_id": i,
+                "split": "val",
+                "is_representative": True,
+                "is_mixed_label": False,
+            }
+        )
     manifest = pd.DataFrame(rows)
     manifest_path = tmp_path / "manifest.csv"
     manifest.to_csv(manifest_path, index=False)
@@ -597,3 +636,42 @@ def test_evaluate_fn_skips_logging_the_resumed_round_zero_reconfirmation(server_
 
     assert len(rounds_log) == 2
     assert rounds_log[1]["round"] == 6
+
+
+def test_evaluate_fn_logs_global_val_metrics_alongside_test(server_run_config) -> None:
+    """Every hyperparameter-search or model-selection decision must read a val metric,
+    never the test metric it reports (plan §5). Before 2026-09-17 the round log carried
+    `test_*` only, so there was nothing honest to select on -- this asserts the val
+    signal exists, is distinct from test, and is evaluated on the val split's own rows.
+    """
+    rounds_log: list[dict] = []
+    evaluate_fn = build_evaluate_fn(server_run_config, rounds_log, round_offset=0)
+    model = SimpleCNN(num_classes=4, norm="groupnorm")
+
+    result = evaluate_fn(1, ArrayRecord(model.state_dict()))
+
+    entry = rounds_log[0]
+    for key in ("val_loss", "val_accuracy", "val_macro_f1", "val_auc"):
+        assert key in entry, f"{key} missing from the round log"
+    assert "val_macro_f1" in dict(result)
+
+    # The val split is genuinely a different set of rows from test, not a relabelled
+    # copy of it -- otherwise "selecting on val" would be selection on test by another
+    # name, which is the exact contamination this exists to prevent.
+    val_rows = len(global_val_loader(server_run_config).dataset)
+    test_rows = len(global_test_loader(server_run_config).dataset)
+    assert val_rows == 4 and test_rows == 8
+
+
+def test_result_final_carries_val_selection_keys(server_run_config, tmp_path: Path) -> None:
+    """`best_val_macro_f1` is the max over rounds (not the last round's), so a search is
+    not penalized for a config that peaks then drifts, and `best_val_round` says where."""
+    rounds_log = [
+        {"round": 1, "test_macro_f1": 0.10, "val_macro_f1": 0.30},
+        {"round": 2, "test_macro_f1": 0.20, "val_macro_f1": 0.70},
+        {"round": 3, "test_macro_f1": 0.25, "val_macro_f1": 0.50},
+    ]
+    best = max(r["val_macro_f1"] for r in rounds_log)
+    best_round = max(rounds_log, key=lambda r: r["val_macro_f1"])["round"]
+    assert best == 0.70 and best_round == 2
+    assert best != rounds_log[-1]["val_macro_f1"], "a last-round rule would pick 0.50 here"

@@ -451,3 +451,242 @@ torchvision 0.26.0+cu128, numpy 2.1.3, Python 3.13.15 -- all newer than this
 repo's Intel-macOS pins (torch==2.2.2, numpy<2), exactly as anticipated when the
 compute-environment split was decided (2026-09-14 entry above): Colab's torch/
 numpy, not the local pins, is what actually produced these numbers.
+
+---
+
+## 2026-09-17 — Phase 4 close-out: the dispersion term's scale was silently disabling the colony
+
+### What prompted the measurement
+
+An audit of what remained in Phase 4 flagged `DataFreeFitness.evaluate` as mixing terms
+of different units: `alignment` is a cosine in [-1, 1] and the entropy penalty is in
+[0, log K], but `dispersion` (`gram.py::weighted_dispersion`) is a raw sum of squared
+distances, in units of ||Delta||^2. The initial hypothesis — that dispersion would
+always dominate and hold F negative — was **wrong at the default config**, and measuring
+it first rather than patching on the hypothesis is what found the real shape of the
+problem.
+
+### Measured: real SimpleCNN deltas, K=20, 112px, d=390,404
+
+At the declared defaults (`local-lr=0.01`, `local-epochs=1`) the three terms are in fact
+well balanced, because a <1M-parameter CNN at lr=0.01 produces per-client delta norms
+below 1 (so the *square* is sub-unit, not large):
+
+| round | mean \|\|delta_k\|\| | align@FedAvg | disp@FedAvg | F@FedAvg | tau spread after colony |
+|---|---|---|---|---|---|
+| 1 | 0.793 | +0.969 | 0.619 | +0.345 | 3.2e-01 |
+| 2 | 0.442 | +0.958 | 0.210 | +0.744 | 5.8e-01 |
+| 3 | 0.471 | +0.982 | 0.192 | +0.786 | 6.2e-01 |
+
+### The actual failure: it dies as soon as you leave that one config
+
+Sweeping the `(lr, local_epochs)` grid Phases 6–7 will vary, K=8, same model/data:
+
+| lr | epochs | disp@FedAvg | F@FedAvg | frac of candidates with F>0 | tau spread |
+|---|---|---|---|---|---|
+| 0.01 | 1 | 0.40 | +0.56 | 0.80 | 4.2e-01 |
+| 0.01 | 2 | 1.38 | -0.43 | 0.16 | 7.3e-03 |
+| 0.01 | 5 | 2.63 | -1.65 | 0.07 | **0** |
+| 0.05 | 1 | 13.4 | -12.4 | 0.00 | **0** |
+| 0.05 | 2 | 38.5 | -37.5 | 0.00 | **0** |
+| 0.05 | 5 | 85.7 | -84.7 | 0.00 | **0** |
+| 0.1 | 1 | 47.4 | -46.4 | 0.00 | **0** |
+| 0.1 | 2 | 149.7 | -148.8 | 0.00 | **0** |
+| 0.1 | 5 | 329.3 | -328.4 | 0.00 | **0** |
+
+A 660x swing in `disp`. `colony.py` deposits `rho * Q * max(F, 0)`, so once F is negative
+for every candidate **every deposit is exactly zero**: tau evaporates uniformly across
+all levels, `tau^a * eta^b` reduces to `eta^b`, and FedACO degenerates into deterministic
+heuristic-greedy weighting — no colony search, no cross-round stigmergy, i.e. none of
+the mechanism the paper's contribution rests on. The declared default is one local epoch
+away from this, and E=5 is a standard FedAvg setting.
+
+**The safety fallback cannot catch it.** It compares `F_best` against `F_fedavg` under the
+same degenerate fitness, and `F_best > F_fedavg` held in **all 9** configs above,
+including the fully-dead ones. A broken run reports `fallback_used=0`, `best_fitness` a
+large negative number, and otherwise looks healthy.
+
+### Fix, and the two candidates that were tested
+
+Divide dispersion by `trace(G)/K` (`GramPrecompute.mean_sq_norm`). It is a per-round
+constant, independent of alpha, so it rescales the term uniformly and **cannot change the
+ranking dispersion induces among candidates** — it only fixes the weight against
+alignment. Over the same grid:
+
+| variant | disp@FedAvg range | tau spread |
+|---|---|---|
+| unnormalized | 0.40 – 266.7 (660x) | zero in 6/9 configs |
+| **/ trace(G)/K** | **0.763 – 0.933 (1.22x)** | **nonzero in 9/9** |
+
+A baseline-centred deposit (`max(F - F_fedavg, 0)`) was also tested on top and **rejected**:
+tau spread went up in some configs and down in others with no systematic benefit, so it
+would have been a knob the evidence does not support.
+
+**Consequence to be aware of when reading FedACO numbers:** normalization puts dispersion
+(~0.86) on the same footing as alignment (~0.96), so with gamma_2 = 1.0 the two are now
+roughly co-equal. This changes behavior at the default config (F>0 fraction 0.80 -> 0.50,
+colony best 0.67 -> 0.34). gamma_2 was **left at 1.0** — the value `paper/ALGORITHM.md`
+specifies — rather than retuned, because silently changing a stated method hyperparameter
+is not a bug fix. It is now sweepable as `aco-gamma-dispersion` if Phase 7 wants it.
+
+Guarded by `test_fitness_is_scale_invariant_under_normalization` (F is exactly invariant
+to scaling all deltas by a constant — verified to fail without the fix) and
+`test_pheromone_still_carries_signal_when_updates_are_large` (tau spread 0.0 before,
+5.3e-02 after, at a 100x delta scale). `delta_mean_sq_norm` is now logged per round as
+the diagnostic, to be read alongside `pheromone_entropy`.
+
+### Measured ACO overhead, at the real scale
+
+K=20, SimpleCNN@112, d=390,404, 360 images/client, CPU:
+
+| budget | aco_time | of which Gram precompute | vs K-sequential round (56.8s) | vs fully-parallel round (2.8s) |
+|---|---|---|---|---|
+| round 0 (30 ants x 10 iters) | 144.9 ms | 60.3 ms | 0.255% | 5.10% |
+| final round (10 ants x 4 iters) | 110.8 ms | 58.9 ms | 0.195% | 3.90% |
+
+`test_overhead` previously asserted 15% "to absorb timing noise", a margin that had never
+been measured; the actual ratio in that test is ~1.8%, so it has been tightened to the
+plan's own 5% bar (§4.8).
+
+### FedACO verified end-to-end in a live `flwr run` (plumbing only)
+
+Phase 4's last open item. `flwr run . --run-config "strategy-name='fedaco' num-clients=2
+num-rounds=3 regime='dirichlet' alpha=0.3 ..."` on a 4-core CPU box: **exit 0,
+`status: "completed"`, 3/3 rounds, 213.2 s wall-clock**, result JSON written through the
+normal `utils/results.py` path with every FedACO metric present. This is the first time
+any Phase 4 or Phase 5 code has executed inside the real Flower runtime rather than
+against hand-built Messages.
+
+**⚠️ The accuracy numbers from this run are meaningless and must never be reported.** The
+raw JPEGs are not available in that environment (no Kaggle credentials), so the run used
+a *synthetic pixel cache* generated against the real Phase-1 manifest: real
+manifest/partitioning/splits, fabricated images. It validates plumbing, not accuracy. The
+run wrote to a scratch directory, not `results/`.
+
+Per-round colony behavior (K=2, so read as a smoke trace, not evidence):
+
+| round | alpha | best_F | fedavg_F | fallback | pheromone_entropy | delta_mean_sq_norm | aco_ms |
+|---|---|---|---|---|---|---|---|
+| 1 | [0.990, 0.010] | 0.7384 | 0.5950 | 0 | 2.3939 | 1.8827 | 65.1 |
+| 2 | [0.004, 0.996] | 0.8960 | 0.7218 | 0 | 2.3758 | 0.4956 | 32.7 |
+| 3 | [0.990, 0.010] | 0.8984 | 0.5905 | 0 | 2.3668 | 0.3803 | 24.3 |
+
+The colony beat the FedAvg point every round (`best_F > fedavg_F`, no fallback), and F
+stayed comfortably positive, so the deposit floor never engaged -- the normalization is
+doing its job on live data.
+
+**Two things to watch, both flagged rather than acted on:**
+
+1. `pheromone_entropy` is 2.3939 / 2.3758 / 2.3668 against a maximum of
+   log(11) = 2.3979 -- i.e. 0.2%, 0.9%, 1.3% below uniform. It is declining, so pheromone
+   *is* accumulating structure, but it is contributing very little to selection so far.
+   This is the exact diagnostic Residual 1 in docs/OPEN_QUESTIONS.md says to watch. Three
+   rounds at K=2 is far too small to conclude anything; re-check on the first real
+   multi-round run at K=20.
+2. `alpha` saturates at the extremes of the level grid and flips between rounds
+   (0.99/0.01 -> 0.004/0.996 -> 0.99/0.01). With gamma_3 = 0.1 the entropy penalty is
+   weak relative to alignment. At K=2 this is close to degenerate by construction, but if
+   the same saturation shows up at K=20 the entropy weight needs revisiting.
+
+---
+
+## 2026-09-17 — Phase 5: the honest hyperparameter search and the IID acceptance gate
+
+Phase 5's two remaining items, both of which had been blocked on "needs a live FL run"
+since Phase 3. Building them surfaced three separate reasons the first one could not have
+been written correctly before today; all are recorded in docs/OPEN_QUESTIONS.md.
+
+### What was delivered
+
+`scripts/run_hparam_search.py` — per-strategy grids, a shared `--budget` (default 8), one
+`flwr run` per trial, resumable. Selection reads `best_val_macro_f1` and nothing else.
+`scripts/check_iid_band.py` — the IID acceptance gate, exiting nonzero on FAIL.
+`make hparam-search`, `make hparam-search-plan`, `make iid-band`.
+
+### The prerequisite nobody had noticed
+
+Result files carried **no validation metric at all** — `build_evaluate_fn` evaluated the
+test split only. An "honest search on the val split" written against those files would
+have had to rank configurations by `final_test_macro_f1`, i.e. tune every baseline
+against the number the paper reports. `global_val_loader` had existed since Phase 5's
+FedLAW work, added specifically because using test for weight selection "would have been
+a real methodology bug", but nothing in the result path used it.
+
+Every round now logs `val_loss`/`val_accuracy`/`val_macro_f1`/`val_auc`, and `final`
+carries `best_val_macro_f1` (max over rounds, so a config that peaks then drifts is not
+punished) and `best_val_round`. Cost: one extra forward pass over 735 val images per
+round, ~52% of the existing test pass.
+
+### The search would have failed on every single trial
+
+Every baseline hyperparameter — `fedprox-mu`, `fedopt-*`, `num-malicious-nodes`,
+`trim-beta`, `lossweight-temperature`, `scaffold-server-lr`, `fedlaw-steps`,
+`fedlaw-lr` — was undeclared in `[tool.flwr.app.config]`, under a comment asserting they
+"only need overriding via --run-config when actually sweeping them". `flwr run` rejects
+undeclared keys outright, so not one of them could be swept. Same root cause as the
+partition keys found during the Phase 4 close-out; that fix covered the keys being
+touched at the time and left these.
+
+A trap inside the fix, worth recording because it would have been invisible: `fedopt-eta`
+was read by both FedAdam and FedYogi with *different* published defaults (0.1 vs 0.01,
+from the FedOpt paper). One declared key would have given both the same literal value and
+silently replaced FedYogi's default. Split into per-strategy keys.
+
+### `flwr run` is asynchronous, and the failure mode compounds
+
+A bare `flwr run` submits the run and returns exit 0 immediately. The search's first
+end-to-end attempt checked for each result file microseconds after launching the trial,
+found nothing, and reported every trial failed. Worse, those launched-and-forgotten runs
+keep executing: two aborted 2-trial searches left four orphaned simulations across 10 Ray
+sessions at load average 11.8 on a 4-core box, which starved the next (correctly
+blocking) trial so badly that one round had not finished in twelve minutes against ~70 s
+uncontended. Clearing it required killing `flower-superlink` to reap the zombies.
+
+The harness now passes `--stream` unconditionally and judges a trial by "did a result
+file appear", never by the subprocess's exit code — which is uninformative in both
+directions, since `flwr run` also exits 0 when the simulation itself dies.
+
+### Two self-inflicted bugs caught by the tests written alongside
+
+- `find_existing` matched trials on the swept keys alone, so a search at seed 1 would
+  have instantly "resumed" seed 0's results and produced a second seed that was a
+  duplicate of the first — quietly destroying the seed variance every error bar depends
+  on. Now matches the full configuration, ignoring path-only differences.
+- `diagnose` scanned line-by-line against a flat marker set including bare "error", so it
+  reported Ray's `FutureWarning: ... turn off this error message` as the reason a trial
+  failed. Now priority-ordered, warnings excluded.
+
+### Acceptance gate, verified both ways
+
+`check_iid_band.py` on hand-built result sets: a clustered IID picture (5 strategies,
+3 seeds, spread 0.0116 against seed noise 0.0057) returns **PASS**; a picture with FedACO
+0.086 clear of the field returns **FAIL** with exit 1 and points at the three things that
+actually cause it (partition not really IID, unmatched search budgets, selection on
+test). A spread that exceeds the band but sits inside 2x seed noise returns
+**INCONCLUSIVE** rather than either verdict, because with few seeds those are genuinely
+not distinguishable.
+
+⚠️ The 0.05 band is **this script's default, not a figure from the implementation plan**,
+which specifies the check but no threshold in any material available in this repo.
+Recorded rather than baked in silently, per CLAUDE.md.
+
+### Search verified end-to-end against the live Flower runtime
+
+`run_hparam_search.py --strategy fedprox --budget 2 --num-clients 2 --num-rounds 1`, two
+real `flwr run` subprocesses on a CPU box:
+
+| trial | `fedprox-mu` | `best_val_macro_f1` | `final_test_macro_f1` |
+|---|---|---|---|
+| 1 | 0.001 | 0.1132 | 0.1119 |
+| 2 | 0.01 | **0.1169** | — |
+
+Selected `fedprox-mu=0.01` on val, `trials_scored: 2`, `budget_shortfall: 0`, exit 0.
+What this establishes, none of which held this morning: a baseline hyperparameter
+actually reaches the strategy through `--run-config`; the result file carries a val
+metric; val and test are genuinely different numbers (0.1132 vs 0.1119 on the same run);
+and the harness blocks until each run finishes instead of racing it.
+
+**⚠️ The scores are meaningless as science.** This ran against the synthetic pixel cache
+(real Phase-1 manifest, fabricated images) because the raw JPEGs need Kaggle credentials
+this environment does not have. Only the mechanism is verified. The real search is
+GPU-hours in the author's training environment and has not been run.

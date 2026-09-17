@@ -6,6 +6,8 @@ error; accuracy alone would let a method look good by exploiting the majority cl
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from sklearn.metrics import f1_score, recall_score, roc_auc_score
 
@@ -37,13 +39,21 @@ def compute_metrics(
 
     if probabilities is not None:
         try:
-            metrics["auc_ovr_macro"] = float(
+            auc = float(
                 roc_auc_score(labels, probabilities, multi_class="ovr", average="macro", labels=range(len(CLASSES)))
             )
         except ValueError:
             # Can happen if a class is absent from this batch of labels (e.g. a small
             # federated client holding only 2 of 4 classes) -- report as unavailable
             # rather than crash, since this is expected under label-skewed partitions.
-            metrics["auc_ovr_macro"] = None
+            auc = float("nan")
+        # Newer scikit-learn no longer raises for the absent-class case: it emits an
+        # UndefinedMetricWarning and returns nan instead, so the `except` above stops
+        # firing and nan reaches the result JSON. That is not merely cosmetic --
+        # `json.dumps` serializes it as a bare `NaN` token, which is invalid JSON and is
+        # rejected by strict parsers, and label-skewed partitions (the project's central
+        # setting) hit this on most clients. Normalize both paths to None, which is what
+        # the schema and every reader already expect.
+        metrics["auc_ovr_macro"] = None if math.isnan(auc) else auc
 
     return metrics

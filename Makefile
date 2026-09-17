@@ -20,6 +20,21 @@ lint:
 smoke:
 	.venv/bin/flwr run . --stream
 
+# Phase 5 -- give every baseline an honest hyperparameter search on the val split, with
+# a budget matched to FedACO's. Selection reads best_val_macro_f1 only; it never touches
+# the test metric. --dry-run prints the trial plan without spending any compute.
+hparam-search:
+	.venv/bin/python scripts/run_hparam_search.py --strategy all --budget 8
+
+hparam-search-plan:
+	.venv/bin/python scripts/run_hparam_search.py --strategy all --budget 8 --dry-run
+
+# Phase 5 -- the IID acceptance gate. Under IID there is little heterogeneity for an
+# aggregation rule to exploit, so a large spread means something other than the method is
+# driving the number. Exits nonzero on FAIL.
+iid-band:
+	.venv/bin/python scripts/check_iid_band.py --results-dir results/fl
+
 main:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml
 

@@ -24,9 +24,10 @@ import torch
 from flwr.app import ArrayRecord, ConfigRecord, Message, MetricRecord
 from flwr.serverapp import Grid
 from flwr.serverapp.strategy import FedAvg
+from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig, run_colony
-from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig
+from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, ServerValFitness
 from fedswarm.aco.gram import apply_delta, flatten_state_dicts, precompute_gram
 from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix, desirability_scores
 from fedswarm.aco.pheromone import Pheromone, PheromoneConfig
@@ -51,6 +52,18 @@ class FedACOConfig:
     iters_end: int = 4
     trim_fraction: float = 0.2
     safety_fallback: bool = True
+    # Seeds the colony's own torch.Generator, derived per round as
+    # f(seed, server_round) -- see `aggregate_train`. Set from the run's `seed` so the
+    # colony's stochastic exploration is reproducible under the same determinism
+    # contract as the rest of the codebase (CLAUDE.md), rather than riding on whatever
+    # state the ServerApp process happens to have left in global torch RNG.
+    seed: int = 0
+    # "data_free" (the method as proposed, the only mode wired into the normal round
+    # loop) or "server_val" (upper-bound reference; requires model/val_loader/device on
+    # the strategy and a heavily reduced colony budget). "client_probe" is deliberately
+    # not selectable here: `ClientProbeFitness` implements the aggregation side only,
+    # and its broadcast/collect round-trip is Phase 7 work -- see docs/OPEN_QUESTIONS.md.
+    fitness_mode: str = "data_free"
     colony: ColonyConfig = field(default_factory=ColonyConfig)
     pheromone: PheromoneConfig = field(default_factory=PheromoneConfig)
     fitness: DataFreeFitnessConfig = field(default_factory=DataFreeFitnessConfig)
@@ -58,9 +71,36 @@ class FedACOConfig:
 
 
 class FedACO(FedAvg):
-    def __init__(self, *args, aco_config: FedACOConfig | None = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        aco_config: FedACOConfig | None = None,
+        model: torch.nn.Module | None = None,
+        val_loader: "DataLoader | None" = None,
+        device: torch.device | None = None,
+        **kwargs,
+    ) -> None:
+        """`model`/`val_loader`/`device` are only needed for
+        `aco_config.fitness_mode="server_val"` (same pattern as FedLAW, which needs the
+        same three) -- the default `data_free` mode ignores them entirely, which is the
+        whole point of the method as proposed."""
         super().__init__(*args, **kwargs)
         self.aco_config = aco_config or FedACOConfig()
+        if self.aco_config.fitness_mode not in ("data_free", "server_val"):
+            raise ValueError(
+                f"Unknown fitness_mode {self.aco_config.fitness_mode!r} "
+                "(expected 'data_free' or 'server_val'; 'client_probe' needs the "
+                "broadcast/collect round-trip that is Phase 7 work)"
+            )
+        if self.aco_config.fitness_mode == "server_val" and (
+            model is None or val_loader is None or device is None
+        ):
+            raise ValueError(
+                "fitness_mode='server_val' requires model, val_loader, and device"
+            )
+        self.model = model
+        self.val_loader = val_loader
+        self.device = device
         self.levels = level_set(
             self.aco_config.num_levels, self.aco_config.level_low, self.aco_config.level_high
         )
@@ -127,7 +167,21 @@ class FedACO(FedAvg):
             self.aco_config.iters_end,
         )
         base_weights = num_examples / num_examples.sum()
-        fitness = DataFreeFitness(gram, self.aco_config.fitness)
+        if self.aco_config.fitness_mode == "server_val":
+            assert self.model is not None and self.val_loader is not None and self.device is not None
+            fitness = ServerValFitness(
+                self.model, global_state, deltas, shapes, self.val_loader, self.device
+            )
+        else:
+            fitness = DataFreeFitness(gram, self.aco_config.fitness)
+
+        # Derived per round rather than once per run, so a resumed run (fl/app.py
+        # checkpoints every round) reproduces the same colony trajectory it would have
+        # taken uninterrupted -- `server_round` is authoritative for that, not a
+        # process-local counter.
+        generator = torch.Generator().manual_seed(
+            (int(self.aco_config.seed) & 0xFFFF_FFFF) * 1_000_003 + int(server_round)
+        )
 
         colony_result = run_colony(
             tau0,
@@ -139,6 +193,7 @@ class FedACO(FedAvg):
             num_iterations,
             self.aco_config.colony,
             target_sum=self.aco_config.target_sum,
+            generator=generator,
         )
 
         fedavg_alpha = base_weights * self.aco_config.target_sum
@@ -174,6 +229,14 @@ class FedACO(FedAvg):
                 "best_fitness": colony_result.best_fitness,
                 "fedavg_fitness": fedavg_fitness,
                 "pheromone_entropy": self.pheromone.entropy(client_ids),
+                # trace(G)/K, the dispersion scale. Logged per round because a run whose
+                # client updates are far larger than the fitness terms assume is the
+                # failure mode the normalization in `DataFreeFitness` exists to prevent
+                # -- and `fallback_used` cannot detect it (both sides of that comparison
+                # use the same fitness). Pair it with `pheromone_entropy`: entropy pinned
+                # at log(num_levels) means tau stayed uniform and the colony degenerated
+                # to heuristic-greedy selection.
+                "delta_mean_sq_norm": gram.mean_sq_norm,
                 "realized_ants": colony_result.realized_ants,
                 "realized_iterations": colony_result.realized_iterations,
                 "alpha": alpha_final.tolist(),

@@ -23,6 +23,10 @@ def _naive_fitness(
     dispersion = sum(
         float(alpha[k]) * (deltas[k] - combined).pow(2).sum() for k in range(deltas.shape[0])
     )
+    if config.normalize_dispersion:
+        # Same scale the Gram path divides by, computed the naive way: mean ||delta_k||^2
+        # over clients, which is exactly trace(G)/K.
+        dispersion = dispersion / max(float(deltas.pow(2).sum(dim=1).mean()), 1e-12)
     total = alpha.sum().clamp_min(1e-12)
     probs = (alpha / total).clamp_min(1e-12)
     entropy = float(-(probs * probs.log()).sum())
