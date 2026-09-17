@@ -748,3 +748,51 @@ estimates, not measurements" and "do not cite these numbers until measured".
 then `make health`. Client resources have to be pinned first — the target does it —
 because the Simulation Runtime assigns 2 CPUs per ClientApp by default and oversubscribing
 stalls silently rather than queueing.
+
+---
+
+## 2026-09-17 — Phase 6: the main sweep runner
+
+`scripts/run_sweep.py` + `configs/experiment/main.yaml`. Expands (strategy x regime x
+seed) into cells, runs each as one `flwr run`, and indexes completed runs in
+`results/manifest.jsonl` — the resume index CLAUDE.md specifies — so an interrupted sweep
+continues instead of recomputing.
+
+The full matrix is **12 strategies x 6 regimes x 5 seeds = 360 cells x 100 rounds**.
+
+### Four design choices that are failure-driven, not stylistic
+
+Each corresponds to something that actually went wrong earlier in the session
+(docs/OPEN_QUESTIONS.md); removing any of them reintroduces a silent failure.
+
+1. **`--stream` is passed unconditionally.** A bare `flwr run` returns exit 0 immediately
+   while the simulation is still starting. Without this, the sweep would launch all 360
+   runs near-simultaneously, conclude every one failed, and leave the machine under
+   orphaned simulations that keep executing after it "finished".
+2. **Exit codes are ignored entirely.** `flwr run` also exits 0 when the simulation dies,
+   so it lies in both directions. A cell counts as done only when a result file with
+   `status: "completed"` matching its full config exists.
+3. **Preflight refuses to start.** K=20 requests 40 CPUs at the Simulation Runtime's
+   default 2/ClientApp, and oversubscription stalls at round 0 with idle actors and no
+   error rather than queueing. The runner checks before the first cell and refuses,
+   naming the `flwr federation simulation-config --client-resources-num-cpus 1` fix.
+4. **Result matching includes seed and regime**, not just strategy. Matching on too
+   little is how a sweep silently reuses one seed's result for another and destroys the
+   variance every error bar depends on — the same bug that hit the Phase 5 search, caught
+   there and guarded here before it could happen at scale.
+
+Seed is the innermost loop, so an interruption leaves whole (strategy, regime) groups
+finished rather than one seed of everything: a partial sweep is still analysable for what
+it covered.
+
+### Cost projection, and what it is worth
+
+`make main-plan` prints a projection from a measured per-round cost rather than an
+assumption. At today's only datapoint (48.1 s/round, K=2, 1 local epoch, CPU) the full
+matrix projects **481 hours**. That number is nearly meaningless as a quote — it is a CPU
+measurement at K=2 for a sweep at K=20 — and the runner says so in its own output rather
+than presenting it as authoritative. It becomes real after a run at the target shape;
+`--seconds-per-round` takes the better number once one exists.
+
+This is still the first cost figure in the project derived from a measurement at all. The
+2026-09-14 compute table above remains estimates, and still says in bold not to cite them.

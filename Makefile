@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke validate-fedaco health hparam-search hparam-search-plan iid-band main ablations figures-data figures tables clean
+.PHONY: setup data test lint smoke validate-fedaco health hparam-search hparam-search-plan iid-band main main-plan ablations figures-data figures tables clean
 
 setup:
 	uv venv --python 3.12 .venv
@@ -61,6 +61,12 @@ health:
 # driving the number. Exits nonzero on FAIL.
 iid-band:
 	.venv/bin/python scripts/check_iid_band.py --results-dir results/fl
+
+# Always run `make main-plan` first: it prints the cell count and a cost projection, and
+# refuses nothing, so it is the cheapest way to find out that 360 cells x 100 rounds is
+# more compute than you have before committing to it.
+main-plan:
+	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml --dry-run
 
 main:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml
