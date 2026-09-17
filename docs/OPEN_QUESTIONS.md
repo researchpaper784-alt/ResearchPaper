@@ -313,3 +313,33 @@ at the ClientApp task never being dispatched at the protocol level at all -- con
 with the open PR #7391 heartbeat-RPC gap, not with any resource-sizing knob this repo
 or a `flwr run` flag controls. CPU-resource starvation is now a ruled-out theory, not
 an open one.
+
+**Decision, 2026-09-17**: pivoting to Phase 4 (`aco/`, `strategies/fedaco.py`) while
+this sits open -- it has zero Flower dependency and is fully buildable/testable on
+this Mac, unlike Phase 3's FL harness. Revisit this entry once a Flower release lands
+past PR #7391, or if Kaggle is tried as an alternative to Colab.
+
+## Phase 4 -- two deliberate scope reductions in FedACO, not oversights
+
+Both flagged in `paper/ALGORITHM.md` alongside the code; recorded here too per this
+file's convention (`docs/OPEN_QUESTIONS.md` is where anything not fully built/verified
+gets tracked, not just things that failed).
+
+1. **Global shrinkage $s$ (plan §4.1)** is a fixed `FedACOConfig.target_sum`, not an
+   extra per-ant search dimension the colony explores alongside the K per-client
+   levels. The plan explicitly frames it as something to "make a config flag and
+   ablate" -- sweeping fixed values of $s$ across separate runs is Phase 7 work;
+   *searching* $s$ per-round (adding an (K+1)-th decision to the construction graph)
+   is not implemented and would need its own design pass if the ablation later shows
+   it matters.
+2. **`ClientProbeFitness` (plan §4.4's `client_probe` mode)** implements the
+   aggregation side only -- turning already-collected, one-round-delayed
+   per-candidate client-reported losses into a scalar fitness
+   (`aco/fitness.py::ClientProbeFitness.evaluate`). The broadcast-a-candidate-menu /
+   collect-next-round round-trip itself is not wired into `FedACO.configure_train` or
+   `aggregate_train` -- it's a strategy-level, FL-runtime concern, and the plan itself
+   says this mode only needs to run "in the A3 ablation" (Phase 7) at a heavily
+   reduced budget, not in the default round loop. `DataFreeFitness` (the method as
+   proposed) and `ServerValFitness` (the upper-bound reference) are both fully wired
+   and tested now; `client_probe` is the one mode still needing strategy-layer work,
+   deferred to whenever Phase 7 actually exercises it.

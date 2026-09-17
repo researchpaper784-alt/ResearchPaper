@@ -285,3 +285,25 @@ they were pinned for plain reproducibility on a machine running Python 3.12, nev
 tested against Colab's Python 3.13. A lower bound can only add compatibility, never
 remove what already worked, and whatever actually resolves is still captured per-run in
 `provenance.packages` regardless of how loose the spec in this file is.
+
+## `MetricRecord` value types -- real constraint, verified via a real `TypeError`
+
+**2026-09-17, Phase 4 (`FedACO(Strategy)`, `strategies/fedaco.py`).** `MetricRecord`'s
+real accepted value type is `int | float | list[int] | list[float]` -- **not**
+`bool | int | float | str` the way `fl/app.py`'s module comment describes for
+`ConfigRecord`/`MetricRecord` scalars generally. Two real, reproduced failures, not
+assumptions:
+
+- `bool` is explicitly rejected even though `bool` subclasses `int` in Python --
+  `flwr/app/message/metricrecord.py`'s `is_valid()` has an explicit
+  `isinstance(v, bool)` guard. `MetricRecord({"fallback_used": True})` raises
+  `TypeError`; `MetricRecord({"fallback_used": int(True)})` (i.e. `1`) does not.
+- `list[str]` is rejected the same way `str` alone is not a valid scalar --
+  `MetricRecord({"client_ids": ["0", "1"]})` raises; `MetricRecord({"client_ids": [0, 1]})`
+  (as `list[int]`) does not.
+
+Both caught by `tests/test_strategy.py`'s acceptance tests actually running real
+`MetricRecord` construction end-to-end, not by static typing -- consistent with this
+file's own `to_torch_state_dict`/`FedAvg` findings above, verified against the
+installed package's real source (`.venv/lib/.../flwr/app/message/metricrecord.py`), not
+inferred from another record type's looser-sounding comment.
