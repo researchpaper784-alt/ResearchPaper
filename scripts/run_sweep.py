@@ -58,16 +58,25 @@ MEASURED_SECONDS_PER_ROUND = 48.1
 MEASURED_AT_K = 2
 
 
+DEFAULT_VARIANT = "default"
+
+
 @dataclass
 class Cell:
     strategy: str
     regime_name: str
     seed: int
     overrides: dict = field(default_factory=dict)
+    variant: str = DEFAULT_VARIANT
 
     @property
     def label(self) -> str:
-        return f"{self.strategy}/{self.regime_name}/seed{self.seed}"
+        # The variant is omitted from the label when it is the implicit default, so a
+        # sweep config without a `variants:` axis produces exactly the labels it did
+        # before that axis existed -- an existing manifest keeps matching and nothing
+        # already computed gets re-run.
+        middle = "" if self.variant == DEFAULT_VARIANT else f"/{self.variant}"
+        return f"{self.strategy}/{self.regime_name}{middle}/seed{self.seed}"
 
     def run_config(self, common: dict) -> dict:
         return {
@@ -87,25 +96,37 @@ def load_sweep(path: Path) -> dict:
 
 
 def expand(spec: dict) -> list[Cell]:
-    """Full factorial, in a stable order.
+    """Full factorial over strategies x regimes x variants x seeds, in a stable order.
 
-    Seed is the innermost loop so an interrupted sweep leaves whole (strategy, regime)
-    groups finished rather than one seed of everything -- a partial sweep is then still
-    analysable for the cells it covered, instead of having no complete group at all.
+    Seed is the innermost loop so an interrupted sweep leaves whole groups finished
+    rather than one seed of everything -- a partial sweep is then still analysable for
+    the cells it covered, instead of having no complete group at all.
+
+    `variants` is the optional Phase 7 axis: named override sets layered on top of the
+    regime's, so an ablation ("pheromone persistence off", "fitness mode = server_val")
+    is a variant of one strategy rather than a separate sweep file with its own runner.
+    Omit it and the sweep behaves exactly as it did before the axis existed.
     """
+    variants = spec.get("variants") or [{"name": DEFAULT_VARIANT}]
     cells = []
     for strategy in spec["strategies"]:
         for regime in spec["regimes"]:
-            overrides = {k: v for k, v in regime.items() if k != "name"}
-            for seed in spec["seeds"]:
-                cells.append(
-                    Cell(
-                        strategy=str(strategy),
-                        regime_name=str(regime.get("name", regime.get("regime", "?"))),
-                        seed=int(seed),
-                        overrides=overrides,
+            regime_overrides = {k: v for k, v in regime.items() if k != "name"}
+            for variant in variants:
+                variant_overrides = {k: v for k, v in variant.items() if k != "name"}
+                for seed in spec["seeds"]:
+                    cells.append(
+                        Cell(
+                            strategy=str(strategy),
+                            regime_name=str(regime.get("name", regime.get("regime", "?"))),
+                            seed=int(seed),
+                            # Variant wins on a key collision: it is the thing being
+                            # ablated, and a regime that also set it would otherwise
+                            # silently cancel the ablation.
+                            overrides={**regime_overrides, **variant_overrides},
+                            variant=str(variant.get("name", DEFAULT_VARIANT)),
+                        )
                     )
-                )
     return cells
 
 
@@ -282,6 +303,7 @@ def main() -> int:
     parser.add_argument("--manifest", default=MANIFEST)
     parser.add_argument("--only", default=None, help="comma-separated strategies to run")
     parser.add_argument("--regimes", default=None, help="comma-separated regime names to run")
+    parser.add_argument("--variants", default=None, help="comma-separated variant names to run")
     parser.add_argument("--seeds", default=None, help="comma-separated seeds to run")
     parser.add_argument("--limit", type=int, default=None, help="stop after N cells (a pilot)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan and cost, run nothing")
@@ -308,6 +330,9 @@ def main() -> int:
     if args.regimes:
         wanted = {s.strip() for s in args.regimes.split(",")}
         cells = [c for c in cells if c.regime_name in wanted]
+    if args.variants:
+        wanted = {s.strip() for s in args.variants.split(",")}
+        cells = [c for c in cells if c.variant in wanted]
     if args.seeds:
         wanted = {int(s.strip()) for s in args.seeds.split(",")}
         cells = [c for c in cells if c.seed in wanted]
@@ -355,6 +380,7 @@ def main() -> int:
                     "status": "completed",
                     "strategy": cell.strategy,
                     "regime": cell.regime_name,
+                    "variant": cell.variant,
                     "seed": cell.seed,
                     "result_path": _record_path(existing),
                     "backfilled": True,
@@ -424,6 +450,7 @@ def main() -> int:
                 "status": "completed",
                 "strategy": cell.strategy,
                 "regime": cell.regime_name,
+                "variant": cell.variant,
                 "seed": cell.seed,
                 "run_id": result.get("run_id"),
                 "result_path": _record_path(result_path),

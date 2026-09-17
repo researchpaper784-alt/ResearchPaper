@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke validate-fedaco health hparam-search hparam-search-plan iid-band main main-plan ablations figures-data figures tables clean
+.PHONY: setup data test lint smoke validate-fedaco health hparam-search hparam-search-plan iid-band main main-plan ablations ablations-plan figures-data figures tables tables-ablation clean
 
 setup:
 	uv venv --python 3.12 .venv
@@ -71,6 +71,12 @@ main-plan:
 main:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml
 
+# Phase 7. Only the ablations this repo actually names (A1 persistence, A3 fitness mode,
+# A9 norm) plus the knobs docs/OPEN_QUESTIONS.md defers here; A2 and A4-A8 are not
+# reconstructable because the implementation plan is not in the repo. See the config.
+ablations-plan:
+	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml --dry-run
+
 ablations:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml
 
@@ -80,8 +86,14 @@ figures-data:
 figures:
 	.venv/bin/python scripts/make_figures.py
 
+# Phase 9. Aggregates over seeds and writes Markdown + CSV to paper/tables/. Exits
+# nonzero when any cell has fewer seeds than expected, so an incomplete sweep cannot be
+# quoted from by accident.
 tables:
-	.venv/bin/python scripts/make_tables.py
+	.venv/bin/python scripts/make_tables.py --results-dir results/fl/main
+
+tables-ablation:
+	.venv/bin/python scripts/make_tables.py --results-dir results/fl/ablation
 
 clean:
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} +

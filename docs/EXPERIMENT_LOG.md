@@ -796,3 +796,63 @@ than presenting it as authoritative. It becomes real after a run at the target s
 
 This is still the first cost figure in the project derived from a measurement at all. The
 2026-09-14 compute table above remains estimates, and still says in bold not to cite them.
+
+---
+
+## 2026-09-17 — Phase 7 ablation config and Phase 9 table builder
+
+### `variants`: a fourth sweep axis
+
+An ablation is one strategy with one thing changed, not a different sweep shape, so
+`run_sweep.py` gained an optional `variants` axis rather than Phase 7 getting its own
+runner. A cell is now (strategy x regime x variant x seed). The variant is omitted from
+the cell label when it is the implicit `default`, so any sweep config without a
+`variants:` key produces exactly the labels it did before — an existing manifest keeps
+matching and nothing already computed is re-run. Variant overrides beat regime overrides
+on a key collision, since a regime that also set the ablated key would otherwise silently
+cancel the ablation.
+
+### `configs/experiment/ablation_all.yaml` — 150 cells
+
+**Only the ablations this repository actually names.** The implementation plan is not in
+the repo, so A1 (pheromone persistence), A3 (fitness mode) and A9 (norm) are the only
+numbered ones recoverable; A2 and A4–A8 are deliberately absent rather than invented,
+because labelling a guessed ablation with the plan's number would be worse than the gap.
+Alongside them are the knobs docs/OPEN_QUESTIONS.md explicitly defers to Phase 7: the
+global shrinkage `s` sweep, the safety fallback off, and gamma_2 — the dispersion weight
+left at its specified 1.0 during the Phase 4 close-out rather than retuned.
+
+`default` is included as a variant so the ablations have a control inside the same sweep;
+differencing against numbers from a different sweep would fold in unrelated variation.
+
+Two of these are worth their compute regardless of how FedACO scores. `a1_persistence_none`
+is the test `aco/pheromone.py` names in its own docstring — remove persistence and the
+swarm framing "should show a measurable drop, or the framing is decorative".
+`no_safety_fallback` separates "the colony helped" from "the fallback protected it",
+which the main table structurally cannot: with the fallback on, FedACO silently *is*
+FedAvg whenever the colony loses.
+
+### `scripts/make_tables.py` — Phase 9 aggregation
+
+Aggregates over seeds per (strategy, regime, variant) into Markdown + CSV. The arithmetic
+is mean and std; the work is in not overstating a number:
+
+- **Incomplete cells are marked, never dropped.** A cell with 2 of 5 seeds shows n=2 and a
+  warning. Silently averaging whatever finished is how one strategy's mean over 5 seeds
+  ends up beside another's over 2, rendered identically.
+- **Deltas are paired by seed** where both arms ran the same ones, and the table records
+  whether pairing was possible rather than quietly falling back to mean-to-mean.
+- **FedACO rows carry `fallback` and `τ entropy` next to the score**, with a note on how
+  to read them. A macro-F1 column alone cannot show that the colony never searched, or
+  that the fallback turned FedACO into FedAvg for most of the run.
+- **Absent metrics render as `—`, not 0.** A baseline has no pheromone; printing 0.000
+  would read as "maximally concentrated", the opposite of "not applicable".
+- Exits nonzero when any cell is incomplete, so `make tables` cannot silently produce a
+  quotable table from a half-finished sweep.
+
+Verified against this session's real result files: it correctly flagged all three cells as
+n=1 of 5, produced a paired FedACO-vs-FedAvg delta of −0.0091, and surfaced FedACO's
+fallback rate (0%) and τ entropy (2.373, against a 2.398 ceiling) beside the score.
+
+`make main-plan` / `make ablations-plan` / `make tables` / `make tables-ablation`.
+`make figures` still points at a `scripts/make_figures.py` that does not exist.

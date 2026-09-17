@@ -1,0 +1,117 @@
+# Phase 7 -- FedACO ablations.
+#
+# Each `variant` below is FedACO with one thing changed, run against the same regimes and
+# seeds as the main table so the comparison is like-for-like. `default` is included as the
+# control: without it in the same sweep there is nothing to difference the ablations
+# against, since numbers from a different sweep may differ for unrelated reasons.
+#
+# ⚠️ **This is not the plan's full A1-A9 list.** The implementation plan is not in this
+# repository (docs/PROGRESS_REVIEW.md records that as an open issue), so the only
+# ablations that can be reconstructed are the ones the repo itself names -- A1, A3 and A9
+# -- plus the knobs docs/OPEN_QUESTIONS.md explicitly defers to Phase 7. A2 and A4-A8 are
+# *not* guessed at here: inventing an ablation and labelling it with the plan's number
+# would be worse than the gap. Add them when the plan is available.
+
+name: ablation_all
+
+strategies: [fedaco]
+
+# The regimes where an aggregation-weighting ablation can actually show something.
+# `iid` is kept as the null case: under IID there is little heterogeneity to exploit, so
+# an ablation that moves the number *there* is evidence the mechanism is doing something
+# other than handling heterogeneity.
+regimes:
+  - name: iid
+    regime: iid
+  - name: dirichlet_0.1
+    regime: dirichlet
+    alpha: 0.1
+  # quantity_skew attacks FedAvg's n_k weighting directly, which is what FedSwarm
+  # replaces -- the regime where these ablations should bite hardest.
+  - name: quantity_skew
+    regime: quantity_skew
+    skew-sigma: 1.0
+
+seeds: [0, 1, 2, 3, 4]
+
+variants:
+  # The control. Everything below is differenced against this.
+  - name: default
+
+  # --- A1: cross-round pheromone persistence -------------------------------------
+  # The "Adaptive" in the project's own title. aco/pheromone.py's docstring states the
+  # stake plainly: remove persistence and the swarm-intelligence framing "should show a
+  # measurable drop, or the framing is decorative". This is the ablation that tests it.
+  #
+  # Read alongside the health check: if `make health` already reports the colony INERT,
+  # persistence="none" will differ from default by ~nothing, and that null result is
+  # about tau being flat rather than about persistence not mattering.
+  - name: a1_persistence_none
+    aco-persistence: none
+  - name: a1_persistence_full
+    aco-persistence: full
+
+  # --- A3: fitness mode ----------------------------------------------------------
+  # `server_val` is the upper-bound reference: it scores candidates by materializing a
+  # model and evaluating macro-F1 on the server val split, which assumes the server holds
+  # data -- the assumption `data_free` exists to avoid. It is orders of magnitude more
+  # expensive per evaluation, hence the heavily reduced colony budget, which is the plan's
+  # own prescription rather than a shortcut.
+  #
+  # `client_probe` is deliberately absent: its broadcast/collect round-trip is not wired
+  # into the strategy (FedACO rejects the mode at construction rather than silently
+  # accepting it), so a variant naming it would fail every cell.
+  - name: a3_fitness_server_val
+    aco-fitness-mode: server_val
+    aco-ants-start: 6
+    aco-ants-end: 4
+    aco-iters-start: 3
+    aco-iters-end: 2
+
+  # --- A9: normalization, the confound control -----------------------------------
+  # GroupNorm is the federated default because BatchNorm's running statistics aggregate
+  # badly across non-IID clients -- a known FL pathology, not specific to this method.
+  # The centralized numbers already show BatchNorm slightly *ahead* on pooled data
+  # (0.9300 vs 0.9203), so this variant separates "GroupNorm helps FedACO" from
+  # "GroupNorm helps any federated method", which the centralized run cannot settle.
+  - name: a9_batchnorm
+    model-norm: batchnorm
+
+  # --- Global shrinkage s --------------------------------------------------------
+  # docs/OPEN_QUESTIONS.md records s as a deliberate Phase 4 scope reduction: it is a
+  # fixed config value, swept here as fixed values rather than searched per-round. The
+  # per-round search would add a (K+1)-th decision to the construction graph and is not
+  # implemented.
+  - name: shrinkage_0.8
+    aco-target-sum: 0.8
+  - name: shrinkage_1.2
+    aco-target-sum: 1.2
+
+  # --- The safety fallback -------------------------------------------------------
+  # With the fallback off, FedACO can lose to FedAvg outright. That is the point: the
+  # default configuration silently *becomes* FedAvg whenever the colony loses, so the
+  # main table cannot separate "the colony helped" from "the fallback protected it".
+  # This variant is how that separation gets measured.
+  - name: no_safety_fallback
+    aco-safety-fallback: false
+
+  # --- gamma_2, the dispersion weight --------------------------------------------
+  # Left at 1.0 in the Phase 4 close-out rather than retuned, because normalizing
+  # dispersion by trace(G)/K made it co-equal with alignment and silently changing a
+  # hyperparameter that paper/ALGORITHM.md specifies is not a bug fix
+  # (docs/EXPERIMENT_LOG.md, 2026-09-17). This is where that decision gets tested.
+  - name: gamma_dispersion_0.5
+    aco-gamma-dispersion: 0.5
+  - name: gamma_dispersion_2.0
+    aco-gamma-dispersion: 2.0
+
+common:
+  num-clients: 20
+  num-rounds: 100
+  local-epochs: 1
+  local-lr: 0.01
+  local-batch-size: 32
+  model-name: simple_cnn
+  model-norm: groupnorm
+  image-size: 112
+  output-dir: results/fl/ablation
