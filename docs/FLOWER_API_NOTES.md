@@ -307,3 +307,46 @@ Both caught by `tests/test_strategy.py`'s acceptance tests actually running real
 file's own `to_torch_state_dict`/`FedAvg` findings above, verified against the
 installed package's real source (`.venv/lib/.../flwr/app/message/metricrecord.py`), not
 inferred from another record type's looser-sounding comment.
+
+## Phase 5 -- baselines: real constructors, real config keys, real extension points
+
+All read directly from the installed `flwr==1.36.0` source
+(`.venv/lib/.../flwr/serverapp/strategy/`), not from docstrings alone:
+
+- **`FedProx`'s real config key is `"proximal-mu"`**, not `"mu"` -- its
+  `configure_train` does `config["proximal-mu"] = self.proximal_mu` and its own
+  docstring's example client code reads `msg.content["config"]["proximal-mu"]`. This
+  project's client was reading `"mu"` only, which FedProx never sets -- a real,
+  caught-before-shipping bug (`docs/OPEN_QUESTIONS.md`, Phase 5 entry).
+- **`FedAdam`/`FedYogi`** real constructors take `eta, eta_l, beta_1, beta_2, tau`
+  (server + local learning rates, Adam/Yogi momentum terms, adaptivity constant) --
+  no `proximal_mu`-style single knob; both subclass a shared `FedOpt`-style pattern
+  internally but exist as directly importable top-level classes.
+- **`Krum`/`MultiKrum`/`FedTrimmedAvg`/`FedMedian`** all reuse the exact same reply
+  shape this project's `ClientApp` already sends (one `ArrayRecord` + one
+  `MetricRecord` per reply, `"num-examples"` present) -- confirmed by reading each
+  class's real `aggregate_train` body; no client-side changes needed to use any of
+  them, only server-side strategy selection.
+- **`FedAvg._construct_messages`, `_check_and_log_replies`, and the module-level
+  `strategy_utils.sample_nodes`** are real, working extension points beyond what
+  `strategies/fedaco.py` already leaned on -- `sample_nodes(grid, min_available,
+  sample_size)` only ever calls `grid.get_node_ids()`, confirmed by both reading its
+  source and by actually driving it with a hand-built duck-typed fake `Grid` in
+  `tests/test_baselines.py::test_scaffold_configure_train_merges_global_c_into_outgoing_arrays`
+  (`_construct_messages` needs nothing from the real Ray-backed `Grid` beyond that,
+  either) -- meaning a full `configure_train` override (`strategies/scaffold.py`) is
+  genuinely testable without a live simulation backend, not just the parts that
+  don't touch `Grid` at all.
+- **`Context.state` is a real, durable per-node `RecordDict`**, not a design pattern
+  this project invented -- `flwr/supernode/start_client_internal.py`'s
+  `context.state = existing_context.state` and the equivalent line in
+  `flwr/server/superlink/linkstate/linkstate.py` both restore a node's previous state
+  before a fresh handler invocation. `ArrayRecord`/`ConfigRecord`/`MetricRecord`
+  values assigned into it round-trip exactly (`tests/test_fl_app.py`'s SCAFFOLD
+  tests) -- confirmed locally without a live simulation backend, since this is a
+  pure Python object identity/mutation question, not a networking one.
+- **`ArrayRecord` supports item assignment after construction**
+  (`record["new/key"] = Array(ndarray)`) and mixing unrelated key namespaces inside
+  one record -- confirmed directly, not inferred; this is what lets SCAFFOLD's
+  control variate and the model weights travel inside a single `ArrayRecord` without
+  needing a third top-level `RecordDict` key.

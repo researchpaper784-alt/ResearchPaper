@@ -129,13 +129,22 @@ model-pretrained = false
 model-norm = "groupnorm"
 num-classes = 4
 
-# Local training (fl/task.py's local_train).
+# Local training (fl/app.py's local_train).
 local-epochs = 1
 local-lr = 0.01
 local-batch-size = 32
-mu = 0.0  # FedProx proximal coefficient; 0.0 = off. No FedProx strategy wires this yet (Phase 5) -- see docs/OPEN_QUESTIONS.md.
+mu = 0.0  # static FedProx fallback; the real installed FedProx strategy overrides this via its own "proximal-mu" config key each round (see train_handler).
 
-# FedAvg strategy (flwr.serverapp.strategy.FedAvg).
+# Strategy selection (Phase 5, strategies/factory.py::strategy_from_run_config).
+# One of: fedavg, fedprox, fedadam, fedyogi, krum, trimmed-mean, median, fednova,
+# loss-based, scaffold, fedlaw, fedaco. Strategy-specific knobs (fedprox-mu,
+# fedopt-eta/-eta-l/-beta1/-beta2/-tau, num-malicious-nodes, trim-beta,
+# lossweight-temperature, scaffold-server-lr, fedlaw-steps/-lr) all have defaults in
+# the factory and only need overriding via --run-config when actually sweeping them.
+strategy-name = "fedavg"
+
+# FedAvg-family node sampling (flwr.serverapp.strategy.FedAvg and every baseline
+# above, all of which share this constructor shape -- strategies/factory.py).
 fraction-train = 1.0
 min-train-nodes = 2
 min-evaluate-nodes = 2

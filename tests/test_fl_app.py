@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
-from flwr.app import ArrayRecord, ConfigRecord, Context, Message, RecordDict
+from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, RecordDict
 from PIL import Image
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -430,6 +430,74 @@ def test_train_handler_respects_partition_id_from_node_config(client_run_config)
     metrics1 = dict(reply1.content["metrics"])
     assert metrics0["client_id"] == 0
     assert metrics1["client_id"] == 1
+
+
+# ======================================================================================
+# Phase 5 -- SCAFFOLD's client-side half (strategies/scaffold.py is the server side).
+# Exercises the real `Context.state` persistence contract end-to-end, hand-built, the
+# same way every other train_handler test in this file does.
+# ======================================================================================
+
+
+def _scaffold_train_message(run_config: dict, global_c: dict[str, torch.Tensor]) -> Message:
+    model = SimpleCNN(num_classes=4, norm=run_config["model-norm"])
+    merged = ArrayRecord(model.state_dict())
+    for name, tensor in global_c.items():
+        merged[f"scaffold_c/{name}"] = Array(tensor.numpy())
+    content = RecordDict(
+        {
+            "arrays": merged,
+            "config": ConfigRecord({"local-epochs": 1, "lr": 0.01, "server_round": 1}),
+        }
+    )
+    return Message(content=content, dst_node_id=0, message_type="train")
+
+
+def test_train_handler_scaffold_first_round_starts_from_zero_local_control(
+    client_run_config,
+) -> None:
+    """No `scaffold_c_i` stored yet for this node -- local_c must default to zeros,
+    so round 1's correction is exactly `global_c - 0 = global_c`."""
+    run_config = client_run_config
+    model = SimpleCNN(num_classes=4, norm=run_config["model-norm"])
+    global_c = {k: torch.zeros_like(v) for k, v in model.state_dict().items()}
+
+    msg = _scaffold_train_message(run_config, global_c)
+    context = _context(run_config, partition_id=0)
+    reply = train_handler(msg, context)
+
+    arrays_out = reply.content["arrays"]
+    dc_keys = [k for k in arrays_out.keys() if k.startswith("scaffold_dc/")]
+    assert dc_keys, "SCAFFOLD reply must carry scaffold_dc/* deltas"
+    assert context.state.get("scaffold_c_i") is not None, "must persist c_i into Context.state"
+
+
+def test_train_handler_scaffold_persists_and_reuses_local_control_across_rounds(
+    client_run_config,
+) -> None:
+    """The whole point of SCAFFOLD: the SAME Context (i.e. the same simulated node,
+    across two rounds) must have its round-1 `scaffold_c_i` actually change what
+    round 2's correction is -- not silently reset to zero every round."""
+    run_config = client_run_config
+    model = SimpleCNN(num_classes=4, norm=run_config["model-norm"])
+    zero_c = {k: torch.zeros_like(v) for k, v in model.state_dict().items()}
+    context = _context(run_config, partition_id=0)  # one Context, reused -- the real persistence contract
+
+    train_handler(_scaffold_train_message(run_config, zero_c), context)
+    c_i_round1 = context.state.get("scaffold_c_i").to_torch_state_dict()
+    assert any(float(t.abs().sum()) > 0 for t in c_i_round1.values()), (
+        "round 1 must produce a nonzero c_i (params_before != params_after under real SGD)"
+    )
+
+    # Round 2: server now sends a nonzero global_c. Correction should reflect BOTH the
+    # persisted c_i from round 1 AND this round's global_c, not just one or the other.
+    nonzero_c = {k: torch.ones_like(v) * 0.01 for k, v in model.state_dict().items()}
+    train_handler(_scaffold_train_message(run_config, nonzero_c), context)
+    c_i_round2 = context.state.get("scaffold_c_i").to_torch_state_dict()
+
+    assert any(
+        not torch.allclose(c_i_round1[k], c_i_round2[k]) for k in c_i_round1
+    ), "c_i must actually update round to round, not stay frozen at round 1's value"
 
 
 # ======================================================================================

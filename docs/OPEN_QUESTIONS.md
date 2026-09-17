@@ -343,3 +343,52 @@ gets tracked, not just things that failed).
    proposed) and `ServerValFitness` (the upper-bound reference) are both fully wired
    and tested now; `client_probe` is the one mode still needing strategy-layer work,
    deferred to whenever Phase 7 actually exercises it.
+
+## Phase 5 -- baselines: what's built, what's a documented interpretation, what's a real deviation
+
+**Built and unit-tested against hand-built Messages/Contexts (`tests/test_baselines.py`,
+`tests/test_fl_app.py`), same pattern as Phase 3/4 -- none of this has run inside a
+live `flwr run` yet, same reason as Phase 3/4 (the Colab heartbeat blocker above).**
+
+- **Built-ins wired via `strategies/factory.py`**: FedAvg, FedProx, FedAdam, FedYogi,
+  Krum/MultiKrum, FedTrimmedAvg (the plan's "Trimmed-Mean"), FedMedian -- all
+  `flwr.serverapp.strategy` real constructors, verified against the installed
+  package's own source, not assumed.
+- **Custom, well-specified**: FedNova (Wang et al. 2020) using the client's own
+  already-reported `num_batches` as tau_i; SCAFFOLD (Karimireddy et al. 2020) --
+  the one baseline needing a real client-side protocol change, using `Context.state`
+  (confirmed real and durable per-node, `flwr/supernode/start_client_internal.py`)
+  for the persistent local control variate. **Real deviation from the paper**:
+  SCAFFOLD's model-update aggregation here is data-size-weighted (`weighted_by_key`,
+  matching every other baseline for a fair comparison), not the paper's uniform
+  `1/|S_t|` average. Flag this if SCAFFOLD's numbers are ever compared directly
+  against the original paper's reported results.
+- **`FedLAW` (Li et al., ICML 2023)**: reproduces the *idea* (weights learned by
+  gradient descent against a server val set, via `torch.func.functional_call` for a
+  differentiable forward pass) -- not the paper's exact learnable-global-scaling-factor
+  formulation, and no page/table from that paper was checked against this
+  implementation's numbers.
+- **`LossBasedWeighting` ("FedNolowe-style" per the plan's own wording)**: no
+  canonical paper named "FedNolowe" was found to verify a formula or numbers against
+  -- per CLAUDE.md, this is recorded rather than silently assumed. What's implemented
+  (`alpha_i ~ softmax(-loss_i / T)`) is a documented, reasonable interpretation of
+  "weight clients by their own local loss," not a reproduction of a specific paper.
+- **`global_val_loader`** (`fl/app.py`) was added alongside these -- `FedLAW` and
+  `ServerValFitness`-style fitness need a server-held set to choose weights against
+  that is genuinely distinct from the **test** split the final metric is measured on
+  (`data/splits.py`'s three-way train/val/test), not a reuse of `global_test_loader`.
+  Using the test set there would have been a real methodology bug (weight selection
+  contaminating the reported metric), not just an engineering shortcut.
+
+**Real bug caught before it shipped**: the installed `FedProx` strategy sends its
+proximal coefficient under `config["proximal-mu"]`, not `config["mu"]` -- this
+project's own client only ever read `"mu"` (a key nothing in Flower's own FedProx
+ever sets), so the two would have silently never connected: every FedProx run would
+have quietly behaved like plain FedAvg. Fixed in `train_handler`
+(`config.get("proximal-mu", config.get("mu", ...))`), verified by reading FedProx's
+real source (`flwr/serverapp/strategy/fedprox.py`), not by guessing the key name.
+
+**Not yet attempted**: honest hyperparameter search per baseline (plan §5's "give
+every baseline an honest hyperparameter search on the val split with a budget matched
+to FedACO's") and the IID-narrow-band acceptance check -- both need a live FL run to
+execute, same blocker as everything else in Phase 3 onward.

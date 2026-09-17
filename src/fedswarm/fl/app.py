@@ -66,16 +66,16 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from flwr.app import ArrayRecord, ConfigRecord, Context, Message, MetricRecord, RecordDict
+from flwr.app import Array, ArrayRecord, ConfigRecord, Context, Message, MetricRecord, RecordDict
 from flwr.clientapp import ClientApp
 from flwr.serverapp import Grid, ServerApp
-from flwr.serverapp.strategy import FedAvg
 from sklearn.metrics import confusion_matrix
 from torch.utils.data import DataLoader
 
@@ -86,6 +86,7 @@ from fedswarm.data.splits import MANIFEST_CSV
 from fedswarm.data.transforms import build_transforms
 from fedswarm.eval.evaluator import evaluate as evaluate_model
 from fedswarm.models.factory import build_model
+from fedswarm.strategies.factory import strategy_from_run_config
 from fedswarm.utils.results import make_run_id, write_result
 from fedswarm.utils.seed import seed_everything
 
@@ -204,6 +205,7 @@ def local_train(
     epochs: int,
     lr: float,
     mu: float = 0.0,
+    correction: "dict[str, torch.Tensor] | None" = None,
 ) -> dict:
     """Runs `epochs` of local SGD. Returns every scalar the plan's Step 3.1 says the
     server might need to weight this client (`num-examples`, `train_loss_before/after`,
@@ -217,9 +219,16 @@ def local_train(
     rather than paying for a dedicated extra forward pass purely to measure "before").
 
     `mu > 0` adds a FedProx proximal term `(mu/2) * ||w - w_global||^2` against the
-    weights the client received (snapshotted before any local step) -- present now,
-    unused until Phase 5 wires a FedProx strategy through the `mu` config key; see
-    docs/OPEN_QUESTIONS.md for what Phase 5 still needs to add on the server side.
+    weights the client received (snapshotted before any local step) -- wired to the
+    real installed `FedProx` strategy's `"proximal-mu"` config key in `train_handler`
+    (Phase 5, `strategies/factory.py`).
+
+    `correction`, keyed by `model.named_parameters()` name, is SCAFFOLD's `c - c_i`
+    control-variate correction (Phase 5, `strategies/scaffold.py`): added as a linear
+    term `sum_p <p, correction[name]>` to the loss, whose gradient w.r.t. each
+    parameter is exactly `correction[name]` itself -- the standard way to inject a
+    constant additive term into a gradient via autograd rather than hand-editing
+    `param.grad` after `loss.backward()`.
     """
     model.to(device)
     # Always snapshotted, not just when mu > 0: update_norm is a standard field every
@@ -244,6 +253,11 @@ def local_train(
                     (p - g).pow(2).sum() for p, g in zip(model.parameters(), global_params)
                 )
                 loss = loss + (mu / 2.0) * prox
+            if correction is not None:
+                loss = loss + sum(
+                    (p * correction[name].to(device)).sum()
+                    for name, p in model.named_parameters()
+                )
             loss.backward()
             optimizer.step()
             batch_losses.append(loss.item())
@@ -309,10 +323,7 @@ def local_evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -
     }
 
 
-def global_test_loader(run_config: RunConfig) -> DataLoader:
-    """The server-held, never-partitioned global test split (plan Step 1.4) -- the same
-    manifest/cache/transform pipeline `scripts/run_experiment.py` uses for centralized
-    training, so the FL ceiling and the centralized ceiling are measured identically."""
+def _global_split_loader(run_config: RunConfig, split: str) -> DataLoader:
     size = int(run_config.get("image-size", 112))
     cache_dir = _repo_path(str(run_config.get("cache-dir", "data/processed/cache")))
     manifest_path = str(_repo_path(str(run_config.get("manifest-path", str(MANIFEST_CSV)))))
@@ -320,10 +331,26 @@ def global_test_loader(run_config: RunConfig) -> DataLoader:
 
     manifest = load_manifest(manifest_path)
     images = load_cache(size, cache_dir)
-    indices = select(manifest, split="test", representatives_only=True)
+    indices = select(manifest, split=split, representatives_only=True)
     transform = build_transforms(train=False, size=size, scheme=normalization, cache_dir=cache_dir)
     dataset = ManifestDataset(manifest, images, indices, transform)
     return DataLoader(dataset, batch_size=128, shuffle=False, num_workers=0)
+
+
+def global_test_loader(run_config: RunConfig) -> DataLoader:
+    """The server-held, never-partitioned global test split (plan Step 1.4) -- the same
+    manifest/cache/transform pipeline `scripts/run_experiment.py` uses for centralized
+    training, so the FL ceiling and the centralized ceiling are measured identically."""
+    return _global_split_loader(run_config, "test")
+
+
+def global_val_loader(run_config: RunConfig) -> DataLoader:
+    """The server-held global **val** split (`data/splits.py`'s three-way train/val/
+    test, distinct from each client's own `local-val-fraction` carved out of its own
+    partition) -- for `server_val`-style fitness (plan §4.4) and FedLAW (Phase 5,
+    `strategies/fedlaw.py`), both of which need weights *chosen* against a set the
+    final reported metric (always the **test** split) was never touched by."""
+    return _global_split_loader(run_config, "val")
 
 
 # ======================================================================================
@@ -395,28 +422,83 @@ def _partition_id(context: Context) -> int:
     return int(context.node_config["partition-id"])
 
 
+# Prefix convention shared with strategies/scaffold.py: the global control variate
+# `c` and a client's own control-variate delta `dc_i` are model-shaped, so both
+# travel inside the same ArrayRecord as the model weights rather than needing a third
+# top-level RecordDict key.
+_SCAFFOLD_CONTROL_PREFIX = "scaffold_c/"
+_SCAFFOLD_DELTA_PREFIX = "scaffold_dc/"
+
+
 @client_app.train()
 def train_handler(msg: Message, context: Context) -> Message:
     model = build_model_from_run_config(context.run_config)
-    model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
+    full_state = msg.content["arrays"].to_torch_state_dict()
+    model_keys = list(model.state_dict().keys())
+    model.load_state_dict(OrderedDict((k, full_state[k]) for k in model_keys))
 
     train_loader, _ = load_client_data(_partition_id(context), context.run_config)
-
     config = msg.content["config"]
+
+    # SCAFFOLD (strategies/scaffold.py): present only when that strategy is active.
+    scaffold_keys = [k for k in full_state if k.startswith(_SCAFFOLD_CONTROL_PREFIX)]
+    correction = None
+    global_c: "OrderedDict[str, torch.Tensor] | None" = None
+    local_c: "OrderedDict[str, torch.Tensor] | None" = None
+    params_before: "OrderedDict[str, torch.Tensor] | None" = None
+    if scaffold_keys:
+        global_c = OrderedDict(
+            (k[len(_SCAFFOLD_CONTROL_PREFIX) :], full_state[k]) for k in scaffold_keys
+        )
+        stored = context.state.get("scaffold_c_i")
+        local_c = (
+            stored.to_torch_state_dict()
+            if stored is not None
+            else OrderedDict((name, torch.zeros_like(t)) for name, t in global_c.items())
+        )
+        correction = OrderedDict((name, global_c[name] - local_c[name]) for name in global_c)
+        params_before = OrderedDict((k, model.state_dict()[k].clone()) for k in global_c)
+
     metrics = local_train(
         model,
         train_loader,
         _device(),
         epochs=int(config.get("local-epochs", context.run_config.get("local-epochs", 2))),
         lr=float(config.get("lr", context.run_config.get("local-lr", 0.01))),
-        mu=float(config.get("mu", 0.0)),
+        # "proximal-mu" is the installed flwr.serverapp.strategy.FedProx's real,
+        # verified config key (its configure_train injects `config["proximal-mu"] =
+        # self.proximal_mu` -- read directly from
+        # flwr/serverapp/strategy/fedprox.py). "mu" is kept as a second fallback only
+        # for this project's own pre-Phase-5 tests/configs that predate wiring the
+        # real built-in FedProx; a bare static run_config default of 0.0 if neither
+        # is set (plain FedAvg).
+        mu=float(config.get("proximal-mu", config.get("mu", context.run_config.get("mu", 0.0)))),
+        correction=correction,
     )
     metrics["client_id"] = _partition_id(context)
     metrics["server_round"] = int(config.get("server_round", -1))
 
+    arrays_out = ArrayRecord(model.state_dict())
+    if global_c is not None and local_c is not None and params_before is not None:
+        lr = float(config.get("lr", context.run_config.get("local-lr", 0.01)))
+        tau = max(metrics["num_batches"], 1)
+        new_local_c = OrderedDict(
+            (
+                name,
+                local_c[name]
+                - global_c[name]
+                + (params_before[name] - model.state_dict()[name]) / (tau * lr),
+            )
+            for name in global_c
+        )
+        context.state["scaffold_c_i"] = ArrayRecord(new_local_c)
+        for name in global_c:
+            delta = (new_local_c[name] - local_c[name]).numpy()
+            arrays_out[f"{_SCAFFOLD_DELTA_PREFIX}{name}"] = Array(delta)
+
     content = RecordDict(
         {
-            "arrays": ArrayRecord(model.state_dict()),
+            "arrays": arrays_out,
             "metrics": MetricRecord(metrics),
         }
     )
@@ -452,10 +534,11 @@ def evaluate_handler(msg: Message, context: Context) -> Message:
 # ======================================================================================
 # SECTION 4 -- the ServerApp.
 #
-# `@server_app.main()` drives the built-in `FedAvg` (verified `flwr.serverapp.
-# strategy.FedAvg`, not the dead `fl.server.strategy` API), evaluates the global model
-# on the held-out **global** test set every round (never partitioned across clients --
-# plan Step 1.4), and writes one result JSON per run in the Phase 6 result-contract
+# `@server_app.main()` drives whichever `Strategy` `strategy-name` selects (Phase 5,
+# `strategies/factory.py::strategy_from_run_config` -- FedAvg is only the default),
+# evaluates the global model on the held-out **global** test set every round (never
+# partitioned across clients -- plan Step 1.4), and writes one result JSON per run in
+# the Phase 6 result-contract
 # schema (`utils/results.write_result`), the same schema Phase 2's centralized runs
 # already use.
 # ======================================================================================
@@ -519,7 +602,8 @@ def main(grid: Grid, context: Context) -> None:
     deterministic = bool(run_config.get("deterministic", True))
     seed_everything(seed, deterministic=deterministic)
 
-    resolved_config = {"run_config": dict(run_config), "strategy": "fedavg", "seed": seed}
+    strategy_name = str(run_config.get("strategy-name", "fedavg")).lower()
+    resolved_config = {"run_config": dict(run_config), "strategy": strategy_name, "seed": seed}
     run_id = make_run_id(resolved_config, seed)
     run_config = {**run_config, "_run_id": run_id}  # threaded through to build_evaluate_fn
 
@@ -544,16 +628,16 @@ def main(grid: Grid, context: Context) -> None:
         print(f"{run_id} already completed {num_rounds} rounds -- nothing to do.")
         return
 
-    strategy = FedAvg(
-        fraction_train=float(run_config.get("fraction-train", 1.0)),
-        min_train_nodes=int(run_config.get("min-train-nodes", 2)),
-        min_evaluate_nodes=int(run_config.get("min-evaluate-nodes", 2)),
-        min_available_nodes=int(run_config.get("min-available-nodes", 2)),
-    )
+    device = _device()
+    val_loader = global_val_loader(run_config) if strategy_name == "fedlaw" else None
+    strategy = strategy_from_run_config(run_config, model=model, val_loader=val_loader, device=device)
     train_config = ConfigRecord(
         {
             "local-epochs": int(run_config.get("local-epochs", 2)),
             "lr": float(run_config.get("local-lr", 0.01)),
+            # Plain FedAvg/most baselines never read this; FedProx overwrites it with
+            # its own "proximal-mu" key in its own configure_train (see train_handler's
+            # comment) -- kept here only as the pre-Phase-5 static fallback.
             "mu": float(run_config.get("mu", 0.0)),
         }
     )
@@ -592,6 +676,7 @@ __all__ = [
     "evaluate_handler",
     "build_evaluate_fn",
     "global_test_loader",
+    "global_val_loader",
     "build_model_from_run_config",
     "load_client_data",
     "local_train",
