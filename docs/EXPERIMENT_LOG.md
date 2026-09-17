@@ -587,3 +587,106 @@ doing its job on live data.
    (0.99/0.01 -> 0.004/0.996 -> 0.99/0.01). With gamma_3 = 0.1 the entropy penalty is
    weak relative to alignment. At K=2 this is close to degenerate by construction, but if
    the same saturation shows up at K=20 the entropy weight needs revisiting.
+
+---
+
+## 2026-09-17 — Phase 5: the honest hyperparameter search and the IID acceptance gate
+
+Phase 5's two remaining items, both of which had been blocked on "needs a live FL run"
+since Phase 3. Building them surfaced three separate reasons the first one could not have
+been written correctly before today; all are recorded in docs/OPEN_QUESTIONS.md.
+
+### What was delivered
+
+`scripts/run_hparam_search.py` — per-strategy grids, a shared `--budget` (default 8), one
+`flwr run` per trial, resumable. Selection reads `best_val_macro_f1` and nothing else.
+`scripts/check_iid_band.py` — the IID acceptance gate, exiting nonzero on FAIL.
+`make hparam-search`, `make hparam-search-plan`, `make iid-band`.
+
+### The prerequisite nobody had noticed
+
+Result files carried **no validation metric at all** — `build_evaluate_fn` evaluated the
+test split only. An "honest search on the val split" written against those files would
+have had to rank configurations by `final_test_macro_f1`, i.e. tune every baseline
+against the number the paper reports. `global_val_loader` had existed since Phase 5's
+FedLAW work, added specifically because using test for weight selection "would have been
+a real methodology bug", but nothing in the result path used it.
+
+Every round now logs `val_loss`/`val_accuracy`/`val_macro_f1`/`val_auc`, and `final`
+carries `best_val_macro_f1` (max over rounds, so a config that peaks then drifts is not
+punished) and `best_val_round`. Cost: one extra forward pass over 735 val images per
+round, ~52% of the existing test pass.
+
+### The search would have failed on every single trial
+
+Every baseline hyperparameter — `fedprox-mu`, `fedopt-*`, `num-malicious-nodes`,
+`trim-beta`, `lossweight-temperature`, `scaffold-server-lr`, `fedlaw-steps`,
+`fedlaw-lr` — was undeclared in `[tool.flwr.app.config]`, under a comment asserting they
+"only need overriding via --run-config when actually sweeping them". `flwr run` rejects
+undeclared keys outright, so not one of them could be swept. Same root cause as the
+partition keys found during the Phase 4 close-out; that fix covered the keys being
+touched at the time and left these.
+
+A trap inside the fix, worth recording because it would have been invisible: `fedopt-eta`
+was read by both FedAdam and FedYogi with *different* published defaults (0.1 vs 0.01,
+from the FedOpt paper). One declared key would have given both the same literal value and
+silently replaced FedYogi's default. Split into per-strategy keys.
+
+### `flwr run` is asynchronous, and the failure mode compounds
+
+A bare `flwr run` submits the run and returns exit 0 immediately. The search's first
+end-to-end attempt checked for each result file microseconds after launching the trial,
+found nothing, and reported every trial failed. Worse, those launched-and-forgotten runs
+keep executing: two aborted 2-trial searches left four orphaned simulations across 10 Ray
+sessions at load average 11.8 on a 4-core box, which starved the next (correctly
+blocking) trial so badly that one round had not finished in twelve minutes against ~70 s
+uncontended. Clearing it required killing `flower-superlink` to reap the zombies.
+
+The harness now passes `--stream` unconditionally and judges a trial by "did a result
+file appear", never by the subprocess's exit code — which is uninformative in both
+directions, since `flwr run` also exits 0 when the simulation itself dies.
+
+### Two self-inflicted bugs caught by the tests written alongside
+
+- `find_existing` matched trials on the swept keys alone, so a search at seed 1 would
+  have instantly "resumed" seed 0's results and produced a second seed that was a
+  duplicate of the first — quietly destroying the seed variance every error bar depends
+  on. Now matches the full configuration, ignoring path-only differences.
+- `diagnose` scanned line-by-line against a flat marker set including bare "error", so it
+  reported Ray's `FutureWarning: ... turn off this error message` as the reason a trial
+  failed. Now priority-ordered, warnings excluded.
+
+### Acceptance gate, verified both ways
+
+`check_iid_band.py` on hand-built result sets: a clustered IID picture (5 strategies,
+3 seeds, spread 0.0116 against seed noise 0.0057) returns **PASS**; a picture with FedACO
+0.086 clear of the field returns **FAIL** with exit 1 and points at the three things that
+actually cause it (partition not really IID, unmatched search budgets, selection on
+test). A spread that exceeds the band but sits inside 2x seed noise returns
+**INCONCLUSIVE** rather than either verdict, because with few seeds those are genuinely
+not distinguishable.
+
+⚠️ The 0.05 band is **this script's default, not a figure from the implementation plan**,
+which specifies the check but no threshold in any material available in this repo.
+Recorded rather than baked in silently, per CLAUDE.md.
+
+### Search verified end-to-end against the live Flower runtime
+
+`run_hparam_search.py --strategy fedprox --budget 2 --num-clients 2 --num-rounds 1`, two
+real `flwr run` subprocesses on a CPU box:
+
+| trial | `fedprox-mu` | `best_val_macro_f1` | `final_test_macro_f1` |
+|---|---|---|---|
+| 1 | 0.001 | 0.1132 | 0.1119 |
+| 2 | 0.01 | **0.1169** | — |
+
+Selected `fedprox-mu=0.01` on val, `trials_scored: 2`, `budget_shortfall: 0`, exit 0.
+What this establishes, none of which held this morning: a baseline hyperparameter
+actually reaches the strategy through `--run-config`; the result file carries a val
+metric; val and test are genuinely different numbers (0.1132 vs 0.1119 on the same run);
+and the harness blocks until each run finishes instead of racing it.
+
+**⚠️ The scores are meaningless as science.** This ran against the synthetic pixel cache
+(real Phase-1 manifest, fabricated images) because the raw JPEGs need Kaggle credentials
+this environment does not have. Only the mechanism is verified. The real search is
+GPU-hours in the author's training environment and has not been run.

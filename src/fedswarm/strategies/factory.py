@@ -57,13 +57,20 @@ def strategy_from_run_config(
         return FedProx(**common, proximal_mu=float(run_config.get("fedprox-mu", 0.01)))
 
     if name in ("fedadam", "fedyogi"):
-        opt_defaults = {"fedadam": (0.1, 0.1), "fedyogi": (0.01, 0.0316)}[name]
-        eta_default, eta_l_default = opt_defaults
+        # Deliberately per-strategy keys (`fedadam-eta`, `fedyogi-eta`) rather than one
+        # shared `fedopt-eta`. FedAdam and FedYogi carry *different* published defaults
+        # (0.1/0.1 vs 0.01/0.0316, from the FedOpt paper), and a single declared key
+        # would resolve to one literal value for both -- silently replacing FedYogi's
+        # default with FedAdam's and making the fallbacks below dead code. Every key
+        # here must be declared in pyproject.toml to be overridable at all, and a
+        # declared key always has a value, so "fall back to the strategy's own default"
+        # only works if the key is unique to that strategy.
+        eta_default, eta_l_default = {"fedadam": (0.1, 0.1), "fedyogi": (0.01, 0.0316)}[name]
         cls = FedAdam if name == "fedadam" else FedYogi
         return cls(
             **common,
-            eta=float(run_config.get("fedopt-eta", eta_default)),
-            eta_l=float(run_config.get("fedopt-eta-l", eta_l_default)),
+            eta=float(run_config.get(f"{name}-eta", eta_default)),
+            eta_l=float(run_config.get(f"{name}-eta-l", eta_l_default)),
             beta_1=float(run_config.get("fedopt-beta1", 0.9)),
             beta_2=float(run_config.get("fedopt-beta2", 0.99)),
             tau=float(run_config.get("fedopt-tau", 0.001)),

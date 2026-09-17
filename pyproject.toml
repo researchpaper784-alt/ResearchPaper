@@ -154,9 +154,34 @@ mu = 0.0  # static FedProx fallback; the real installed FedProx strategy overrid
 # One of: fedavg, fedprox, fedadam, fedyogi, krum, trimmed-mean, median, fednova,
 # loss-based, scaffold, fedlaw, fedaco. Strategy-specific knobs (fedprox-mu,
 # fedopt-eta/-eta-l/-beta1/-beta2/-tau, num-malicious-nodes, trim-beta,
-# lossweight-temperature, scaffold-server-lr, fedlaw-steps/-lr) all have defaults in
-# the factory and only need overriding via --run-config when actually sweeping them.
+# lossweight-temperature, scaffold-server-lr, fedlaw-steps/-lr) are declared below at
+# their factory defaults.
+#
+# ⚠️ They used to be omitted here, with a comment saying they "only need overriding via
+# --run-config when actually sweeping them". That was wrong for the same reason the
+# partition keys above were: `flwr run` rejects undeclared keys with a bare "[code: 15]",
+# so *none* of them could be swept -- which would have failed every trial of Phase 5's
+# per-baseline hyperparameter search, the one thing they exist for. Found 2026-09-17 by
+# tests/test_phase5_search.py::test_every_grid_key_is_declared_in_pyproject, which now
+# checks this table against the search grids so the two cannot drift apart again.
 strategy-name = "fedavg"
+fedprox-mu = 0.01
+# Per-strategy rather than a shared `fedopt-eta`: FedAdam and FedYogi have different
+# published defaults, and one declared key would give both the same value. See
+# strategies/factory.py.
+fedadam-eta = 0.1
+fedadam-eta-l = 0.1
+fedyogi-eta = 0.01
+fedyogi-eta-l = 0.0316
+fedopt-beta1 = 0.9
+fedopt-beta2 = 0.99
+fedopt-tau = 0.001
+num-malicious-nodes = 0
+trim-beta = 0.2
+lossweight-temperature = 1.0
+scaffold-server-lr = 1.0
+fedlaw-steps = 20
+fedlaw-lr = 0.1
 
 # FedACO knobs (Phase 4, strategies/factory.py::_build_fedaco). Every one is declared
 # here at its dataclass default and only needs a --run-config override when swept.

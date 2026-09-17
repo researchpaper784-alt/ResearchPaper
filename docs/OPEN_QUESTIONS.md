@@ -528,3 +528,84 @@ currently does not have at all) or confirm the training environment has
 `2 * num-clients` cores available. Do not assume the simulation degrades gracefully to
 time-slicing when it does not -- it appears to stall silently, which in a long sweep is
 indistinguishable from a slow round.
+
+## Phase 5 -- three things that made the honest hyperparameter search impossible to write
+
+All found 2026-09-17 while building `scripts/run_hparam_search.py`, all fixed. Recorded
+because each was silent: nothing failed loudly, the work simply could not have been done
+correctly, and in two cases an incorrect version would have looked fine.
+
+### 1. Result files carried no validation metric at all
+
+The plan requires the search to select "on the val split". `build_evaluate_fn` evaluated
+only the **test** split, so `rounds` and `final` carried `test_*` and nothing else. Any
+search written against those files would have had to rank configurations by
+`final_test_macro_f1` -- tuning every baseline against the exact number the paper
+reports. `global_val_loader` already existed (added in Phase 5 for FedLAW, precisely
+because using test for weight selection "would have been a real methodology bug") but
+nothing in the result path used it.
+
+Now every round logs `val_loss`/`val_accuracy`/`val_macro_f1`/`val_auc`, and `final`
+carries `best_val_macro_f1` (max over rounds, so a config that peaks then drifts is not
+penalized) plus `best_val_round`. `run_hparam_search.py::score` reads that key and no
+other.
+
+### 2. Every baseline hyperparameter was undeclared, so none could be swept
+
+Same root cause as the partition keys (entry above): `flwr run` rejects any
+`--run-config` key absent from `[tool.flwr.app.config]`. `fedprox-mu`, `fedopt-*`,
+`num-malicious-nodes`, `trim-beta`, `lossweight-temperature`, `scaffold-server-lr`,
+`fedlaw-steps`, `fedlaw-lr` were all missing, under a comment asserting they "only need
+overriding via --run-config when actually sweeping them" -- describing the one thing that
+did not work. **Every trial of the Phase 5 search would have failed with `[code: 15]`.**
+
+`tests/test_phase5_search.py::test_every_grid_key_is_declared_in_pyproject` now checks
+the declared table against the search grids, so the two cannot drift apart again.
+
+**A trap inside the fix**: `fedopt-eta`/`fedopt-eta-l` were read by both FedAdam and
+FedYogi with *different* per-strategy defaults (0.1/0.1 vs 0.01/0.0316, from the FedOpt
+paper). Declaring one shared key would have given both the same literal value and made
+those fallbacks dead code -- silently replacing FedYogi's published default. They are now
+per-strategy keys (`fedadam-eta`, `fedyogi-eta`).
+
+### 3. `flwr run` is asynchronous unless `--stream` is passed
+
+A bare `flwr run` submits the run, prints "Successfully started run <id>", and returns
+**exit 0 immediately** while the simulation is still starting. The first end-to-end run
+of the search shelled out without `--stream`, checked for each trial's result file
+microseconds after launching it, found nothing, and reported every trial as failed.
+
+Compounding it: `flwr run` *also* exits 0 when the simulation itself dies (a missing
+cache surfaces as an in-run traceback and "Exit Code: 700" behind a successful outer
+process). So the return code is useless in both directions. The harness now passes
+`--stream` unconditionally and judges success by "did a result file appear", not by the
+subprocess's verdict.
+
+**The second-order effect is worse than the mis-reporting.** Those launched-and-forgotten
+runs do not stop -- they keep executing. After two aborted 2-trial searches this 4-core
+box was running four orphaned simulations across 10 Ray sessions at load average 11.8,
+which then starved the *next* (correctly blocking) trial badly enough that a single round
+had not finished after twelve minutes, against ~70 s when uncontended. Nothing reports
+this: the searches had already exited "cleanly", and the orphans are only visible in
+`ps`. Cleanup required killing `flower-superlink` itself to reap the zombie
+`flwr-simulation` children.
+
+**This applies directly to Phase 6.** Any sweep runner that shells out to `flwr run`
+must pass `--stream`, or it will launch every run in the sweep near-simultaneously,
+conclude that all of them failed, and leave the machine thrashing under a pile of
+orphaned simulations that make every subsequent timing measurement meaningless.
+
+### Also fixed: the test fixtures were two-way, not three-way
+
+`tests/test_fl_app.py`'s fixtures built only `train`/`test` rows, so `global_val_loader`
+returned an empty loader and `evaluate_model` raised `need at least one array to
+concatenate` the moment per-round val evaluation was added. The real manifest is
+three-way and `split` is orthogonal to the on-disk directory (real val rows appear under
+both `Training/` and `Testing/` paths); the fixtures now match.
+
+### Also fixed: `val_loader` was gated on FedLAW alone
+
+`fl/app.py` built the val loader only when `strategy_name == "fedlaw"`, so FedACO's
+`aco-fitness-mode="server_val"` -- declared and supported since the Phase 4 close-out --
+raised "requires model, val_loader, and device" on use. Introduced in `0bb64b7` by making
+the mode selectable without extending the gate. It is now built unconditionally.

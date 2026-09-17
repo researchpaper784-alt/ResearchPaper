@@ -560,6 +560,7 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
     """
     device = _device()
     test_loader = global_test_loader(run_config)
+    val_loader = global_val_loader(run_config)
     checkpoint_dir = _repo_path(str(run_config.get("checkpoint-dir", "results/fl/_checkpoints")))
     run_id = str(run_config.get("_run_id", "unknown"))
 
@@ -568,6 +569,15 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
         model = build_model_from_run_config(run_config).to(device)
         model.load_state_dict(arrays.to_torch_state_dict())
         metrics = evaluate_model(model, test_loader, device)
+        # The global val split (735 images, server-held, never partitioned) is evaluated
+        # every round alongside test, and is the ONLY signal any model-selection or
+        # hyperparameter-search decision may read (plan §5's "honest hyperparameter
+        # search on the val split"). Before this, result files carried `test_*` and
+        # nothing else, so any search would have had to select on the very metric it
+        # reports -- the same contamination `global_val_loader` was introduced to avoid
+        # for FedLAW's weight selection. Costs one extra forward pass over 735 images per
+        # round, ~52% of the existing test pass and negligible against local training.
+        val_metrics = evaluate_model(model, val_loader, device)
 
         if server_round == 0 and round_offset > 0:
             print(f"[round {true_round}] re-confirmed resumed checkpoint (not re-logged)")
@@ -581,15 +591,25 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
                 "test_macro_f1": metrics["macro_f1"],
                 "test_auc": metrics.get("auc_ovr_macro"),
                 "per_class_recall": metrics["per_class_recall"],
+                "val_loss": val_metrics["loss"],
+                "val_accuracy": val_metrics["accuracy"],
+                "val_macro_f1": val_metrics["macro_f1"],
+                "val_auc": val_metrics.get("auc_ovr_macro"),
             }
         )
         save_checkpoint(checkpoint_dir, run_id, true_round, rounds_log, model.state_dict())
         print(
-            f"[round {true_round}] test_macro_f1={metrics['macro_f1']:.4f} "
-            f"test_acc={metrics['accuracy']:.4f}"
+            f"[round {true_round}] val_macro_f1={val_metrics['macro_f1']:.4f} "
+            f"test_macro_f1={metrics['macro_f1']:.4f} test_acc={metrics['accuracy']:.4f}"
         )
+        # `val_macro_f1` is returned too so it is visible in Flower's own round summary,
+        # but selection reads the result file, not this record.
         return MetricRecord(
-            {"test_macro_f1": metrics["macro_f1"], "test_accuracy": metrics["accuracy"]}
+            {
+                "test_macro_f1": metrics["macro_f1"],
+                "test_accuracy": metrics["accuracy"],
+                "val_macro_f1": val_metrics["macro_f1"],
+            }
         )
 
     return evaluate_fn
@@ -629,7 +649,13 @@ def main(grid: Grid, context: Context) -> None:
         return
 
     device = _device()
-    val_loader = global_val_loader(run_config) if strategy_name == "fedlaw" else None
+    # Built unconditionally rather than gated on `strategy_name == "fedlaw"`. Two
+    # strategies need a server-held val set to choose weights against -- FedLAW, and
+    # FedACO under `aco-fitness-mode="server_val"` -- and the old gate named only the
+    # first, so selecting the second raised "requires model, val_loader, and device"
+    # despite being a declared, supported mode. Constructing it is a mmap'd cache read;
+    # strategies that don't need it ignore it.
+    val_loader = global_val_loader(run_config)
     strategy = strategy_from_run_config(run_config, model=model, val_loader=val_loader, device=device)
     train_config = ConfigRecord(
         {
@@ -661,6 +687,24 @@ def main(grid: Grid, context: Context) -> None:
             "wall_clock_s": wall_clock_s,
             "num_rounds_completed": num_rounds,
             "final_test_macro_f1": rounds_log[-1]["test_macro_f1"] if rounds_log else None,
+            # The selection key. `best_val_macro_f1` is the max over rounds, not the last
+            # round's, so a search is not penalized for a config that peaks and then
+            # drifts; `best_val_round` records where it peaked. Anything choosing between
+            # configurations must read these and never `final_test_macro_f1`.
+            "final_val_macro_f1": rounds_log[-1].get("val_macro_f1") if rounds_log else None,
+            "best_val_macro_f1": (
+                max(r["val_macro_f1"] for r in rounds_log if r.get("val_macro_f1") is not None)
+                if any(r.get("val_macro_f1") is not None for r in rounds_log)
+                else None
+            ),
+            "best_val_round": (
+                max(
+                    (r for r in rounds_log if r.get("val_macro_f1") is not None),
+                    key=lambda r: r["val_macro_f1"],
+                )["round"]
+                if any(r.get("val_macro_f1") is not None for r in rounds_log)
+                else None
+            ),
         },
         seed=seed,
     )
