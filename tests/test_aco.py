@@ -112,3 +112,66 @@ def test_desirability_prefers_well_aligned_high_data_client() -> None:
     # The misaligned client's peak desirability should sit at a lower multiplier level
     # than the well-aligned client's.
     assert levels[eta[0].argmax()] >= levels[eta[1].argmax()]
+
+
+def test_fitness_is_scale_invariant_under_normalization() -> None:
+    """Regression guard for the dispersion-scale bug (2026-09-17, docs/EXPERIMENT_LOG.md).
+
+    F mixes a cosine in [-1, 1] with a raw sum of squared distances. Normalizing
+    dispersion by trace(G)/K makes every term dimensionless, so scaling all client
+    updates by a constant -- which is what raising the local learning rate or the number
+    of local epochs does -- must leave F exactly unchanged. Without the normalization
+    the dispersion term scales as c^2 and swamps the other two.
+    """
+    torch.manual_seed(0)
+    deltas = torch.randn(8, 500)
+    alpha = torch.rand(8)
+    alpha = alpha / alpha.sum()
+
+    normalized = DataFreeFitnessConfig(normalize_dispersion=True)
+    raw = DataFreeFitnessConfig(normalize_dispersion=False)
+
+    for scale in (0.1, 10.0, 100.0):
+        f_base = DataFreeFitness(precompute_gram(deltas), normalized).evaluate(alpha)
+        f_scaled = DataFreeFitness(precompute_gram(deltas * scale), normalized).evaluate(alpha)
+        assert abs(f_scaled - f_base) < 1e-4, (scale, f_base, f_scaled)
+
+    # ...and the un-normalized form is exactly what it is not: kept as an explicit
+    # contrast so the test documents the bug, not just the fix.
+    f_raw_base = DataFreeFitness(precompute_gram(deltas), raw).evaluate(alpha)
+    f_raw_scaled = DataFreeFitness(precompute_gram(deltas * 10.0), raw).evaluate(alpha)
+    assert abs(f_raw_scaled - f_raw_base) > 1.0
+
+
+def test_pheromone_still_carries_signal_when_updates_are_large() -> None:
+    """The operational consequence of the bug above: `colony.py` floors deposits at
+    `max(F, 0)`, so a fitness driven negative for every candidate deposits nothing at
+    all, tau stays uniform across levels, and `tau^a * eta^b` collapses to `eta^b` --
+    deterministic heuristic-greedy weighting wearing an ACO costume. Measured on real
+    SimpleCNN deltas this happened for every config with lr >= 0.05 or more than one
+    local epoch. Assert tau actually develops within-row structure at a delta scale
+    that used to kill it.
+    """
+    torch.manual_seed(0)
+    num_clients = 8
+    # x100 reproduces the delta magnitude measured at lr=0.1 / 5 local epochs.
+    deltas = torch.randn(num_clients, 400) * 100.0
+    gram = precompute_gram(deltas)
+    fitness = DataFreeFitness(gram, DataFreeFitnessConfig())
+    levels = level_set(num_levels=11)
+    d_k = desirability_scores(gram, torch.full((num_clients,), 100.0))
+    eta = desirability_matrix(d_k, levels)
+    pheromone = Pheromone(11, PheromoneConfig())
+    tau0 = pheromone.begin_round([str(i) for i in range(num_clients)])
+
+    result = run_colony(
+        tau0, eta, levels, torch.full((num_clients,), 1.0 / num_clients), fitness.evaluate,
+        num_ants=20, num_iterations=10, config=ColonyConfig(),
+        generator=torch.Generator().manual_seed(0),
+    )
+
+    row_spread = (result.tau_final.max(dim=1).values - result.tau_final.min(dim=1).values).mean()
+    assert float(row_spread) > 1e-3, (
+        f"pheromone is uniform across levels (spread={float(row_spread):.3e}) -- the "
+        "colony has degenerated to heuristic-only selection"
+    )

@@ -98,6 +98,7 @@ class GramPrecompute:
     gram: torch.Tensor  # [K, K]
     g_rob: torch.Tensor  # [K] -- <delta_k, robust_mean> for each client k
     rob_norm_sq: float  # ||robust_mean||^2
+    mean_sq_norm: float  # trace(G)/K -- mean ||delta_k||^2, the dispersion scale (see below)
 
 
 def precompute_gram(deltas: torch.Tensor, trim_fraction: float = 0.2) -> GramPrecompute:
@@ -105,12 +106,24 @@ def precompute_gram(deltas: torch.Tensor, trim_fraction: float = 0.2) -> GramPre
     matmul, negligible next to the O(K^2*d) Gram pass) specifically so that
     `<Delta(alpha), bar_Delta_rob> = alpha @ g_rob` during colony search -- an O(K) op,
     not O(K*d) -- without needing bar_Delta_rob to be a fixed linear combination of the
-    deltas (see `trimmed_mean`)."""
+    deltas (see `trimmed_mean`).
+
+    `mean_sq_norm = trace(G)/K` is the scale the dispersion term is divided by
+    (`fitness.py::DataFreeFitness`). Dispersion is a raw sum of squared distances, in
+    units of ||delta||^2, while the alignment term it trades off against is a cosine in
+    [-1, 1]; dividing by the mean squared client-update norm makes the two commensurate.
+    It is a per-round constant (independent of alpha), so it rescales dispersion
+    uniformly across candidates and cannot change the ranking dispersion alone induces
+    -- only its weight relative to alignment. See docs/EXPERIMENT_LOG.md (2026-09-17)
+    for the measurements that motivated it."""
     gram = compute_gram_matrix(deltas)
     robust_mean = trimmed_mean(deltas, trim_fraction)
     g_rob = deltas @ robust_mean
     rob_norm_sq = float(robust_mean @ robust_mean)
-    return GramPrecompute(gram=gram, g_rob=g_rob, rob_norm_sq=rob_norm_sq)
+    mean_sq_norm = float(torch.diagonal(gram).mean())
+    return GramPrecompute(
+        gram=gram, g_rob=g_rob, rob_norm_sq=rob_norm_sq, mean_sq_norm=mean_sq_norm
+    )
 
 
 def weighted_norm_sq(alpha: torch.Tensor, gram: torch.Tensor) -> torch.Tensor:

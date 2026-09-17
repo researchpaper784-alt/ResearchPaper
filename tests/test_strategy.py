@@ -16,6 +16,7 @@ from flwr.app import ArrayRecord, Message, MetricRecord, RecordDict
 from fedswarm.aco.colony import ColonyConfig
 from fedswarm.aco.fitness import DataFreeFitnessConfig
 from fedswarm.aco.heuristics import HeuristicWeights
+from fedswarm.strategies.factory import strategy_from_run_config
 from fedswarm.strategies.fedaco import FedACO, FedACOConfig
 from fedswarm.fl.app import local_train
 from fedswarm.models.simple_cnn import SimpleCNN
@@ -175,8 +176,84 @@ def test_overhead() -> None:
 
     aco_time_s = metrics_out["aco_time_ms"] / 1000.0
     round_time_s = num_clients * one_client_train_time_s  # sequential-equivalent, a conservative floor
-    # 15%, not the plan's 5% (§4.8), to absorb timing noise from other tests/processes
-    # running concurrently -- the algorithmic argument (O(K) per fitness eval vs. a
-    # full local epoch) doesn't depend on exactly where the line is drawn; a wall-clock
-    # assertion in a shared CI/test-suite environment does need slack.
-    assert aco_time_s < 0.15 * round_time_s, (aco_time_s, round_time_s)
+    # The plan's own 5% bar (§4.8). This previously asserted 15% "to absorb timing
+    # noise" without the margin ever having been measured; it is actually ~1.8% in this
+    # setup, and 0.26% at the real primary-config scale (K=20, SimpleCNN@112, d=390,404:
+    # 145ms of ACO against a 56.8s sequential round, of which 60ms is the one-off Gram
+    # precompute -- docs/EXPERIMENT_LOG.md, 2026-09-17). A ~2.8x margin here is enough
+    # for wall-clock noise in a shared test environment without weakening the criterion.
+    assert aco_time_s < 0.05 * round_time_s, (aco_time_s, round_time_s)
+
+
+def test_colony_is_reproducible_and_independent_of_global_rng() -> None:
+    """The colony's exploration draws (`aco/colony.py::_select_levels`) used to come from
+    global torch RNG, because `FedACO.aggregate_train` never passed `run_colony` the
+    `generator` it accepts. A seeded run is now a function of (aco_config.seed,
+    server_round) alone -- asserted by deliberately churning global RNG between two
+    otherwise-identical runs, which under the old behavior changed the result.
+    """
+    global_state = _state()
+    replies = [
+        _make_reply(i, _add(global_state, _state(seed=100 + i)), num_examples=float(50 + 10 * i))
+        for i in range(4)
+    ]
+
+    def run_once(seed: int, server_round: int = 1) -> list[float]:
+        strategy = _new_strategy(num_rounds=4, seed=seed, colony=ColonyConfig(q0=0.5))
+        strategy._current_arrays = ArrayRecord(global_state)
+        _, metrics = strategy.aggregate_train(server_round, list(replies))
+        assert metrics is not None
+        return list(metrics["alpha"])
+
+    first = run_once(7)
+    torch.manual_seed(999)
+    torch.randn(5000)  # churn global RNG; the old implementation would drift here
+    second = run_once(7)
+    assert first == second
+
+    # The seed is load-bearing, not decorative: a different seed explores differently.
+    assert run_once(8) != first
+    # ...and so is the round index, so a resumed run replays the same trajectory rather
+    # than repeating round 1's draws on every round.
+    assert run_once(7, server_round=2) != first
+
+
+def test_run_config_reaches_every_fedaco_knob() -> None:
+    """Phase 6's sweep and Phase 7's ablations vary FedACO through `--run-config`; until
+    2026-09-17 the factory forwarded only `num-rounds`, so `aco-persistence="none"` (the
+    A1 ablation) and the `aco-target-sum` shrinkage sweep had no way in at all."""
+    strategy = strategy_from_run_config(
+        {
+            "strategy-name": "fedaco",
+            "num-rounds": 9,
+            "seed": 5,
+            "aco-persistence": "none",
+            "aco-target-sum": 0.75,
+            "aco-num-levels": 7,
+            "aco-ants-start": 12,
+            "aco-q0": 0.5,
+            "aco-gamma-dispersion": 0.25,
+            "aco-beta-drift": 3.0,
+            "aco-safety-fallback": False,
+        }
+    )
+    assert isinstance(strategy, FedACO)
+    cfg = strategy.aco_config
+    assert cfg.num_rounds == 9 and cfg.seed == 5
+    assert cfg.pheromone.persistence == "none"
+    assert cfg.target_sum == 0.75 and cfg.num_levels == 7 and cfg.ants_start == 12
+    assert cfg.colony.q0 == 0.5
+    assert cfg.fitness.gamma_dispersion == 0.25
+    assert cfg.heuristics.beta_drift == 3.0
+    assert cfg.safety_fallback is False
+    # Unspecified knobs keep their documented defaults rather than being zeroed.
+    assert cfg.iters_start == FedACOConfig.iters_start
+    assert cfg.fitness.normalize_dispersion is True
+    assert cfg.fitness_mode == "data_free"
+
+
+def test_server_val_fitness_mode_requires_its_dependencies() -> None:
+    with pytest.raises(ValueError, match="server_val"):
+        FedACO(min_train_nodes=2, aco_config=FedACOConfig(fitness_mode="server_val"))
+    with pytest.raises(ValueError, match="client_probe"):
+        FedACO(min_train_nodes=2, aco_config=FedACOConfig(fitness_mode="client_probe"))

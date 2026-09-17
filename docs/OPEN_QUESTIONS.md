@@ -424,3 +424,107 @@ real source (`flwr/serverapp/strategy/fedprox.py`), not by guessing the key name
 every baseline an honest hyperparameter search on the val split with a budget matched
 to FedACO's") and the IID-narrow-band acceptance check -- both need a live FL run to
 execute, same blocker as everything else in Phase 3 onward.
+
+## Phase 4 -- closed items, and the two residuals that remain open
+
+**Closed 2026-09-17** (see docs/EXPERIMENT_LOG.md for measurements):
+
+- The dispersion term's scale was silently disabling the colony for any config beyond
+  `lr=0.01, local-epochs=1`. Fixed by dividing by `trace(G)/K`; guarded by two new tests.
+- No FedACO knob was reachable from `run_config` (the factory forwarded only
+  `num-rounds`), which made the Phase 7 A1 persistence ablation and the `target_sum`
+  shrinkage sweep literally unrunnable. All knobs are now declared in
+  `[tool.flwr.app.config]` as `aco-*` keys.
+- The colony's RNG rode on global torch RNG; it now takes a `torch.Generator` seeded
+  from `(seed, server_round)`.
+- `fitness_mode` is now selectable between `data_free` and `server_val`.
+- `test_overhead` was asserting an unmeasured 15%; tightened to the plan's 5% with the
+  real K=20 number recorded.
+
+### Residual 1 -- the deposit floor can still zero out, just not from scale
+
+`colony.py` deposits `rho * Q * max(F, 0)`. Normalization removed the *scale-driven* path
+into that floor, but F can still be negative on its own terms: with dispersion now
+normalized to ~1, a round whose client updates have no consensus direction (alignment
+near 0) yields F ~ -1 for every candidate, and the same degeneracy follows -- uniform
+tau, `tau^a * eta^b` collapsing to `eta^b`. This was observed directly while measuring
+overhead with isotropic-noise deltas: `pheromone_entropy` came back at exactly
+log(11) = 2.3979, its maximum.
+
+Whether this matters in practice is an open empirical question, not a known bug: on real
+training deltas (which do have a consensus direction) F was positive in every round
+measured. A baseline-centred deposit `max(F - F_fedavg, 0)` would make the mechanism
+sign-robust and was prototyped, but showed no systematic benefit on real deltas and was
+rejected rather than added on speculation. **Decide from the first real multi-round FL
+run**: if `pheromone_entropy` sits at log(num_levels) across rounds, the colony is not
+actually searching and this needs revisiting. `delta_mean_sq_norm` and
+`pheromone_entropy` are both logged per round for exactly this check.
+
+### Residual 2 -- the safety fallback cannot detect a degenerate fitness
+
+`fallback_used` compares `F_best` against `F_fedavg` under the *same* fitness function,
+so it reports 0 ("the colony beat FedAvg") even when the colony never searched at all --
+confirmed across all 9 configs of the scale sweep, including the six where tau was
+exactly uniform. This is not fixed and arguably cannot be fixed from inside F alone; it
+is a reason to read `pheromone_entropy` rather than trust `fallback_used` as a health
+signal. Recorded so no one later reads `fallback_used=0` as evidence the method worked.
+
+### Still deferred to Phase 7, unchanged
+
+Global shrinkage `s` is swept, not searched; `client_probe`'s broadcast/collect
+round-trip is still unwired (`ClientProbeFitness` is the aggregation side only, and
+`fitness_mode="client_probe"` is now rejected at construction rather than silently
+accepted).
+
+## Phase 3/6 -- `flwr run` rejects any `--run-config` key not declared in pyproject
+
+Found 2026-09-17 while running FedACO end-to-end. `flwr run --run-config "alpha=0.3"`
+fails with a bare `[code: 15] Invalid run configuration` that names no key: overrides are
+only accepted for keys that already exist in `[tool.flwr.app.config]`.
+
+This had already broken something. `pyproject.toml` carried a comment stating that
+`alpha` / `classes-per-client` / `skew-sigma` were "deliberately absent from the smoke
+default -- override alongside `regime` together, e.g. `--run-config "regime='dirichlet'
+alpha=0.3"`". That command has never worked, which means **every non-IID federated run --
+the entire point of the project -- was unreachable from the CLI**. All three are now
+declared, along with every `aco-*` key.
+
+Anything a future phase wants to sweep has to be declared in that table first; a comment
+documenting a key is not enough.
+
+## Phase 3 -- newer scikit-learn returns nan from roc_auc_score instead of raising
+
+`eval/metrics.py` caught `ValueError` to report `auc_ovr_macro: None` when a class is
+absent from a batch -- expected under label-skewed partitions. Newer scikit-learn no
+longer raises: it emits `UndefinedMetricWarning` and returns `nan`, so the `except` never
+fired and `nan` reached the result JSON.
+
+Not cosmetic: `json.dumps` serializes that as a bare `NaN` token, which is **invalid JSON**
+and is rejected by strict parsers -- so Phase 6 result files would have been unparseable
+for exactly the partitions the project is about. Both paths now normalize to `None`.
+Caught by `tests/test_models.py::test_compute_metrics_auc_handles_missing_class_gracefully`
+and `tests/test_fl_app.py::test_evaluate_fn_checkpoints_after_every_round`, which were the
+two failures in the suite before this was fixed.
+
+## Phase 6 -- the simulation's default CPU budget is 2 cores *per client*, which caps K
+
+Observed 2026-09-17 while running FedACO end-to-end on a 4-core CPU box. `flwr run` with
+`num-clients=4` started Ray, created the `ClientAppActor`s, and then sat at round 0
+indefinitely with every actor near 0% CPU -- no error, no timeout, just no progress. The
+same run at `num-clients=2` completed all 3 rounds normally.
+
+Verified, not inferred: `flwr.simulation.run_simulation.DEFAULT_SIMULATION_CONFIG`
+has `client_resources_num_cpus = 2`. So 4 concurrent ClientApps request 8 cores on a
+4-core machine. **The main sweep's K=20 would request 40 cores at this default.**
+
+What is verified is the default and the two observations; the causal link (resource
+starvation specifically, rather than something else that 2 clients happen to avoid) is
+probable but not proven here -- it is consistent with the `clientapp-seconds: 0.0`
+signature recorded in the Colab heartbeat entry above, though that instance was GPU.
+
+**Before Phase 6 commits GPU-hours**: decide how client resources are sized. Either set
+`client_resources` explicitly (a `[tool.flwr.federations]` section, which this project
+currently does not have at all) or confirm the training environment has
+`2 * num-clients` cores available. Do not assume the simulation degrades gracefully to
+time-slicing when it does not -- it appears to stall silently, which in a long sweep is
+indistinguishable from a slow round.

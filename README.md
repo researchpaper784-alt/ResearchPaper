@@ -12,7 +12,12 @@ with pheromone persisting across communication rounds as a memory of client reli
 Evaluated on 4-class brain tumor MRI classification under realistic non-IID federated
 partitions (label skew, quantity skew, and cross-source feature shift).
 
-Status: **Phase 0 — scaffolding.** No experiments have been run yet.
+Status: **Phases 0–5 complete.** Data pipeline, centralized ceiling, Flower FL harness,
+FedACO, and the baseline strategies are all built and tested. The centralized ceiling is
+measured on real data (SimpleCNN@112: 0.9300 macro-F1 BatchNorm / 0.9203 GroupNorm;
+ResNet-18: 0.9701 over 3 seeds — see [docs/EXPERIMENT_LOG.md](docs/EXPERIMENT_LOG.md)).
+The federated main sweep (Phase 6), ablations (Phase 7), robustness (Phase 8), and
+analysis (Phase 9) have not been run — `results/` is empty by design (gitignored).
 
 ## Setup
 
