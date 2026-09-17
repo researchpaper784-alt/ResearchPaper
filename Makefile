@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke validate-fedaco health hparam-search hparam-search-plan iid-band main main-plan ablations ablations-plan figures-data figures tables tables-ablation clean
+.PHONY: setup data test lint smoke validate-fedaco health hparam-search hparam-search-plan iid-band main main-plan ablations ablations-plan figures-data figures figures-ablation tables tables-ablation clean
 
 setup:
 	uv venv --python 3.12 .venv
@@ -83,8 +83,13 @@ ablations:
 figures-data:
 	.venv/bin/python scripts/make_partition_figures.py
 
+# Phase 9. Four figures to paper/figures/. Each is skipped (and named as skipped) when
+# the sweep feeding it has not run, rather than rendered blank.
 figures:
-	.venv/bin/python scripts/make_figures.py
+	.venv/bin/python scripts/make_figures.py --results-dir results/fl/main
+
+figures-ablation:
+	.venv/bin/python scripts/make_figures.py --results-dir results/fl/ablation --only ablation
 
 # Phase 9. Aggregates over seeds and writes Markdown + CSV to paper/tables/. Exits
 # nonzero when any cell has fewer seeds than expected, so an incomplete sweep cannot be

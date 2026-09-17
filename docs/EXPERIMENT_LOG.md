@@ -856,3 +856,59 @@ fallback rate (0%) and τ entropy (2.373, against a 2.398 ceiling) beside the sc
 
 `make main-plan` / `make ablations-plan` / `make tables` / `make tables-ablation`.
 `make figures` still points at a `scripts/make_figures.py` that does not exist.
+
+---
+
+## 2026-09-17 — Phase 9 figures
+
+`scripts/make_figures.py`, the last target in the Makefile that pointed at a file which
+did not exist. Four figures, each picked by what its data has to say: convergence (line,
+faceted by regime), final comparison (dot plot with error bars), ablation deltas
+(diverging bars), colony health (line against a threshold).
+
+### Emphasis instead of twelve hues
+
+The sweep has 12 strategies. A categorical palette carries about 8 before adjacent hues
+stop being distinguishable, and generating a 9th is a documented anti-pattern rather than
+a stylistic preference. The paper's claim is FedACO against FedAvg, so those two take the
+first two categorical slots and the other ten render as one muted gray field — which is
+also a more honest picture of the argument than twelve equal-weight lines.
+
+The two hues (`#2a78d6`, `#eb6834`) were run through the palette validator rather than
+eyeballed: all-pairs, light surface, they clear the lightness band, chroma floor, CVD
+separation (ΔE 24.7 worst, against a floor of 8), normal-vision separation (33.6, floor
+15) and the 3:1 contrast floor, with no warnings — so no relief rule is owed. The
+diverging pair for the ablation arms (`#2a78d6` / `#e34948`) passes the same checks.
+
+### Three layout defects found by rendering and looking
+
+Every one of these passed the palette validator, which checks color and not geometry.
+They were only visible in the rendered PNG:
+
+1. **Convergence endpoint labels collided and overflowed.** FedACO and FedAvg converge to
+   within a hair of each other in exactly the regimes that matter, so the two value
+   labels printed on top of one another; at the right edge they ran off the panel. Now
+   nudged apart when closer than 4.5% of the y-range, with the x-limit extended 10% to
+   give them room.
+2. **Ablation x-tick labels ran together** into one unreadable string — five 6-character
+   labels in a narrow panel at default tick density. Capped at 4 ticks.
+3. **Colony health stacked three regime labels on the same point.** The first draft
+   overlaid regimes in one panel and separated them by alpha, which is a weak channel
+   that collapses entirely when two curves coincide. Rebuilt as small multiples, one
+   panel per regime, one hue.
+
+### The figure that exists to fail
+
+`colony_health.png` plots pheromone entropy against its log(L) ceiling, annotated with
+how far below uniform each regime sits. It is the only figure here that can show the
+method's mechanism did not run — convergence, comparison and ablation figures would all
+look perfectly healthy on a run whose colony never searched. Its y-range is anchored to
+the ceiling rather than auto-scaled, so a curve sitting a hair under uniform is not
+stretched into looking like a dramatic descent.
+
+Rendered and inspected against 240 synthetic result files covering 12 strategies, 3
+regimes, 5 variants and 5 seeds. **Those files are fabricated to exercise the plotting
+code and are not results**; they were written to a scratch directory, never to `results/`.
+
+`make figures` / `make figures-ablation`. Every Makefile target now points at a file that
+exists.
