@@ -546,6 +546,41 @@ def evaluate_handler(msg: Message, context: Context) -> Message:
 server_app = ServerApp()
 
 
+def merge_train_metrics(rounds_log: list[dict], strategy_result, round_offset: int = 0) -> None:
+    """Fold the per-round `aggregate_train` MetricRecord into `rounds_log`, in place.
+
+    Without this, a strategy's own diagnostics never reach the result file. `rounds_log`
+    is built entirely by `build_evaluate_fn`, which only ever sees *evaluation* metrics;
+    everything `aggregate_train` returns -- FedACO's `pheromone_entropy`, `best_fitness`,
+    `fallback_used`, `delta_mean_sq_norm`, `alpha`, and the equivalents for every
+    baseline -- went to Flower's console output and nowhere else. The Phase 4 close-out
+    added `delta_mean_sq_norm` specifically so a run could be checked for the degenerate
+    regime, and it was not actually persisted anywhere a checker could read it.
+    `paper/ALGORITHM.md` lists these as the algorithm's outputs, so their absence from
+    the result schema was a real hole, not a nicety.
+
+    `Strategy.start()` returns a `Result` whose `train_metrics_clientapp` is keyed by
+    round (verified against the installed flwr==1.36.0 dataclass, not assumed). Its
+    rounds are numbered from 1 within this invocation, so `round_offset` maps them onto
+    the true round count the same way `build_evaluate_fn` does for a resumed run.
+
+    Keys are prefixed `train_` to keep them from colliding with the `test_`/`val_`
+    evaluation metrics already in each entry. A round present in the metrics but absent
+    from `rounds_log` is skipped rather than appended: `rounds_log` is the authoritative
+    record of rounds that were actually evaluated and checkpointed.
+    """
+    metrics = getattr(strategy_result, "train_metrics_clientapp", None)
+    if not metrics:
+        return
+    by_round = {entry["round"]: entry for entry in rounds_log}
+    for round_number, record in metrics.items():
+        entry = by_round.get(int(round_number) + round_offset)
+        if entry is None:
+            continue
+        for key, value in dict(record).items():
+            entry[f"train_{key}"] = value
+
+
 def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offset: int):
     """Closes over `rounds_log` so every call appends to the same list the caller holds
     a reference to -- `Strategy.start()` calls `evaluate_fn` itself and only returns a
@@ -670,7 +705,7 @@ def main(grid: Grid, context: Context) -> None:
     evaluate_fn = build_evaluate_fn(run_config, rounds_log, round_offset)
 
     t_start = time.time()
-    strategy.start(
+    strategy_result = strategy.start(
         grid=grid,
         initial_arrays=initial_arrays,
         num_rounds=remaining_rounds,
@@ -678,6 +713,7 @@ def main(grid: Grid, context: Context) -> None:
         evaluate_fn=evaluate_fn,
     )
     wall_clock_s = time.time() - t_start
+    merge_train_metrics(rounds_log, strategy_result, round_offset)
 
     write_result(
         output_dir / f"{run_id}.json",
@@ -719,6 +755,7 @@ __all__ = [
     "train_handler",
     "evaluate_handler",
     "build_evaluate_fn",
+    "merge_train_metrics",
     "global_test_loader",
     "global_val_loader",
     "build_model_from_run_config",

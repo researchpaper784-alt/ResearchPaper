@@ -37,6 +37,7 @@ from fedswarm.fl.app import (
     load_client_data,
     local_evaluate,
     local_train,
+    merge_train_metrics,
     partition_spec_from_run_config,
     per_class_confusion_counts,
     save_checkpoint,
@@ -675,3 +676,65 @@ def test_result_final_carries_val_selection_keys(server_run_config, tmp_path: Pa
     best_round = max(rounds_log, key=lambda r: r["val_macro_f1"])["round"]
     assert best == 0.70 and best_round == 2
     assert best != rounds_log[-1]["val_macro_f1"], "a last-round rule would pick 0.50 here"
+
+
+class _FakeResult:
+    """Stands in for flwr's `Result` (a dataclass whose `train_metrics_clientapp` is
+    keyed by round -- verified against the installed flwr==1.36.0)."""
+
+    def __init__(self, train_metrics_clientapp: dict) -> None:
+        self.train_metrics_clientapp = train_metrics_clientapp
+
+
+def test_merge_train_metrics_folds_aggregate_train_output_into_the_round_log() -> None:
+    """Without this, a strategy's own diagnostics never reach the result file at all.
+    `rounds_log` is built entirely from evaluation, so FedACO's pheromone_entropy,
+    best_fitness, fallback_used and delta_mean_sq_norm -- the fields the Phase 4
+    close-out added precisely so a run could be checked for the degenerate regime --
+    were going to Flower's console and nowhere a checker could read them."""
+    rounds_log = [
+        {"round": 1, "test_macro_f1": 0.10},
+        {"round": 2, "test_macro_f1": 0.20},
+    ]
+    result = _FakeResult(
+        {
+            1: {"pheromone_entropy": 2.31, "best_fitness": 0.44, "fallback_used": 0},
+            2: {"pheromone_entropy": 2.02, "best_fitness": 0.61, "fallback_used": 1},
+        }
+    )
+
+    merge_train_metrics(rounds_log, result, round_offset=0)
+
+    assert rounds_log[0]["train_pheromone_entropy"] == 2.31
+    assert rounds_log[1]["train_fallback_used"] == 1
+    # Evaluation metrics are untouched, and the prefix keeps the two families apart.
+    assert rounds_log[0]["test_macro_f1"] == 0.10
+    assert "pheromone_entropy" not in rounds_log[0]
+
+
+def test_merge_train_metrics_respects_the_resume_offset() -> None:
+    """A resumed run's Strategy.start() renumbers its rounds from 1, the same reason
+    build_evaluate_fn takes a round_offset. Ignoring it would staple round 4's colony
+    diagnostics onto round 1's evaluation."""
+    rounds_log = [{"round": 4, "test_macro_f1": 0.5}, {"round": 5, "test_macro_f1": 0.6}]
+    result = _FakeResult({1: {"best_fitness": 0.9}, 2: {"best_fitness": 0.8}})
+
+    merge_train_metrics(rounds_log, result, round_offset=3)
+
+    assert rounds_log[0]["train_best_fitness"] == 0.9
+    assert rounds_log[1]["train_best_fitness"] == 0.8
+
+
+def test_merge_train_metrics_is_a_noop_when_there_are_none() -> None:
+    rounds_log = [{"round": 1, "test_macro_f1": 0.1}]
+    merge_train_metrics(rounds_log, _FakeResult({}), round_offset=0)
+    merge_train_metrics(rounds_log, object(), round_offset=0)
+    assert rounds_log == [{"round": 1, "test_macro_f1": 0.1}]
+
+
+def test_merge_train_metrics_skips_rounds_absent_from_the_log() -> None:
+    """rounds_log is the authoritative record of rounds actually evaluated and
+    checkpointed; a stray metrics round must not invent an entry in it."""
+    rounds_log = [{"round": 1, "test_macro_f1": 0.1}]
+    merge_train_metrics(rounds_log, _FakeResult({1: {"a": 1.0}, 99: {"a": 2.0}}), round_offset=0)
+    assert len(rounds_log) == 1

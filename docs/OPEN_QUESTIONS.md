@@ -451,6 +451,19 @@ tau, `tau^a * eta^b` collapsing to `eta^b`. This was observed directly while mea
 overhead with isotropic-noise deltas: `pheromone_entropy` came back at exactly
 log(11) = 2.3979, its maximum.
 
+**Update, 2026-09-17 (later)** -- the first run measured with the new health checker came
+back `INERT` on question 1 while question 2 was `CLEAR`: tau sat 0.92% below uniform
+(2.3758 vs ceiling 2.3979) *even though* best_fitness was positive every round
+(0.78-0.92) and every round therefore deposited. That combination points away from the
+deposit floor as the cause and toward deposit *magnitude*: the deposit is
+`rho * Q * F ~= 0.1 * 0.8 = 0.08` onto one of 11 levels, against `tau0 = 1.0`, over only
+5-6 iterations, with `end_round` pulling 10% back toward tau0 every round. tau has
+neither the per-iteration step nor the iteration count to move away from uniform. If that
+holds up, the lever is `aco-q-deposit` / `aco-rho` / the iteration budget, not the
+fitness weights -- a different fix from the one this entry originally anticipated.
+⚠️ Measured at K=2 on synthetic pixels with a reduced colony budget, so it is a lead, not
+a finding. The real-data run at K>=10 with the full budget is what settles it.
+
 Whether this matters in practice is an open empirical question, not a known bug: on real
 training deltas (which do have a consensus direction) F was positive in every round
 measured. A baseline-centred deposit `max(F - F_fedavg, 0)` would make the mechanism
@@ -609,3 +622,45 @@ both `Training/` and `Testing/` paths); the fixtures now match.
 `aco-fitness-mode="server_val"` -- declared and supported since the Phase 4 close-out --
 raised "requires model, val_loader, and device" on use. Introduced in `0bb64b7` by making
 the mode selectable without extending the gate. It is now built unconditionally.
+
+## Phase 4/6 -- the strategy's own diagnostics were never written to the result file
+
+Found 2026-09-17 while building `scripts/check_fedaco_health.py`, fixed the same day.
+
+`rounds_log` is built entirely by `build_evaluate_fn`, which only ever sees *evaluation*
+metrics. Everything `aggregate_train` returns went to Flower's console output and nowhere
+else: FedACO's `pheromone_entropy`, `best_fitness`, `fedavg_fitness`, `fallback_used`,
+`alpha`, `alpha_entropy`, `delta_mean_sq_norm`, and the equivalents for every baseline.
+
+The irony is sharp: the Phase 4 close-out added `delta_mean_sq_norm` *specifically* so a
+run could be checked for the degenerate regime, and the field was not persisted anywhere
+a checker could read. `paper/ALGORITHM.md` lists these as the algorithm's outputs, so the
+result schema was missing the method's entire observable behaviour. Phase 6's analysis
+would have been able to report accuracy and nothing about *why*, and the two residuals
+recorded above (deposit floor, fallback blindness) would have been unanswerable from the
+artifacts.
+
+Fixed by `fl/app.py::merge_train_metrics`, which folds
+`Strategy.start()`'s returned `Result.train_metrics_clientapp` (keyed by round, verified
+against the installed flwr==1.36.0 dataclass) into `rounds_log` under a `train_` prefix,
+respecting the resume `round_offset`.
+
+**Anything Phase 6 wants to analyse must come through this path.** A strategy that
+returns a metric from `aggregate_train` now gets it persisted automatically; one that
+stashes state on `self` and never returns it still will not.
+
+## Phase 6 -- how to actually size client CPUs
+
+Follow-up to the entry above about 2 CPUs per ClientApp. The supported, non-deprecated
+lever is:
+
+    flwr federation simulation-config --client-resources-num-cpus 1
+
+It writes to `~/.flwr/config.toml` and persists per machine, so it is a one-time setup
+step rather than a per-run flag. The `[tool.flwr.federations]` `options.backend.
+client-resources.*` form still parses but `flwr run` prints a deprecation warning and
+points at this command (and at `--federation-config`) instead.
+
+Unverified: whether pinning to 1 CPU is *sufficient* for K=20 on a 4-core box, or merely
+necessary. The failure mode is a silent stall, so this wants an explicit check at the
+target K before the sweep is launched, not an assumption.

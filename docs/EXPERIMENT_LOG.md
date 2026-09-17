@@ -690,3 +690,61 @@ and the harness blocks until each run finishes instead of racing it.
 (real Phase-1 manifest, fabricated images) because the raw JPEGs need Kaggle credentials
 this environment does not have. Only the mechanism is verified. The real search is
 GPU-hours in the author's training environment and has not been run.
+
+---
+
+## 2026-09-17 — the FedACO health check, and a gap it exposed before it could run
+
+Built `scripts/check_fedaco_health.py` to answer the three questions that decide whether
+Phase 6 is worth building as designed: is the colony searching, has the deposit floor
+engaged, and does FedACO beat FedAvg without the fallback carrying it.
+
+### The strategy's diagnostics were never persisted
+
+Writing the checker immediately exposed that it had nothing to read. `rounds_log` is
+built entirely by `build_evaluate_fn`, which only sees evaluation metrics, so everything
+`aggregate_train` returned -- `pheromone_entropy`, `best_fitness`, `fallback_used`,
+`delta_mean_sq_norm`, `alpha` -- went to Flower's console and nowhere else.
+
+The Phase 4 close-out had added `delta_mean_sq_norm` *specifically* so a run could be
+checked for the degenerate regime, and it was not in the result file. `ALGORITHM.md`
+lists these as the algorithm's outputs. Phase 6's analysis would have had accuracy and no
+way to say anything about the method's behaviour. Fixed by `merge_train_metrics`, folding
+`Strategy.start()`'s `Result.train_metrics_clientapp` into the round log under a `train_`
+prefix, respecting the resume offset. Verified on a live run: 14 `train_*` fields now
+persist per round.
+
+### First measured verdict (synthetic pixels — a lead, not a finding)
+
+4 rounds, K=2, dirichlet α=0.3, reduced colony budget:
+
+| check | verdict |
+|---|---|
+| Is the colony searching? | **INERT** — tau 0.92% below uniform (2.3758 vs ceiling 2.3979) |
+| Has the deposit floor engaged? | **CLEAR** — best_fitness 0.78–0.92, every round deposited |
+| Beats FedAvg? | no baseline run yet; fallback fired in 0% of rounds |
+
+**That combination is informative.** tau is flat *despite* positive fitness and a deposit
+every round, which rules out the `max(F, 0)` floor — the cause the open residual in
+docs/OPEN_QUESTIONS.md anticipated — and points at deposit *magnitude* instead:
+`rho * Q * F ≈ 0.08` onto one of 11 levels, against `tau0 = 1.0`, over 5–6 iterations,
+with `end_round` pulling 10% back toward tau0 each round. If it holds, the lever is
+`aco-q-deposit` / `aco-rho` / the iteration budget, not the fitness weights.
+
+Caveats that matter: K=2, synthetic pixels, and a deliberately reduced budget
+(20 ants / 6 iterations vs the 30/10 default). All three push toward a flat tau on their
+own. This is a lead for the real run to settle, not a result.
+
+### Measured timing, for the compute table
+
+48.1 s per round at K=2 / 1 local epoch on CPU (192 s over 4 rounds) → **1.34 hours for a
+100-round run at that shape**. Not yet the K=20 GPU number the compute-budget table needs,
+but the first real measurement of any kind against a table that says in bold "these are
+estimates, not measurements" and "do not cite these numbers until measured".
+
+### How to run the real thing
+
+`make validate-fedaco K=4` (or the last three cells of `notebooks/colab_fl_smoke.ipynb`),
+then `make health`. Client resources have to be pinned first — the target does it —
+because the Simulation Runtime assigns 2 CPUs per ClientApp by default and oversubscribing
+stalls silently rather than queueing.
