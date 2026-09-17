@@ -230,3 +230,56 @@ interpreter → the installed app). Standard Unix env-var inheritance says it sh
 interpreters), but this machine cannot run the simulation extra to check, and this is
 exactly the kind of assumption that already broke once already this session (the
 per-run install itself). The next real `flwr run .` on Colab is the actual test.
+
+## Phase 3 -- `flwr run .` fails on Colab with "No heartbeat received from the task"
+
+**2026-09-17, after the torch-pin and FEDSWARM_REPO_ROOT fixes above, both confirmed
+working on their own terms** (dependency install succeeds; the isolated app copy is a
+known, understood quantity) -- every real Colab attempt still ends the same way:
+`flwr ls --format json` reports `"status": "finished:failed"`, `"status-details": "No
+heartbeat received from the task"`. No Python traceback anywhere (not in `--stream`,
+not in `flwr log <run_id> --show`), and no Ray session artifacts exist anywhere on
+disk (`find` for `ray_*`/`session_*` under any path came back empty) -- meaning Ray
+itself may never be reaching a normal running state, not crashing after starting.
+
+Ruled out, in order, each with real evidence, not guesses:
+- Shared memory: `/dev/shm` had 5.7G free before any change -- not the constraint.
+- flwr CLI version: identical failure at both 1.36.0 (pyproject.toml's declared
+  target) and 1.37.0 (latest) -- not a version mismatch (upgrading to 1.37.0 briefly
+  produced a hang instead of a clean failure, but reverting to 1.36.0 reproduced the
+  exact same "No heartbeat" failure, so the mismatch wasn't the underlying cause,
+  just a confound on top of it).
+- Our own dependency pins and path resolution: both fixed and independently
+  verified (`flwr build` succeeds; `_repo_path` unit-tested).
+
+**What actually explains it, found via the real GitHub issue tracker (`flwrlabs/
+flower`, not `adap/flower` -- the org renamed at some point), not a search-engine
+summary**: [PR #7391 "Add dedicated task heartbeat RPCs"](https://github.com/flwrlabs/flower/pull/7391)
+is still **open, unmerged**, against a task/runtime system that was very recently and
+heavily refactored (`ServerAppIo`/`ClientAppIo` merged into a new Runtime API,
+gRPC→HTTP switch landing in 1.37.0 itself -- see that version's changelog). A related
+deadlock fix ([#7895](https://github.com/flwrlabs/flower/pull/7895)) already shipped;
+this specific heartbeat gap has not. This is circumstantial, not a confirmed root
+cause -- there is no GitHub issue with this exact error string to point to directly --
+but it is real, verifiable evidence (an open PR, on the right subsystem, in a
+framework whose task lifecycle is in active flux) that this class of failure is a
+known, current, unresolved area of Flower's own infrastructure, not something in this
+repository.
+
+**Correction to an earlier claim in this debugging session**: a web search initially
+suggested a "unified heartbeat mechanism" had *already* been fixed in a recent release
+and specific PR numbers were cited. Checked directly against the real changelogs
+(`framework/docs/source/changelog/v1.36.0.md`, `v1.37.0.md`, fetched from the repo,
+not summarized) -- neither mentions any such fix, and the cited PR numbers don't even
+fall in this repo's real range. That claim did not hold up and should not be repeated.
+
+**Status: blocked on upstream Flower, not on anything in this repo.** Options, not
+yet decided: (a) retry once a Flower release ships past this point (re-check
+`flwrlabs/flower`'s changelog for a heartbeat-related fix before trying again --
+don't just bump to "latest" blindly, verify against the real changelog file first,
+the way this entry itself was written); (b) try Kaggle instead of Colab, a different
+container environment that might not hit whatever specifically triggers this on
+Colab (blocked itself, separately, on missing phone verification -- see the Kaggle
+dataset access entry above); (c) proceed with Phase 4 (`aco/` -- pure tensor math, no
+Flower dependency, fully buildable and testable on this Mac) while this sits open,
+since it doesn't block that work at all.
