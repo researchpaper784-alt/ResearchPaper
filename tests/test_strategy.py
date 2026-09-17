@@ -257,3 +257,29 @@ def test_server_val_fitness_mode_requires_its_dependencies() -> None:
         FedACO(min_train_nodes=2, aco_config=FedACOConfig(fitness_mode="server_val"))
     with pytest.raises(ValueError, match="client_probe"):
         FedACO(min_train_nodes=2, aco_config=FedACOConfig(fitness_mode="client_probe"))
+
+
+def test_resumed_colony_uses_the_true_round_not_the_restarted_one() -> None:
+    """`Strategy.start()` renumbers its rounds from 1 on every invocation -- the same
+    reason build_evaluate_fn needs a round_offset. Without the offset, a run resumed after
+    round 50 re-seeds the colony with round 1's exploration draws and restarts the ant
+    budget decay from its start-of-run value, so a resumed cell is not the same experiment
+    as an uninterrupted one."""
+    global_state = _state()
+    replies = [
+        _make_reply(i, _add(global_state, _state(seed=200 + i)), num_examples=float(40 + i))
+        for i in range(3)
+    ]
+
+    def alpha_for(server_round: int, offset: int) -> list[float]:
+        strategy = _new_strategy(num_rounds=10, seed=3, colony=ColonyConfig(q0=0.5))
+        strategy.round_offset = offset
+        strategy._current_arrays = ArrayRecord(global_state)
+        _, metrics = strategy.aggregate_train(server_round, list(replies))
+        assert metrics is not None
+        return list(metrics["alpha"])
+
+    # Round 4 reached directly, and round 4 reached as round 1 of a run resumed after 3.
+    assert alpha_for(4, 0) == alpha_for(1, 3)
+    # And the offset genuinely changes the draw, rather than being ignored.
+    assert alpha_for(1, 0) != alpha_for(1, 3)

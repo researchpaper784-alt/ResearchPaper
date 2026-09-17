@@ -131,9 +131,23 @@ def expand(spec: dict) -> list[Cell]:
 
 
 def format_run_config(config: dict) -> str:
+    """Render a run config as the TOML fragment `--run-config` expects.
+
+    Booleans must be lowercase: flwr parses the assembled string with tomli, and Python's
+    `str(False)` is `"False"`, which is not valid TOML. The whole config string is then
+    rejected with a bare "[code: 15]" naming nothing -- so a single boolean override kills
+    every cell that carries it. `ablation_all.yaml`'s `no_safety_fallback` variant (the one
+    that separates "the colony helped" from "the fallback protected it") is exactly such a
+    cell.
+    """
     parts = []
     for key, value in sorted(config.items()):
-        parts.append(f"{key}='{value}'" if isinstance(value, str) else f"{key}={value}")
+        if isinstance(value, bool):
+            parts.append(f"{key}={str(value).lower()}")
+        elif isinstance(value, str):
+            parts.append(f"{key}='{value}'")
+        else:
+            parts.append(f"{key}={value}")
     return " ".join(parts)
 
 
@@ -184,7 +198,9 @@ def append_manifest(path: Path, record: dict) -> None:
         handle.write(json.dumps(record) + "\n")
 
 
-def find_result(output_dir: Path, cell: Cell, common: dict) -> Path | None:
+def find_result(
+    output_dir: Path, cell: Cell, common: dict, spec_variants: list[dict] | None = None
+) -> Path | None:
     """The result file for this cell, matched on the resolved run_config the file itself
     records rather than on a filename convention.
 
@@ -194,17 +210,75 @@ def find_result(output_dir: Path, cell: Cell, common: dict) -> Path | None:
     wanted = cell.run_config(common)
     ignored = {"output-dir", "checkpoint-dir", "cache-dir", "manifest-path"}
     wanted = {k: v for k, v in wanted.items() if k not in ignored}
-    for path in sorted(output_dir.glob("*.json")):
-        try:
-            result = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
+
+    # Matching on `wanted` alone is not enough for a variant that sets no keys -- the
+    # `default` control in ablation_all.yaml and `clean` in robustness.yaml both do. Their
+    # `wanted` contains no variant key at all, so it would match *any* sibling variant's
+    # result in the shared output dir: the control marked complete, never run, and every
+    # ablation delta differenced against another ablation.
+    #
+    # The discriminator has to be by VALUE, not by key presence. Every variant key is
+    # declared in pyproject (it has to be, or `flwr run` rejects it), so it appears in
+    # every resolved run_config with its default -- rejecting candidates that merely
+    # *carry* the key rejects the control's own result too. Asked for `clean` and handed
+    # its own file, an earlier version of this check said "no result file" and re-ran the
+    # cell forever.
+    foreign_pairs = _foreign_variant_values(spec_variants, cell.variant, wanted)
+
+    for path, result in _load_output_dir(output_dir):
         if result.get("status") != "completed":
             continue
         run_config = result.get("config", {}).get("run_config", {})
-        if all(_same(run_config.get(k), v) for k, v in wanted.items()):
-            return path
+        if not all(_same(run_config.get(k), v) for k, v in wanted.items()):
+            continue
+        if any(_same(run_config.get(k), v) for k, v in foreign_pairs):
+            continue
+        return path
     return None
+
+
+def _foreign_variant_values(
+    variants: list[dict] | None, own_variant: str, wanted: dict
+) -> list[tuple[str, object]]:
+    """(key, value) pairs that identify some *other* variant of this sweep.
+
+    A candidate result carrying any of them belongs to that other variant, not to this
+    cell. Keys this cell sets itself are excluded -- `wanted` already pins those.
+    """
+    pairs = []
+    for variant in variants or []:
+        if str(variant.get("name", DEFAULT_VARIANT)) == own_variant:
+            continue
+        for key, value in variant.items():
+            if key != "name" and key not in wanted:
+                pairs.append((key, value))
+    return pairs
+
+
+_OUTPUT_CACHE: dict[tuple[str, int], list[tuple[Path, dict]]] = {}
+
+
+def _load_output_dir(output_dir: Path) -> list[tuple[Path, dict]]:
+    """Parse every result file in the directory once, not once per cell.
+
+    `find_result` is called for all 360 cells at resume and again after each completed
+    run; re-globbing and re-parsing the whole directory each time is O(cells x files),
+    roughly 130,000 file reads before a resumed main sweep starts. Keyed by file count so
+    the cache invalidates as soon as a new result lands.
+    """
+    paths = sorted(output_dir.glob("*.json"))
+    key = (str(output_dir), len(paths))
+    if key in _OUTPUT_CACHE:
+        return _OUTPUT_CACHE[key]
+    loaded = []
+    for path in paths:
+        try:
+            loaded.append((path, json.loads(path.read_text())))
+        except (json.JSONDecodeError, OSError):
+            continue
+    _OUTPUT_CACHE.clear()
+    _OUTPUT_CACHE[key] = loaded
+    return loaded
 
 
 def _same(left, right) -> bool:
@@ -221,24 +295,53 @@ def _same(left, right) -> bool:
 # ======================================================================================
 
 
+def configure_federation(num_clients: int, cpus_per_client: int = 1) -> tuple[bool, str]:
+    """Set the Simulation Runtime's supernode count and per-client CPUs for this sweep.
+
+    **This is not optional setup, it is a correctness requirement.** `num-clients` is this
+    project's own run-config key -- it tells `partition_spec_from_run_config` how many ways
+    to split the data. It has nothing to do with how many ClientApps the Flower Simulation
+    Runtime actually creates, which is `num_supernodes` and defaults to **2**
+    (flwr/supercore/constant.py). Nothing in this repository ever set it.
+
+    Left unset, `make main` would run 360 cells that record `num-clients: 20` while only
+    partition ids 0 and 1 ever receive a ClientApp: 18/20 of the data never trained on,
+    every result file mislabelled. In `robustness.yaml` it compounds --
+    `malicious_ids(20, 0.1) == {0, 1}`, so a cell labelled "10% malicious" would have had
+    *the entire participating federation* compromised.
+
+    It also explains a stall this project previously misdiagnosed: a K=4 run that sat at
+    round 0 with idle actors and no error was recorded as CPU oversubscription. It was not.
+    Only 2 supernodes existed while `min-train-nodes=4` waited for 4 that were never
+    created. With `--num-supernodes 4` the same run completes fine on the same 4-core box
+    (verified 2026-09-17).
+    """
+    cmd = [
+        "flwr", "federation", "simulation-config",
+        "--num-supernodes", str(num_clients),
+        "--client-resources-num-cpus", str(cpus_per_client),
+    ]
+    completed = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
+    if completed.returncode != 0:
+        return False, (completed.stderr or completed.stdout or "").strip()[:400]
+    return True, f"{num_clients} supernodes, {cpus_per_client} CPU each"
+
+
 def preflight(num_clients: int, skip: bool) -> list[str]:
-    """Problems worth refusing to start 330 runs over. Returns a list of warnings; an
+    """Problems worth refusing to start 360 runs over. Returns a list of warnings; an
     empty list means clear."""
     warnings = []
     if shutil.which("flwr") is None:
         warnings.append("`flwr` is not on PATH -- activate the venv (.venv/bin) first.")
 
     cores = os.cpu_count() or 1
-    # 2 CPUs/ClientApp is the Simulation Runtime default; see the module docstring.
-    needed = 2 * num_clients
-    if needed > cores:
+    if num_clients > cores:
+        # Not a correctness problem -- `configure_federation` pins 1 CPU per ClientApp and
+        # Ray queues the excess -- but it does mean the cells run more serially than the
+        # cost projection assumes, so the ETA will be optimistic.
         warnings.append(
-            f"{num_clients} clients request {needed} CPUs at the default 2/ClientApp, but "
-            f"this machine has {cores}. Oversubscription stalls silently at round 0 rather "
-            f"than queueing. Run:\n"
-            f"      flwr federation simulation-config --client-resources-num-cpus 1\n"
-            f"    and confirm a short run at this K actually completes before committing "
-            f"the sweep."
+            f"NOTE (not fatal): {num_clients} clients on {cores} cores, so ClientApps will "
+            f"queue rather than run concurrently and the projected time above is optimistic."
         )
     if skip:
         return []
@@ -310,6 +413,10 @@ def main() -> int:
     parser.add_argument("--stream", action="store_true", help="echo each run's output live")
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument(
+        "--cpus-per-client", type=int, default=1,
+        help="CPUs per ClientApp; the Simulation Runtime's own default is 2",
+    )
+    parser.add_argument(
         "--seconds-per-round",
         type=float,
         default=MEASURED_SECONDS_PER_ROUND,
@@ -368,7 +475,7 @@ def main() -> int:
     todo = []
     backfilled = 0
     for cell in cells:
-        existing = find_result(output_dir, cell, common)
+        existing = find_result(output_dir, cell, common, spec.get('variants'))
         if existing is None:
             todo.append(cell)
             continue
@@ -401,9 +508,19 @@ def main() -> int:
             print(f"    ... and {len(todo) - 20} more")
         return 0
 
-    if warnings:
-        print("\nRefusing to start with the warnings above. Fix them, or pass --skip-preflight.")
+    fatal = [w for w in warnings if not w.startswith("NOTE")]
+    if fatal:
+        print("\nRefusing to start with the problems above. Fix them, or pass --skip-preflight.")
         return 1
+
+    # Correctness, not convenience: without this the Simulation Runtime creates 2
+    # ClientApps regardless of `num-clients`, and every result file is mislabelled.
+    ok, detail = configure_federation(num_clients, args.cpus_per_client)
+    if not ok:
+        print(f"\nCould not configure the federation ({detail}).")
+        print("Every cell would silently run 2 clients regardless of num-clients. Refusing.")
+        return 1
+    print(f"  federation: {detail}")
 
     failures = []
     started = time.time()
@@ -413,7 +530,7 @@ def main() -> int:
         print(f"\n[{i}/{len(todo)}] {cell.label}" + (f"   (eta {eta / 3600:.1f}h)" if i > 1 else ""))
         try:
             returncode, output = run_cell(cell, common, args.stream)
-            result_path = find_result(output_dir, cell, common)
+            result_path = find_result(output_dir, cell, common, spec.get('variants'))
         except Exception as exc:  # noqa: BLE001 -- one cell must never abort the sweep
             # An unattended 360-cell sweep that dies on cell 1 loses a night. Whatever
             # went wrong here is one cell's problem: record it, carry on, and let the

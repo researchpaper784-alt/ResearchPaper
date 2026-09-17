@@ -436,22 +436,45 @@ _SCAFFOLD_CONTROL_PREFIX = "scaffold_c/"
 _SCAFFOLD_DELTA_PREFIX = "scaffold_dc/"
 
 
-def _poisoned_loader(loader: DataLoader, num_classes: int) -> DataLoader:
-    """Re-wrap a loader so its labels are cyclically shifted (Phase 8 `label_flip`).
+class _LabelFlipDataset(torch.utils.data.Dataset):
+    """Wraps a dataset so its labels are cyclically shifted on read (Phase 8 `label_flip`).
 
-    Materializes the tensors rather than wrapping lazily: the underlying dataset reads
-    from a memory-mapped cache shared with every other client, so mutating it in place
-    would poison honest clients too -- a bug that would look like a devastatingly
-    effective attack.
+    Wrapping lazily rather than materializing one pass matters twice over.
+
+    It must not mutate the source: the underlying dataset reads from a memory-mapped cache
+    shared with every other client, so poisoning in place would poison the honest clients
+    too -- a bug that would look like a devastatingly effective attack.
+
+    And it must not freeze the augmentation. The train loader applies RandomResizedCrop,
+    RandomHorizontalFlip, RandomRotation and ColorJitter, resampled on every `__getitem__`.
+    Draining the loader once into a TensorDataset would give a poisoned client the same
+    augmented images every epoch while honest clients get fresh draws, so with
+    `local-epochs > 1` the measured effect of label-flipping would be confounded with a
+    reduced-augmentation effect that has nothing to do with poisoning.
     """
-    images, labels = [], []
-    for batch_images, batch_labels in loader:
-        images.append(batch_images)
-        labels.append(poison_labels(batch_labels, num_classes))
-    if not images:
-        return loader
-    dataset = torch.utils.data.TensorDataset(torch.cat(images), torch.cat(labels))
-    return DataLoader(dataset, batch_size=loader.batch_size or 32, shuffle=True, num_workers=0)
+
+    def __init__(self, base, num_classes: int) -> None:
+        self.base = base
+        self.num_classes = num_classes
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getitem__(self, index):
+        image, label = self.base[index]
+        return image, int(poison_labels(torch.as_tensor(label), self.num_classes))
+
+
+def _poisoned_loader(loader: DataLoader, num_classes: int) -> DataLoader:
+    """A loader over the same data with cyclically shifted labels, preserving the source
+    loader's batching and worker settings."""
+    return DataLoader(
+        _LabelFlipDataset(loader.dataset, num_classes),
+        batch_size=loader.batch_size or 32,
+        shuffle=True,
+        num_workers=getattr(loader, "num_workers", 0),
+        drop_last=getattr(loader, "drop_last", False),
+    )
 
 
 @client_app.train()
@@ -753,6 +776,11 @@ def main(grid: Grid, context: Context) -> None:
     # strategies that don't need it ignore it.
     val_loader = global_val_loader(run_config)
     strategy = strategy_from_run_config(run_config, model=model, val_loader=val_loader, device=device)
+    # FedACO seeds its colony and decays its ant budget from the true round number;
+    # Strategy.start() renumbers from 1 on a resume, so it needs the same offset
+    # build_evaluate_fn gets.
+    if hasattr(strategy, "round_offset"):
+        strategy.round_offset = round_offset
     train_config = ConfigRecord(
         {
             "local-epochs": int(run_config.get("local-epochs", 2)),

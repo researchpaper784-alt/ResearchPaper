@@ -115,6 +115,18 @@ def _despine(ax) -> None:
         ax.spines[side].set_visible(False)
 
 
+def _rounds(curve: list[float]) -> range:
+    """x positions for a round curve: 1-based, matching the round numbers everywhere else.
+
+    `build_evaluate_fn` logs `"round": server_round + round_offset` and flwr numbers
+    server_round from 1, so a 100-round run logs rounds 1..100. Plotting against
+    `range(len(curve))` put the first logged round at x=0, so every figure's round axis
+    was off by one against the round numbers in the result JSONs and in
+    `paper/tables/*.csv`, and a 100-round run's last point read as round 99.
+    """
+    return range(1, len(curve) + 1)
+
+
 def _integer_rounds(ax) -> None:
     """Round numbers are integers, so the round axis must tick as integers.
 
@@ -178,7 +190,7 @@ def figure_convergence(results: list[dict], out: Path) -> Path | None:
             if cell_regime != regime or strategy in HIGHLIGHT:
                 continue
             mean_curve = _mean_curve(curves)
-            ax.plot(range(len(mean_curve)), mean_curve, color=FIELD, linewidth=1.0, zorder=1)
+            ax.plot(_rounds(mean_curve), mean_curve, color=FIELD, linewidth=1.0, zorder=1)
 
         endpoints = []
         for strategy, color in HIGHLIGHT.items():
@@ -187,14 +199,14 @@ def figure_convergence(results: list[dict], out: Path) -> Path | None:
                 continue
             mean_curve = _mean_curve(curves)
             ax.plot(
-                range(len(mean_curve)),
+                _rounds(mean_curve),
                 mean_curve,
                 color=color,
                 linewidth=2.0,
                 zorder=3,
                 label=strategy,
             )
-            endpoints.append((len(mean_curve) - 1, mean_curve[-1], color))
+            endpoints.append((len(mean_curve), mean_curve[-1], color))
 
         # Direct-label the endpoint only -- a value on every point is unreadable and goes
         # unread; the axis and the table view carry the rest. FedACO and FedAvg converge
@@ -449,7 +461,7 @@ def figure_colony_health(results: list[dict], out: Path, num_levels: int) -> Pat
         _integer_rounds(ax)
 
         mean_curve = _mean_curve(series[regime])
-        ax.plot(range(len(mean_curve)), mean_curve, color=SERIES_1, linewidth=2.0, zorder=3)
+        ax.plot(_rounds(mean_curve), mean_curve, color=SERIES_1, linewidth=2.0, zorder=3)
         # Dashed *here only*: this is a genuine threshold, not chrome.
         ax.axhline(ceiling, color=DIVERGING_WORSE, linewidth=1.2, linestyle="--", zorder=2)
 

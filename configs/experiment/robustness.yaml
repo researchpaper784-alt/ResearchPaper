@@ -53,14 +53,22 @@ variants:
   # tolerance of most robust rules, so it is where they are expected to break -- included
   # deliberately, because a robustness sweep that only tests where defences hold measures
   # nothing.
+  # `num-malicious-nodes` is Krum's own f -- how many Byzantine clients it assumes. It
+  # defaults to 0, and Krum's guarantee simply does not hold at f=0 when adversaries are
+  # present: it scores each candidate against all n-2 neighbours instead of n-f-2. Left
+  # unset, "Krum broke at 30%" would be a statement about a misconfigured Krum. Set to
+  # match each variant's real attacker count at K=20 (ceil(f*K)). It is ignored by every
+  # other strategy.
   - name: sign_flip_10
     attack: sign_flip
     attack-fraction: 0.1
     attack-scale: 2.0
+    num-malicious-nodes: 2
   - name: sign_flip_30
     attack: sign_flip
     attack-fraction: 0.3
     attack-scale: 2.0
+    num-malicious-nodes: 6
 
   # Magnitude-only. Alignment-based detection cannot see this one at all -- the direction
   # is correct, only the size is wrong -- so it separates FedACO's two heuristic terms.
@@ -68,15 +76,18 @@ variants:
     attack: scaled
     attack-fraction: 0.1
     attack-scale: 10.0
+    num-malicious-nodes: 2
   - name: scaled_30
     attack: scaled
     attack-fraction: 0.3
     attack-scale: 10.0
+    num-malicious-nodes: 6
 
   - name: gaussian_20
     attack: gaussian
     attack-fraction: 0.2
     attack-scale: 3.0
+    num-malicious-nodes: 4
 
   # --- data poisoning ------------------------------------------------------------
   # The well-formed-update case. Expect robust aggregation to help much less here; if it
@@ -84,6 +95,7 @@ variants:
   - name: label_flip_20
     attack: label_flip
     attack-fraction: 0.2
+    num-malicious-nodes: 4
 
   # --- partial participation -----------------------------------------------------
   # Not an attack: clients dropping out is ordinary FL, and `fraction-train` already

@@ -108,6 +108,13 @@ class FedACO(FedAvg):
         self._current_arrays: ArrayRecord | None = None
         self.fallback_count = 0
         self.round_count = 0
+        # Set by fl/app.py when resuming. `Strategy.start()` renumbers its rounds from 1
+        # on every invocation -- the same reason `build_evaluate_fn` needs an offset -- so
+        # a run resumed after round 50 would otherwise re-seed the colony with round 1's
+        # draws and restart the ant/iteration decay from its start-of-run budget. A
+        # resumed cell would not be the same experiment as an uninterrupted one, which
+        # breaks the determinism contract in CLAUDE.md.
+        self.round_offset = 0
 
     def configure_train(
         self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid
@@ -159,7 +166,10 @@ class FedACO(FedAvg):
 
         tau0 = self.pheromone.begin_round(client_ids)
         num_ants, num_iterations = colony_budget(
-            self.round_count,
+            # True round, not a process-local counter: on a resumed run `round_count`
+            # restarts at 0 while `num_rounds` is still the total, so the budget decay
+            # would replay from the start-of-run ant count.
+            self.round_count + int(self.round_offset),
             self.aco_config.num_rounds,
             self.aco_config.ants_start,
             self.aco_config.ants_end,
@@ -179,8 +189,9 @@ class FedACO(FedAvg):
         # checkpoints every round) reproduces the same colony trajectory it would have
         # taken uninterrupted -- `server_round` is authoritative for that, not a
         # process-local counter.
+        true_round = int(server_round) + int(self.round_offset)
         generator = torch.Generator().manual_seed(
-            (int(self.aco_config.seed) & 0xFFFF_FFFF) * 1_000_003 + int(server_round)
+            (int(self.aco_config.seed) & 0xFFFF_FFFF) * 1_000_003 + true_round
         )
 
         colony_result = run_colony(
@@ -214,8 +225,16 @@ class FedACO(FedAvg):
         arrays_out = ArrayRecord(new_state)
 
         aco_time_ms = (time.perf_counter() - t_start) * 1000.0
+        # Flower stores exactly what aggregate_train returns as the round's client
+        # metrics, so a hand-built record silently drops everything the clients reported:
+        # `is_malicious` (Phase 8 -- for the strategy under test in the robustness
+        # sweep), `update_norm`, `train_loss_before/after`, `num-examples`. Every baseline
+        # carries those and FedACO would not, which is exactly backwards. Folded in first
+        # so the ACO-specific keys below still win on any name collision.
+        aggregated = _weighted_client_metrics(client_metrics, num_examples)
         metrics_out = MetricRecord(
             {
+                **aggregated,
                 "alpha_entropy": _entropy(alpha_final),
                 "alpha_max": float(alpha_final.max()),
                 # MetricRecord's real value type is int | float | list[int] | list[float]
@@ -247,6 +266,30 @@ class FedACO(FedAvg):
             }
         )
         return arrays_out, metrics_out
+
+
+def _weighted_client_metrics(
+    client_metrics: list, num_examples: torch.Tensor
+) -> dict[str, float]:
+    """Data-size-weighted mean of every scalar the clients reported.
+
+    Matches how Flower's own FedAvg aggregates client metrics, so FedACO's rows carry the
+    same fields as every baseline's and a result file can be read the same way regardless
+    of strategy.
+    """
+    total = float(num_examples.sum()) or 1.0
+    weights = [float(n) / total for n in num_examples]
+    out: dict[str, float] = {}
+    keys = {k for record in client_metrics for k in dict(record)}
+    for key in sorted(keys):
+        values = []
+        for weight, record in zip(weights, client_metrics):
+            value = dict(record).get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values.append(weight * float(value))
+        if len(values) == len(client_metrics):
+            out[key] = sum(values)
+    return out
 
 
 def _entropy(alpha: torch.Tensor, eps: float = 1e-12) -> float:

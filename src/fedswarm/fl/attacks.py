@@ -99,6 +99,14 @@ def poison_update(
     out: "OrderedDict[str, torch.Tensor]" = OrderedDict()
     for key, local in local_state.items():
         base = global_state.get(key)
+        if base is not None and base.device != local.device:
+            # `full_state` comes off the wire via ArrayRecord and is always CPU, while
+            # `model.state_dict()` is CUDA after `local_train` calls `model.to(device)`.
+            # Subtracting them raises "Expected all tensors to be on the same device", so
+            # every update-poisoning attack crashed on GPU while the non-attack path
+            # worked -- and Colab/Kaggle GPU is this project's stated training
+            # environment, so 5 of the 9 robustness variants would have failed there.
+            base = base.to(local.device)
         if base is None or not torch.is_floating_point(local):
             # SCAFFOLD control variates and any integer buffer pass through untouched:
             # corrupting them would be a different attack (on the protocol rather than on
@@ -119,7 +127,12 @@ def poison_update(
             # Direction and magnitude both meaningless, matched to this tensor's own scale
             # so it is not trivially detectable as an outlier by norm alone.
             std = float(delta.std()) if delta.numel() > 1 else 1.0
-            noise = torch.randn(delta.shape, generator=generator, dtype=delta.dtype)
+            # Generated on CPU then moved: a CPU torch.Generator cannot seed a CUDA
+            # tensor directly, and keeping generation on CPU also keeps the attack
+            # bit-identical whether the run is on GPU or not.
+            noise = torch.randn(delta.shape, generator=generator, dtype=delta.dtype).to(
+                delta.device
+            )
             poisoned = scale * std * noise
         out[key] = base + poisoned
     return out

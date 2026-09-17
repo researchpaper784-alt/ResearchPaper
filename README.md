@@ -12,19 +12,19 @@ with pheromone persisting across communication rounds as a memory of client reli
 Evaluated on 4-class brain tumor MRI classification under realistic non-IID federated
 partitions (label skew, quantity skew, and cross-source feature shift).
 
-Status: **Phases 0–5 built.** Data pipeline, centralized ceiling, Flower FL harness,
-FedACO, the baseline strategies, the per-baseline hyperparameter search
-(`make hparam-search`) and the IID acceptance gate (`make iid-band`) are all implemented
-and tested. The centralized ceiling is measured on real data (SimpleCNN@112: 0.9300
-macro-F1 BatchNorm / 0.9203 GroupNorm; ResNet-18: 0.9701 over 3 seeds — see
+Status: **All nine phases have working infrastructure.** Data pipeline, centralized
+ceiling, Flower FL harness, FedACO, the baselines and their honest hyperparameter search,
+the main sweep, the ablation and robustness sweeps, and the tables and figures. The
+centralized ceiling is measured on real data (SimpleCNN@112: 0.9300 macro-F1 BatchNorm /
+0.9203 GroupNorm; ResNet-18: 0.9701 over 3 seeds — see
 [docs/EXPERIMENT_LOG.md](docs/EXPERIMENT_LOG.md)).
 
-**No federated results exist yet.** The FL harness is verified end-to-end, but the
-hyperparameter search and the IID gate have only been exercised on plumbing; both need a
-real training environment with the dataset to produce numbers. The main sweep (Phase 6),
-ablations (Phase 7), robustness (Phase 8) and analysis (Phase 9) are not built —
-`results/` is empty by design (gitignored), and `make main`/`figures`/`tables` refer to
-scripts that do not exist yet.
+⚠️ **No federated results exist yet.** Every FL run so far has been against a synthetic
+pixel cache, because the raw images need Kaggle credentials the build environment does not
+have — so the pipeline is verified end to end and not one number in it is. `results/` is
+empty by design (gitignored). Run `make validate-fedaco K=4 && make health` before
+committing compute to any sweep: it is about twenty minutes, and it says whether FedACO's
+mechanism is doing anything at all.
 
 ## Setup
 
@@ -66,6 +66,8 @@ what is missing.
 | `paper/tables/ablation.{md,csv}` | `make tables-ablation` | 9 |
 | `convergence.png`, `comparison.png`, `colony_health.png` | `make figures` | 9 |
 | `ablations.png` | `make figures-ablation` | 9 |
+| Robustness sweep (attacks, dropout) | `make robustness` (`make robustness-plan` first) | 8 |
+| `paper/tables/robustness.{md,csv}` | `make tables-robustness` | 8 |
 
 ### Before the sweep
 
@@ -81,10 +83,14 @@ margin over FedAvg. A sweep run before that check can produce 360 cells of numbe
 a mechanism that was never running. It costs about twenty minutes against the sweep's
 several hundred hours.
 
-⚠️ **Set client resources once per machine first.** The Flower Simulation Runtime assigns
-**2 CPUs per ClientApp**, so `K=20` requests 40 cores; oversubscription does not queue, it
-stalls at round 0 with idle actors and no error. `make validate-fedaco` runs this for you:
+⚠️ **The Simulation Runtime creates 2 clients unless told otherwise.** `num-clients` is
+this project's own key — it decides how many ways the *data* is partitioned. How many
+ClientApps actually exist is Flower's `num_supernodes`, which defaults to **2**. Set
+unequal, a run silently trains on 2 partitions while its result file records 20, and a
+`min-train-nodes` above the supernode count simply hangs at round 0 with idle actors and
+no error. `make validate-fedaco` and `scripts/run_sweep.py` both configure this for you;
+to do it by hand:
 
 ```bash
-flwr federation simulation-config --client-resources-num-cpus 1
+flwr federation simulation-config --num-supernodes 20 --client-resources-num-cpus 1
 ```

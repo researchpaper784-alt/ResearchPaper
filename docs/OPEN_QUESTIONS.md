@@ -682,3 +682,34 @@ Use it to confirm an attack fired at all; read `attack-fraction` from the run co
 the client fraction. Not changed, because overriding Flower's aggregation for one key is
 more intrusive than the note is worth -- but any Phase 8 analysis that quotes a malicious
 *client* fraction has to take it from the config.
+
+## Phase 6/8 -- CORRECTION: the K=4 stall was not CPU oversubscription
+
+Recorded above, twice, as a client-resources problem: "the Simulation Runtime assigns 2
+CPUs per ClientApp by default, so K=20 requests 40 cores... oversubscription stalls
+silently at round 0 rather than queueing." **That diagnosis was wrong**, and it was
+propagated into `run_sweep.py`'s preflight, the Makefile, the README and the Colab
+notebook.
+
+The real cause: **`num_supernodes` defaults to 2** (`flwr/supercore/constant.py`) and
+nothing in this repository ever set it. `num-clients` is *this project's* run-config key —
+it tells `partition_spec_from_run_config` how many ways to split the data — and has no
+connection to how many ClientApps the Simulation Runtime creates. The K=4 run asked for
+`min-train-nodes=4` while only 2 supernodes existed, so the server waited forever for
+nodes that were never going to appear. Idle actors, no error, no progress: exactly the
+observed symptom, and nothing to do with CPU count.
+
+Verified 2026-09-17: with `--num-supernodes 4 --client-resources-num-cpus 1`, the same
+K=4 run completes normally on the same 4-core box ("Sampled 4 nodes (out of 4)").
+
+**The consequence had this not been caught** is worse than a stall. A sweep whose
+`min-train-nodes` is low enough not to hang would not hang — it would quietly run 2
+clients while every result file recorded `num-clients: 20`, with 18/20 of the data never
+trained on. In `robustness.yaml` it compounds: `malicious_ids(20, 0.1) == {0, 1}`, so a
+cell labelled "10% malicious" would have had *the entire participating federation*
+compromised.
+
+`scripts/run_sweep.py` now calls `flwr federation simulation-config --num-supernodes
+<num-clients>` itself before the first cell and refuses to start if that fails, rather
+than relying on an operator having run a setup command. More clients than cores is now a
+note that the ETA is optimistic (Ray queues them), not a refusal.

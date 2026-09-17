@@ -89,9 +89,16 @@ def trial_overrides(strategy: str, budget: int) -> list[dict]:
 
 
 def format_run_config(overrides: dict) -> str:
+    """See run_sweep.format_run_config -- booleans must be lowercase or tomli rejects the
+    whole string. Latent here until a boolean enters a grid, but the same bug."""
     parts = []
     for key, value in sorted(overrides.items()):
-        parts.append(f"{key}='{value}'" if isinstance(value, str) else f"{key}={value}")
+        if isinstance(value, bool):
+            parts.append(f"{key}={str(value).lower()}")
+        elif isinstance(value, str):
+            parts.append(f"{key}='{value}'")
+        else:
+            parts.append(f"{key}={value}")
     return " ".join(parts)
 
 
@@ -105,7 +112,9 @@ def load_results(output_dir: Path) -> list[dict]:
     return results
 
 
-def find_existing(results: list[dict], overrides: dict, base: dict | None = None) -> dict | None:
+def find_existing(
+    results: list[dict], overrides: dict, base: dict | None = None, strategy: str | None = None
+) -> dict | None:
     """A previous trial with exactly this configuration, for resume. Matches on the
     resolved run_config the result file records, not on a filename convention.
 
@@ -114,7 +123,15 @@ def find_existing(results: list[dict], overrides: dict, base: dict | None = None
     output directory -- every trial "resumes" instantly and the second seed is silently
     a copy of the first. The same applies to regime and round count.
     """
+    # `strategy` is not optional in practice. Without it, a strategy whose grid is empty
+    # (fedavg, median, fednova all have `overrides == {}`) matches the FIRST completed
+    # result in the shared output dir on every other key -- and `--strategy all` iterates
+    # sorted(GRIDS), so fedaco runs first. FedAvg would be reported with FedACO's score
+    # and never actually run: the reference baseline every claim is relative to becomes a
+    # copy of the method under test.
     wanted = {**(base or {}), **overrides}
+    if strategy is not None:
+        wanted["strategy-name"] = strategy
     # Paths and bookkeeping say nothing about what was computed, and differ harmlessly
     # between environments (a Colab cache lives elsewhere than a local one).
     ignored = {"output-dir", "checkpoint-dir", "cache-dir", "manifest-path"}
@@ -217,14 +234,14 @@ def search(strategy: str, base: dict, output_dir: Path, budget: int, stream: boo
     trials = []
     for i, overrides in enumerate(combos, 1):
         print(f"[{strategy} {i}/{len(combos)}] {overrides or '(no hyperparameters)'}")
-        existing = find_existing(load_results(output_dir), overrides, base)
+        existing = find_existing(load_results(output_dir), overrides, base, strategy)
         if existing is not None:
             print(f"  -> reusing existing result, val_macro_f1={score(existing)}")
             trials.append({"overrides": overrides, "val_macro_f1": score(existing), "reused": True})
             continue
 
         returncode, output = run_trial(strategy, overrides, base, stream)
-        result = find_existing(load_results(output_dir), overrides, base)
+        result = find_existing(load_results(output_dir), overrides, base, strategy)
 
         # Three outcomes, kept distinct. Collapsing them into a bare "None" is how a
         # search reports a clean table having actually produced nothing at all.

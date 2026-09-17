@@ -39,12 +39,12 @@ K ?= 10
 ROUNDS ?= 15
 
 validate-fedaco:
-	# The Simulation Runtime assigns 2 CPUs per ClientApp by default, so K=10 would
-	# request 20 cores -- more than Colab (2) or Kaggle (4) has, and it does not degrade
-	# gracefully: a 4-client run on this 4-core box sat at round 0 indefinitely with every
-	# actor idle, no error (docs/OPEN_QUESTIONS.md). Pin it to 1 first. This writes to
-	# ~/.flwr/config.toml and persists, so it only needs running once per machine.
-	.venv/bin/flwr federation simulation-config --client-resources-num-cpus 1
+	# `num-clients` partitions the DATA; `num_supernodes` is how many ClientApps Flower
+	# actually creates and defaults to 2. Unequal, a run trains on 2 partitions while
+	# recording K, and a min-train-nodes above the supernode count hangs at round 0 with
+	# idle actors and no error -- which this project previously misdiagnosed as CPU
+	# oversubscription (docs/OPEN_QUESTIONS.md). Both are set here.
+	.venv/bin/flwr federation simulation-config --num-supernodes $(K) --client-resources-num-cpus 1
 	FEDSWARM_REPO_ROOT=$(PWD) .venv/bin/flwr run . --stream --run-config \
 	  "strategy-name='fedaco' num-clients=$(K) min-train-nodes=$(K) min-evaluate-nodes=$(K) \
 	   min-available-nodes=$(K) num-rounds=$(ROUNDS) local-epochs=1 regime='dirichlet' alpha=0.3 seed=0"

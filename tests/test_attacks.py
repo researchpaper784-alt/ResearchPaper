@@ -193,3 +193,42 @@ def test_attack_keys_are_declared_in_pyproject() -> None:
 
     for key in ("attack", "attack-fraction", "attack-scale"):
         assert key in declared, f"{key} is not declared in pyproject.toml"
+
+
+def test_label_flip_preserves_per_epoch_augmentation() -> None:
+    """Materializing one augmented pass would give a poisoned client identical images
+    every epoch while honest clients get fresh draws, confounding the label-flip effect
+    with a reduced-augmentation effect that has nothing to do with poisoning."""
+    from fedswarm.fl.app import _poisoned_loader
+
+    class _RandomAugmented(torch.utils.data.Dataset):
+        def __len__(self):
+            return 8
+
+        def __getitem__(self, index):
+            # Stands in for RandomResizedCrop et al: a fresh draw on every read.
+            return torch.rand(3, 4, 4), index % 4
+
+    loader = torch.utils.data.DataLoader(_RandomAugmented(), batch_size=8)
+    poisoned = _poisoned_loader(loader, num_classes=4)
+
+    first = next(iter(poisoned))[0]
+    second = next(iter(poisoned))[0]
+
+    assert not torch.equal(first, second), "augmentation was frozen"
+
+
+def test_label_flip_does_not_mutate_the_shared_source_dataset() -> None:
+    """The source reads from a memory-mapped cache shared with every other client, so
+    poisoning in place would poison the honest clients too."""
+    from fedswarm.fl.app import _poisoned_loader
+
+    images = torch.zeros(4, 3, 2, 2)
+    labels = torch.tensor([0, 1, 2, 3])
+    base = torch.utils.data.TensorDataset(images, labels)
+    loader = torch.utils.data.DataLoader(base, batch_size=4)
+
+    _, poisoned_labels = next(iter(_poisoned_loader(loader, num_classes=4)))
+
+    assert torch.equal(poisoned_labels.sort().values, torch.tensor([0, 1, 2, 3]))
+    assert torch.equal(base.tensors[1], torch.tensor([0, 1, 2, 3])), "source was mutated"

@@ -29,6 +29,7 @@ from run_sweep import (  # noqa: E402
     preflight,
     read_manifest,
 )
+import run_sweep  # noqa: E402,F401
 
 SPEC = {
     "name": "test",
@@ -193,14 +194,17 @@ def test_find_result_ignores_path_only_differences(tmp_path: Path) -> None:
 # ======================================================================================
 
 
-def test_preflight_flags_cpu_oversubscription() -> None:
-    """K=20 requests 40 CPUs at the Simulation Runtime's default 2/ClientApp. That does
-    not queue -- it stalls at round 0 with idle actors and no error, which across a long
-    sweep is indistinguishable from a slow round."""
+def test_preflight_notes_but_does_not_block_on_more_clients_than_cores() -> None:
+    """Superseded diagnosis. A K=4 run that stalled at round 0 was recorded as CPU
+    oversubscription; it was not -- only 2 supernodes existed while `min-train-nodes=4`
+    waited for 4 that were never created. With `--num-supernodes 4` the same run completes
+    on the same 4-core box. More clients than cores is now a note about the ETA being
+    optimistic, not a refusal."""
     warnings = preflight(num_clients=1000, skip=False)
 
-    assert any("stalls silently" in w for w in warnings)
-    assert any("client-resources-num-cpus" in w for w in warnings)
+    notes = [w for w in warnings if "queue rather than run concurrently" in w]
+    assert notes, warnings
+    assert all(w.startswith("NOTE") for w in notes)
 
 
 def test_preflight_can_be_skipped() -> None:
@@ -239,3 +243,70 @@ def test_a_result_with_no_manifest_entry_counts_as_done(tmp_path: Path) -> None:
     # Nothing in the manifest, but the result exists and is completed.
     assert read_manifest(tmp_path / "missing.jsonl") == {}
     assert find_result(tmp_path, cell, common) is not None
+
+
+def test_booleans_render_as_lowercase_toml() -> None:
+    """flwr parses the assembled --run-config string with tomli, where `False` is not a
+    valid value -- the whole string is rejected with a bare "[code: 15]" naming nothing.
+    `ablation_all.yaml`'s no_safety_fallback variant is exactly such a cell, so this bug
+    would have killed all 15 cells of the one ablation that separates "the colony helped"
+    from "the fallback protected it"."""
+    import tomllib
+
+    rendered = format_run_config({"aco-safety-fallback": False, "attack": "sign_flip", "n": 3})
+
+    assert "aco-safety-fallback=false" in rendered
+    # The real check: flwr's own parser must accept it.
+    tomllib.loads("\n".join(part.replace("=", " = ", 1) for part in rendered.split(" ")))
+
+
+def test_a_variantless_control_does_not_match_another_variants_result(tmp_path: Path) -> None:
+    """The `default` control in ablation_all.yaml and `clean` in robustness.yaml set no
+    keys, so matching on their own overrides alone matches ANY sibling variant sharing the
+    output dir. The control would be marked complete, never run, and every ablation delta
+    differenced against another ablation."""
+    common = {"num-clients": 4}
+    variants = [{"name": "default"}, {"name": "p_none", "aco-persistence": "none"}]
+    control = Cell("fedaco", "iid", 0, {}, variant="default")
+    ablated = Cell("fedaco", "iid", 0, {"aco-persistence": "none"}, variant="p_none")
+
+    _write_result(tmp_path / "a.json", ablated.run_config(common))
+
+    assert find_result(tmp_path, ablated, common, variants) is not None
+    assert find_result(tmp_path, control, common, variants) is None
+
+
+def test_configure_federation_is_required_not_optional() -> None:
+    """num-clients is this project's partitioning key; the Simulation Runtime's own
+    supernode count is `num_supernodes` and defaults to 2. Nothing in the repo ever set
+    it, so every sweep cell would have run 2 clients while recording num-clients=20 --
+    and in robustness.yaml a '10% malicious' cell would have had the entire participating
+    federation compromised."""
+    import inspect
+
+
+    source = inspect.getsource(run_sweep.main)
+    assert "configure_federation(" in source
+    assert "Refusing" in source, "a failed federation setup must abort, not warn"
+
+
+def test_a_variantless_control_still_matches_its_own_result(tmp_path: Path) -> None:
+    """The other half of the discrimination, and the one a key-presence check gets wrong.
+
+    Every variant key is declared in pyproject (it must be, or `flwr run` rejects it), so
+    it appears in EVERY resolved run_config carrying its default -- not only in the
+    variant that overrides it. Rejecting candidates that merely carry the key therefore
+    rejects the control's own result: verified on a live sweep, where `clean` was handed
+    its own file, reported "no result file" and would have re-run forever.
+    """
+    common = {"num-clients": 4}
+    variants = [{"name": "clean"}, {"name": "nofb", "aco-safety-fallback": False}]
+    control = Cell("fedaco", "iid", 0, {}, variant="clean")
+    ablated = Cell("fedaco", "iid", 0, {"aco-safety-fallback": False}, variant="nofb")
+
+    # As flwr resolves them: the declared default is present on the control's run too.
+    _write_result(tmp_path / "clean.json", {**control.run_config(common), "aco-safety-fallback": True})
+    _write_result(tmp_path / "nofb.json", ablated.run_config(common))
+
+    assert find_result(tmp_path, control, common, variants).name == "clean.json"
+    assert find_result(tmp_path, ablated, common, variants).name == "nofb.json"

@@ -977,3 +977,81 @@ compromised client held 29% of the data. Recorded in docs/OPEN_QUESTIONS.md. Any
 analysis quoting a malicious client fraction must take it from `attack-fraction`.
 
 `make robustness-plan` / `make robustness` / `make tables-robustness`.
+
+---
+
+## 2026-09-17 — code review of Phases 4–9, and one diagnosis retracted
+
+A deliberate adversarial pass over the whole session's diff, before any sweep spends
+compute. Fourteen findings; twelve fixed, two recorded. Several were severe enough that
+the sweeps would have produced confident, wrong numbers rather than failing.
+
+### The one that would have invalidated everything
+
+**`num_supernodes` defaults to 2 and nothing in this repository ever set it.**
+`num-clients` is *this project's* run-config key — it tells the partitioner how many ways
+to split the data — and has no connection to how many ClientApps the Simulation Runtime
+creates. Left unset, `make main` would have run 360 cells that record `num-clients: 20`
+while only partition ids 0 and 1 ever received a ClientApp: 18/20 of the data never
+trained on, every result file mislabelled. In `robustness.yaml` it compounds —
+`malicious_ids(20, 0.1) == {0, 1}` — so a cell labelled "10% malicious" would have had the
+*entire participating federation* compromised.
+
+**This also retracts an earlier diagnosis in this log and in docs/OPEN_QUESTIONS.md.** The
+K=4 stall recorded as CPU oversubscription was not that. Only 2 supernodes existed while
+`min-train-nodes=4` waited for 4 that were never created. With `--num-supernodes 4` the
+same run completes on the same 4-core box. The wrong cause had been propagated into the
+sweep runner's preflight, the Makefile, the README and the Colab notebook; all corrected.
+`run_sweep.py` now configures the federation itself and refuses to start if that fails.
+
+### Other findings that would have corrupted results silently
+
+- **The hyperparameter search would have reported FedAvg with FedACO's score.**
+  `find_existing` matched on base config and overrides but not on `strategy-name`, and
+  `--strategy all` iterates `sorted(GRIDS)` so fedaco runs first. Every strategy with an
+  empty grid — fedavg, median, fednova — would have "resumed" fedaco's result and never
+  run. The reference baseline every claim is relative to would have been a copy of the
+  method under test.
+- **Booleans rendered as `True`, which is not valid TOML.** `flwr run` parses the
+  assembled `--run-config` with tomli and rejects the whole string, so all 15 cells of the
+  `no_safety_fallback` ablation — the one that separates "the colony helped" from "the
+  fallback protected it" — would have died with a bare `[code: 15]`.
+- **Every robustness variant collapsed to `default` in the tables.** `_variant_of` knew
+  only the FedACO ablation knobs, so 9 variants × 5 seeds per strategy keyed into one
+  per-seed dict and the published table would have averaged a clean control together with
+  a 30%-sign-flip run and reported it as n=5.
+- **A variantless control matched any sibling variant's result**, so the `default`/`clean`
+  cell would have been marked complete, never run, and every ablation delta differenced
+  against another ablation.
+- **Update poisoning crashed on GPU** — CPU `full_state` minus CUDA `model.state_dict()` —
+  so 5 of the 9 robustness variants would have failed in the project's stated training
+  environment while the non-attack path worked.
+- **FedACO dropped every client-reported metric**, because its `aggregate_train` returns a
+  hand-built MetricRecord. For the strategy under test in the robustness sweep there was
+  no way to confirm from the result file that the attack fired.
+- **Krum ran every attacked cell at `f=0`**, the setting under which its Byzantine
+  guarantee does not hold. "Krum broke at 30%" would have been a statement about a
+  misconfigured Krum.
+- **A resumed run re-seeded the colony from round 1** and restarted its ant-budget decay,
+  because `Strategy.start()` renumbers rounds — so a resumed cell was not the same
+  experiment as an uninterrupted one.
+- **`label_flip` froze augmentation** for poisoned clients only, confounding the attack's
+  effect with a reduced-augmentation effect.
+- Figures plotted rounds 0-based against 1-based round numbers everywhere else; the README
+  status text contradicted its own command table; `find_result` re-parsed every result
+  file per cell (~130,000 reads before a resumed 360-cell sweep starts, now cached).
+
+### Fixing one introduced another, caught by running it
+
+The variant discriminator first rejected candidates that merely *carried* another
+variant's key. Every variant key is declared in pyproject — it must be, or `flwr run`
+rejects it — so it appears in every resolved config with its default, and the control was
+handed its own result and reported "no result file". Now discriminates by *value*.
+Verified on a live K=4 sweep: both variants complete, resume recognises both, and the
+table shows them as distinct rows.
+
+### Recorded, not fixed
+
+`format_run_config`, `_same` and `diagnose` are duplicated between `run_sweep.py` and
+`run_hparam_search.py` — which is how the boolean-TOML bug came to exist in two places.
+Both copies are fixed; the duplication itself wants extracting into a shared module.
