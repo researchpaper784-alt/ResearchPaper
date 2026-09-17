@@ -731,6 +731,12 @@ docs/OPEN_QUESTIONS.md anticipated — and points at deposit *magnitude* instead
 with `end_round` pulling 10% back toward tau0 each round. If it holds, the lever is
 `aco-q-deposit` / `aco-rho` / the iteration budget, not the fitness weights.
 
+> **Superseded, 2026-09-17 (later).** The INERT verdict was wrong — not the reasoning
+> above about deposit magnitude, which was right, but the verdict it was attached to. At
+> this run's own budget no colony could have scored above ~3.1%, so the 2% threshold
+> demanded 64% of a theoretical maximum. τ was in fact moving monotonically away from
+> uniform every round. See "the INERT verdict was a statement about the run length" below.
+
 Caveats that matter: K=2, synthetic pixels, and a deliberately reduced budget
 (20 ants / 6 iterations vs the 30/10 default). All three push toward a flat tau on their
 own. This is a lead for the real run to settle, not a result.
@@ -1096,3 +1102,70 @@ result to the wrong sweep would corrupt resume), the analysis scripts `rglob` al
 Behaviour otherwise unchanged: 288 tests pass, and `make_tables.py`,
 `check_fedaco_health.py` and `check_iid_band.py` produce the same output as before the
 change when run against the same result files.
+
+
+## 2026-09-17 — the INERT verdict was a statement about the run length
+
+The health check's question 1 — "is the colony searching?" — compares τ's entropy against
+an absolute threshold: within 2% of the ceiling log(L) and the colony is declared INERT,
+"carrying essentially no signal". It returned INERT on the project's only FedACO run, and
+that verdict was about to send Phase 4 back to rewrite the deposit rule.
+
+**τ starts at the ceiling.** `tau0` sits on every level of every row, so the entropy gap
+is not a property of the colony alone — it is the distance τ has travelled from its own
+initialization, and the travel rate is fixed by `rho`, the deposit magnitude
+`rho * Q * max(F, 0)` and the iteration budget. Comparing a four-round run against an
+absolute threshold measures the run length.
+
+`fedswarm/aco/diagnostics.py` bounds it: drive the real `run_colony` and `Pheromone` with
+`q0=1.0` and a constant fitness, so one level wins at *every* iteration. Nothing
+concentrates τ faster. At the smoke run's own settings (K=2, iters 6→4 over 4 rounds,
+F≈0.87) that ceiling is **3.14%** mean gap — so the 2% threshold required the colony to
+realize **64%** of a best case that has stopped exploring altogether.
+
+What the run actually did, from the same result file the verdict was read from:
+
+| round | τ gap | best case | α | best F | FedAvg F |
+|---:|---:|---:|---|---:|---:|
+| 1 | 0.19% | 0.74% | [0.990, 0.010] | 0.780 | 0.663 |
+| 2 | 0.56% | 2.44% | [0.009, 0.991] | 0.917 | 0.651 |
+| 3 | 1.36% | 4.51% | [0.998, 0.002] | 0.901 | 0.708 |
+| 4 | 1.57% | 4.88% | [0.038, 0.962] | 0.891 | 0.713 |
+
+τ moves away from uniform **every round, monotonically**, reaching 29% of what the budget
+allowed. And the colony beat the FedAvg point on fitness in all four rounds. "Carrying
+essentially no signal" was not what the data said.
+
+### The bound was wrong first, and a real colony beat it
+
+The first version disabled the global-best deposit to keep the derivation clean. That
+made it not a bound: `colony.py` deposits the global best on top of the iteration best
+every `global_best_every=5` iterations, so a real colony at the default setting
+concentrated τ *faster than its own supposed ceiling* — 3.13% against a claimed maximum of
+2.41%. Caught by running real colonies against it before believing it;
+`test_no_real_colony_beats_the_bound` now runs four of them at every commit. The corrected
+bound folds the global-best deposit in and reads `aco-global-best-every` from the run.
+
+### What changed
+
+- `fedswarm/aco/diagnostics.py`: `best_case_gaps` (the bound, driven through the real
+  update) and `closed_form_entropy` (an independent derivation, checked against
+  `run_colony` at seven iteration counts so neither can drift unnoticed).
+- `check_fedaco_health.py` question 1 now judges against the run's own ceiling. INERT
+  means τ covered <15% of the available distance — scale-free, so it means the same thing
+  in round 2 of a smoke test as in round 90 of the sweep. A run where clearing the
+  absolute threshold would take >60% of the best case reports **UNDERPOWERED**: τ is
+  moving, the run is too short to call it, and that is not evidence either way.
+- `scripts/analyze_pheromone_dynamics.py` prints what each budget makes reachable, so the
+  question "can this run answer the question?" is asked before the run, not after.
+
+Making the check budget-aware risks making it unfalsifiable, so the test that matters is
+`test_a_genuinely_dead_colony_is_still_inert_in_a_short_run`: τ pinned at uniform in a
+four-round run is still INERT. The bar moved; it did not disappear.
+
+**The open question is unchanged and still needs the real run.** None of this says the
+colony is searching — only that the one measurement taken could not have shown it either
+way. What it does say is that the reduced smoke budget cannot answer question 1 at all, so
+`make validate-fedaco` should run long enough (or with a larger `aco-iters-start` /
+`aco-q-deposit`) that the threshold is reachable. The projection table says the plan's
+default budget clears it from round 1.

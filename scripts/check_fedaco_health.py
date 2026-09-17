@@ -12,8 +12,16 @@ stated mechanism sits inert.
     Uniform tau means `tau^a * eta^b` reduces to `eta^b`: no colony search, no cross-round
     stigmergy, just deterministic heuristic-greedy weighting. The "Adaptive"/"swarm" claim
     in the paper's title is then decorative, which `aco/pheromone.py`'s own docstring
-    names as the failure to watch for. In the 3-round synthetic run entropy sat ~1% below
-    maximum, which at K=2 over 3 rounds proves nothing -- this is the real check.
+    names as the failure to watch for.
+
+    Judged against what the run's own budget allows, not against a fixed gap. tau starts
+    *at* the ceiling and walks away from it at a rate set by rho, the deposit magnitude
+    and the iteration count, so an absolute threshold applied to a short run measures the
+    run length. `fedswarm.aco.diagnostics.best_case_gaps` computes the fastest the rule
+    permits -- one level winning at every iteration -- and this check reports the fraction
+    of that a run realized. The first version of this check did not, and returned INERT on
+    a four-round run whose best possible score was itself barely above the threshold
+    (docs/EXPERIMENT_LOG.md, 2026-09-17).
 
 **2. Has the deposit floor engaged?**
     `colony.py` deposits `rho * Q * max(F, 0)`. If F is negative for every candidate in a
@@ -49,6 +57,7 @@ import statistics
 import sys
 from pathlib import Path
 
+from fedswarm.aco.diagnostics import MEASURED_FITNESS, best_case_gaps
 from fedswarm.utils.runner import load_result_files
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +67,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # maximum still leaves tau nearly flat across levels. This threshold is a judgement call,
 # not a figure from the plan -- stated here rather than buried, and adjustable via --flat.
 DEFAULT_FLAT_FRACTION = 0.02
+
+# tau has "not moved" when it has covered less than this fraction of the distance its own
+# budget allows. Unlike the absolute gap above, this is scale-free: it means the same
+# thing in round 2 of a smoke test as in round 90 of the main sweep. 0.15 is a judgement
+# call, stated here rather than buried -- below it, selection is eta-driven in any
+# practical sense.
+INERT_REALIZED_FRACTION = 0.15
+
+# Above this required fraction, SEARCHING is effectively unreachable: passing would take a
+# colony concentrating tau nearly as fast as one that picks the same level every
+# iteration, i.e. one that has stopped exploring. Such a run gets UNDERPOWERED rather than
+# a verdict its length cannot support.
+UNDERPOWERED_REQUIRED_FRACTION = 0.6
 
 
 def load_results(results_dir: Path, strategy: str | None = None) -> list[dict]:
@@ -110,28 +132,48 @@ def check_colony_searching(result: dict, num_levels: int, flat_fraction: float) 
 
     gaps = [(ceiling - e) / ceiling for e in entropies]
     mean_gap = statistics.fmean(gaps)
-    final_gap = gaps[-1]
-    trend = "falling" if len(gaps) > 2 and gaps[-1] > gaps[0] else "flat or rising"
+    best = _best_case(result, len(gaps), num_levels)
+    best_mean = statistics.fmean(best) if best else 0.0
 
-    if mean_gap < flat_fraction:
+    # `realized` is what the colony did as a fraction of what the budget allowed;
+    # `required` is what it would have had to do to clear the absolute threshold.
+    realized = mean_gap / best_mean if best_mean else 0.0
+    required = flat_fraction / best_mean if best_mean else float("inf")
+    budget_note = (
+        f" Best case at this budget averages {best_mean:.2%}, so the colony realized "
+        f"{realized:.0%} of the concentration available to it and would have needed "
+        f"{required:.0%} to clear the {flat_fraction:.0%} threshold."
+    )
+
+    if realized < INERT_REALIZED_FRACTION:
         verdict = "INERT"
         detail = (
-            f"tau is within {mean_gap:.2%} of uniform on average (entropy "
-            f"{statistics.fmean(entropies):.4f} vs ceiling {ceiling:.4f}). Pheromone is "
-            "carrying essentially no signal, so selection is driven by eta alone -- the "
-            "colony is not searching and cross-round stigmergy is not happening."
+            f"tau covered {realized:.0%} of the distance from uniform its own budget "
+            f"allows ({mean_gap:.2%} against a best case of {best_mean:.2%}). Pheromone "
+            "is carrying essentially no signal, so selection is driven by eta alone -- "
+            "the colony is not searching and cross-round stigmergy is not happening."
         )
-    elif final_gap < flat_fraction:
+    elif required > UNDERPOWERED_REQUIRED_FRACTION:
+        verdict = "UNDERPOWERED"
+        detail = (
+            f"tau is moving ({realized:.0%} of the best case, {mean_gap:.2%} below "
+            f"uniform) but this run is too short to call it. Reporting SEARCHING would "
+            f"take {required:.0%} of a best case that picks the same level every "
+            "iteration -- a colony that has stopped exploring. Lengthen the run, or raise "
+            "the deposit (`aco-q-deposit`) or the iteration budget (`aco-iters-start`), "
+            "before reading a verdict here."
+        )
+    elif gaps[-1] < gaps[0]:
         verdict = "DEGRADING"
         detail = (
-            f"tau started structured but ended within {final_gap:.2%} of uniform. "
-            "Pheromone is washing out as rounds progress."
+            f"tau started structured ({gaps[0]:.2%} below uniform) and ended flatter "
+            f"({gaps[-1]:.2%}). Pheromone is washing out as rounds progress." + budget_note
         )
     else:
         verdict = "SEARCHING"
         detail = (
-            f"tau is {mean_gap:.2%} below uniform on average, {final_gap:.2%} by the "
-            f"final round ({trend} entropy). Pheromone carries real structure."
+            f"tau is {mean_gap:.2%} below uniform on average, {gaps[-1]:.2%} by the final "
+            "round." + budget_note
         )
     return {
         "question": "Is the colony searching?",
@@ -140,7 +182,34 @@ def check_colony_searching(result: dict, num_levels: int, flat_fraction: float) 
         "entropy_ceiling": ceiling,
         "entropy_per_round": entropies,
         "mean_gap_fraction": mean_gap,
+        "best_case_gap_fraction": best_mean,
+        "realized_fraction": realized,
+        "required_fraction": required,
     }
+
+
+def _best_case(result: dict, rounds: int, num_levels: int) -> list[float]:
+    """The fastest tau could have concentrated under this run's own colony settings.
+
+    Read from the result's resolved run_config rather than from defaults: a run with a
+    smaller `aco-iters-start` or a lower fitness has a lower ceiling, and comparing it
+    against the plan's default budget would understate how well it did.
+    """
+    run_config = result.get("config", {}).get("run_config", {})
+    fitnesses = _round_metric(result, "best_fitness")
+    return best_case_gaps(
+        rounds,
+        iters_start=int(run_config.get("aco-iters-start", 10)),
+        iters_end=int(run_config.get("aco-iters-end", 4)),
+        fitness=statistics.fmean(fitnesses) if fitnesses else MEASURED_FITNESS,
+        num_levels=num_levels,
+        num_clients=int(run_config.get("num-clients", 4)),
+        rho=float(run_config.get("aco-rho", 0.1)),
+        tau0=float(run_config.get("aco-tau0", 1.0)),
+        rho_round=float(run_config.get("aco-rho-round", 0.1)),
+        q_deposit=float(run_config.get("aco-q-deposit", 1.0)),
+        global_best_every=int(run_config.get("aco-global-best-every", 5)),
+    )
 
 
 def check_deposit_floor(result: dict) -> dict:
@@ -288,8 +357,17 @@ def main() -> int:
         print(f"{i}. {check['question']}")
         print(f"   {check['verdict']}: {check['detail']}\n")
 
-    searching = checks[0]["verdict"] == "SEARCHING"
-    if not searching:
+    verdict = checks[0]["verdict"]
+    searching = verdict == "SEARCHING"
+    if verdict == "UNDERPOWERED":
+        print(
+            "This run cannot answer question 1 -- it is too short for tau to have left its\n"
+            "uniform initialization by a margin the threshold can see. That is not evidence\n"
+            "either way about the mechanism. Re-run longer, or with a larger deposit or\n"
+            "iteration budget, before concluding anything; `scripts/analyze_pheromone_"
+            "dynamics.py`\nprints what each budget makes reachable."
+        )
+    elif not searching:
         print(
             "The colony is not searching. Before Phase 6 spends GPU-hours, this needs\n"
             "resolving -- a sweep built on an inert mechanism produces results that say\n"

@@ -464,6 +464,27 @@ fitness weights -- a different fix from the one this entry originally anticipate
 ⚠️ Measured at K=2 on synthetic pixels with a reduced colony budget, so it is a lead, not
 a finding. The real-data run at K>=10 with the full budget is what settles it.
 
+**Update, 2026-09-17 (later still) -- the INERT verdict itself was unfounded.** tau starts
+*at* log(L) by construction, so the entropy gap measures how far it has travelled from its
+own initialization, at a rate set by `rho`, the deposit and the iteration budget. At that
+run's settings the fastest any colony could concentrate tau averages 3.14% over four
+rounds, so the 2% threshold demanded 64% of a best case that picks the same level every
+iteration -- a colony that has stopped exploring. What the run actually did was move away
+from uniform monotonically every round (0.19% -> 0.56% -> 1.36% -> 1.57%), reaching 29% of
+what the budget allowed, while beating the FedAvg point on fitness in all four rounds.
+
+The reasoning above about deposit *magnitude* stands: `rho * Q * F` against `tau0 = 1.0`
+is a slow walk, and that is exactly why a short run cannot answer the question. What does
+not stand is "pheromone is carrying essentially no signal". `fedswarm/aco/diagnostics.py`
+computes the reachable ceiling for any budget and `check_fedaco_health.py` now judges
+against it, reporting UNDERPOWERED where the old check reported INERT. See
+docs/EXPERIMENT_LOG.md, "the INERT verdict was a statement about the run length".
+
+**Still open, and still needs the real run.** None of this shows the colony *is*
+searching -- only that the measurement taken could not have shown it either way. The
+`make validate-fedaco` gate (15 rounds, default colony budget) requires 22% of the best
+case, which is a bar a working colony can clear and a dead one cannot.
+
 Whether this matters in practice is an open empirical question, not a known bug: on real
 training deltas (which do have a consensus direction) F was positive in every round
 measured. A baseline-centred deposit `max(F - F_fedavg, 0)` would make the mechanism

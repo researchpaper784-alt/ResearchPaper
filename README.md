@@ -72,6 +72,7 @@ what is missing.
 ### Before the sweep
 
 ```bash
+make pheromone-budget       # can a run of this length answer question 1 at all?
 make validate-fedaco K=4    # two short runs: FedACO and FedAvg, same seed and partition
 make health                 # does FedACO's mechanism actually do anything?
 ```
@@ -82,6 +83,14 @@ floor has engaged, and whether the safety fallback — not the colony — is car
 margin over FedAvg. A sweep run before that check can produce 360 cells of numbers about
 a mechanism that was never running. It costs about twenty minutes against the sweep's
 several hundred hours.
+
+Question 1 is judged against what the run's own budget makes reachable, not against a
+fixed gap, and `make pheromone-budget` prints that ceiling for each budget. τ starts *at*
+the entropy ceiling and walks away from it at a rate set by the deposit and the iteration
+count, so a short run cannot distinguish "not searching" from "hasn't moved yet" — an
+earlier version of the check reported INERT on a four-round run whose best possible score
+was barely above the threshold (docs/EXPERIMENT_LOG.md, 2026-09-17). Shorten `ROUNDS` and
+the check quietly stops meaning anything; the budget table says when.
 
 ⚠️ **The Simulation Runtime creates 2 clients unless told otherwise.** `num-clients` is
 this project's own key — it decides how many ways the *data* is partitioned. How many

@@ -296,8 +296,15 @@ several hundred projected hours, and it settles three things at once: whether Fe
 mechanism actually runs, what a round really costs (the compute table is still estimates
 and says in bold not to cite them), and whether client CPU sizing holds at the target K.
 
-The one measurement available says **INERT** — τ 0.92% below uniform while the deposit
-floor was clear, which points at deposit *magnitude* rather than the floor. K=2 on
-synthetic pixels with a reduced budget proves nothing, which is exactly why the real run
-matters: the sweep will faithfully produce 360 cells whether or not the colony is
-searching.
+The one measurement available said **INERT** — τ 0.92% below uniform while the deposit
+floor was clear. That verdict has since been withdrawn: τ starts *at* the entropy ceiling,
+and at that run's budget the fastest any colony could concentrate it averages 3.14%, so
+the 2% threshold demanded 64% of a theoretical maximum. τ was in fact moving away from
+uniform every round. The check now judges against the run's own reachable ceiling and
+reports **UNDERPOWERED** there (docs/EXPERIMENT_LOG.md, 2026-09-17).
+
+So the mechanism question is genuinely *unanswered*, not answered badly — which is exactly
+why the real run matters: the sweep will faithfully produce 360 cells whether or not the
+colony is searching. `make validate-fedaco` at 15 rounds is powered to answer it (22% of
+the best case); a shorter run would not be, and `make pheromone-budget` says so before the
+compute is spent.

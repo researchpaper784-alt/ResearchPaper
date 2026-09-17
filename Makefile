@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke validate-fedaco health hparam-search hparam-search-plan iid-band main main-plan ablations ablations-plan robustness robustness-plan tables-robustness figures-data figures figures-ablation tables tables-ablation clean
+.PHONY: setup data test lint smoke validate-fedaco health pheromone-budget hparam-search hparam-search-plan iid-band main main-plan ablations ablations-plan robustness robustness-plan tables-robustness figures-data figures figures-ablation tables tables-ablation clean
 
 setup:
 	uv venv --python 3.12 .venv
@@ -35,6 +35,13 @@ hparam-search-plan:
 # downstream -- the Phase 6 sweep's shape, its compute budget, and whether FedACO's
 # mechanism is worth sweeping at all -- depends on what this says.
 # K defaults to 10. Override on a small box: `make validate-fedaco K=4`.
+# ROUNDS is load-bearing for the health check, not just for accuracy: tau starts uniform
+# and walks away from it at a rate set by the deposit and the iteration budget, so a short
+# run cannot answer "is the colony searching?" at all. At ROUNDS=15 with the default
+# colony budget, question 1 needs the colony to realize 22% of the fastest concentration
+# the rule permits -- a fair bar. At ROUNDS=4 it needs 38%, and with a reduced
+# `aco-iters-start` it passes 60% and stops meaning anything. Run `make pheromone-budget`
+# before shortening this. (docs/EXPERIMENT_LOG.md, 2026-09-17.)
 K ?= 10
 ROUNDS ?= 15
 
@@ -55,6 +62,10 @@ validate-fedaco:
 
 health:
 	.venv/bin/python scripts/check_fedaco_health.py --results-dir results/fl
+
+# What a given colony budget makes *reachable* on question 1, before spending a run on it.
+pheromone-budget:
+	.venv/bin/python scripts/analyze_pheromone_dynamics.py
 
 # Phase 5 -- the IID acceptance gate. Under IID there is little heterogeneity for an
 # aggregation rule to exploit, so a large spread means something other than the method is

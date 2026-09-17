@@ -73,6 +73,52 @@ def test_pheromone_washing_out_over_rounds_is_caught_separately() -> None:
     assert check["verdict"] in ("DEGRADING", "INERT")
 
 
+def _smoke_run(entropies: list[float]) -> dict:
+    """A run shaped like the only real FedACO run so far: K=2, 4 rounds, a reduced colony
+    budget (iters 6->4), best_fitness ~0.87. Its ceiling on tau concentration is ~3%, so
+    the 2% threshold sits at 64% of what the budget allows."""
+    run = _run(
+        "fedaco",
+        [
+            {"round": i + 1, "pheromone_entropy": e, "best_fitness": 0.87}
+            for i, e in enumerate(entropies)
+        ],
+    )
+    run["config"]["run_config"] = {
+        "num-clients": 2,
+        "aco-iters-start": 6,
+        "aco-iters-end": 4,
+        "aco-global-best-every": 5,
+    }
+    return run
+
+
+def test_a_run_too_short_to_answer_is_not_called_inert() -> None:
+    """The verdict this check originally got wrong. These are the real entropies from the
+    four-round smoke run: tau moved monotonically away from uniform every round, but only
+    to 1.57% -- and the threshold is 2%. Calling that INERT ("the colony is not searching")
+    reported a property of the run length as a property of the mechanism, and nearly sent
+    the project to rewrite a deposit rule that was working."""
+    check = check_colony_searching(
+        _smoke_run([2.39339, 2.38436, 2.36516, 2.36035]), num_levels=11, flat_fraction=0.02
+    )
+
+    assert check["verdict"] == "UNDERPOWERED"
+    assert check["realized_fraction"] > 0.15  # tau did move
+    assert check["required_fraction"] > 0.6  # but the bar was out of reach
+
+
+def test_a_genuinely_dead_colony_is_still_inert_in_a_short_run() -> None:
+    """The other half, and the one that matters more: making the check budget-aware must
+    not make it unfalsifiable. Same short run, same ceiling -- but tau that never leaves
+    uniform is inert whatever the budget was."""
+    check = check_colony_searching(
+        _smoke_run([CEILING - 0.0005] * 4), num_levels=11, flat_fraction=0.02
+    )
+
+    assert check["verdict"] == "INERT"
+
+
 def test_missing_pheromone_metric_is_no_data_not_a_pass() -> None:
     """Result files predating the Phase 4 close-out carry no pheromone_entropy. Treating
     that absence as healthy would be the worst possible default."""
