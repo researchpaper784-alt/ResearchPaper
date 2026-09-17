@@ -31,10 +31,16 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
-import os
-import subprocess
 import sys
 from pathlib import Path
+
+from fedswarm.utils.runner import (
+    diagnose,
+    format_run_config,
+    load_results,
+    run_flwr,
+    same_value,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -88,30 +94,6 @@ def trial_overrides(strategy: str, budget: int) -> list[dict]:
     return combos[:budget]
 
 
-def format_run_config(overrides: dict) -> str:
-    """See run_sweep.format_run_config -- booleans must be lowercase or tomli rejects the
-    whole string. Latent here until a boolean enters a grid, but the same bug."""
-    parts = []
-    for key, value in sorted(overrides.items()):
-        if isinstance(value, bool):
-            parts.append(f"{key}={str(value).lower()}")
-        elif isinstance(value, str):
-            parts.append(f"{key}='{value}'")
-        else:
-            parts.append(f"{key}={value}")
-    return " ".join(parts)
-
-
-def load_results(output_dir: Path) -> list[dict]:
-    results = []
-    for path in sorted(output_dir.glob("*.json")):
-        try:
-            results.append(json.loads(path.read_text()))
-        except (json.JSONDecodeError, OSError):
-            continue
-    return results
-
-
 def find_existing(
     results: list[dict], overrides: dict, base: dict | None = None, strategy: str | None = None
 ) -> dict | None:
@@ -138,19 +120,10 @@ def find_existing(
     wanted = {k: v for k, v in wanted.items() if k not in ignored}
     for result in results:
         run_config = result.get("config", {}).get("run_config", {})
-        if all(_same(run_config.get(k), v) for k, v in wanted.items()):
+        if all(same_value(run_config.get(k), v) for k, v in wanted.items()):
             if result.get("status") == "completed":
                 return result
     return None
-
-
-def _same(left, right) -> bool:
-    if isinstance(right, float) or isinstance(left, float):
-        try:
-            return abs(float(left) - float(right)) < 1e-12
-        except (TypeError, ValueError):
-            return False
-    return left == right
 
 
 def score(result: dict) -> float | None:
@@ -165,65 +138,14 @@ def score(result: dict) -> float | None:
 
 
 def run_trial(strategy: str, overrides: dict, base: dict, stream: bool) -> tuple[int, str]:
-    """Returns (returncode, captured output).
+    """One trial as a real `flwr run` subprocess. Returns (returncode, captured output).
 
-    `--stream` is passed unconditionally, and that is load-bearing rather than cosmetic:
-    **a bare `flwr run` is asynchronous.** It submits the run to the SuperLink, prints
-    "Successfully started run <id>", and returns immediately with exit 0 while the
-    simulation is still starting. A search that shells out without `--stream` therefore
-    checks for each trial's result file microseconds after launching it, finds nothing,
-    and reports every trial as failed -- which is exactly what the first end-to-end run
-    of this script did. `--stream` makes the call block until the run finishes.
-
-    `flwr run` also exits 0 even when the simulation itself dies (a missing image cache
-    surfaces as an in-run traceback and "Exit Code: 700" while the outer process still
-    returns success), so the return code cannot decide whether a trial worked either.
-    Both facts together are why success is judged by "did a result file appear", not by
-    the subprocess's own verdict.
-
-    `stream=True` additionally echoes the run's output live instead of capturing it.
+    Neither half of that tuple decides whether the trial worked: `flwr run` exits 0 both
+    when the simulation has not started yet and when it has died (see `run_flwr`). Success
+    is judged by "did a result file appear", in `search` below.
     """
     run_config = format_run_config({"strategy-name": strategy, **base, **overrides})
-    cmd = ["flwr", "run", ".", "--stream", "--run-config", run_config]
-    env = {**os.environ, "FEDSWARM_REPO_ROOT": str(REPO_ROOT)}
-    print(f"  $ flwr run . --stream --run-config \"{run_config}\"", flush=True)
-    if stream:
-        completed = subprocess.run(cmd, cwd=REPO_ROOT, env=env)
-        return completed.returncode, ""
-    completed = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
-    return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
-
-
-def diagnose(output: str) -> str:
-    """The one line from a failed trial's output most likely to explain it.
-
-    Markers are tried in priority order and each is scanned across the whole output, so
-    a specific cause wins over an incidental match anywhere in the log. Scanning
-    line-by-line against a flat marker set instead let Ray's `FutureWarning: ... turn off
-    this error message` be reported as the reason a trial failed, purely because it
-    appeared first and contains the word "error".
-    """
-    lines = [line.strip() for line in output.splitlines()]
-    interesting = [
-        line
-        for line in lines
-        if "Warning" not in line and "warn" not in line.lower()
-    ]
-    for marker in (
-        "Invalid run configuration",
-        "Dataset root does not exist",
-        "No cache at",
-        "FileNotFoundError",
-        "Traceback",
-        "Exit Code:",
-        "ValueError",
-        "KeyError",
-        "Error",
-    ):
-        for line in interesting:
-            if marker in line:
-                return line[:300]
-    return "no diagnostic line found in output"
+    return run_flwr(run_config, REPO_ROOT, stream=stream, echo_command=True)
 
 
 def search(strategy: str, base: dict, output_dir: Path, budget: int, stream: bool) -> dict:

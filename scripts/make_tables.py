@@ -31,11 +31,12 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+from fedswarm.utils.runner import load_result_files
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,12 +48,11 @@ SECONDARY = "best_val_macro_f1"
 
 
 def load_results(results_dir: Path) -> list[dict]:
+    """Every completed result under `results_dir`. Incomplete and half-written runs are
+    dropped here rather than filtered downstream: a table is the one artefact a reader
+    takes at face value, so a crashed run must not contribute a number to it."""
     out = []
-    for path in sorted(results_dir.rglob("*.json")):
-        try:
-            result = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
+    for path, result in load_result_files(results_dir, recursive=True):
         if result.get("status") != "completed" or "final" not in result:
             continue
         result["_path"] = str(path)

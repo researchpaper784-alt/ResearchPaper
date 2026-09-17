@@ -1055,3 +1055,44 @@ table shows them as distinct rows.
 `format_run_config`, `_same` and `diagnose` are duplicated between `run_sweep.py` and
 `run_hparam_search.py` — which is how the boolean-TOML bug came to exist in two places.
 Both copies are fixed; the duplication itself wants extracting into a shared module.
+**Done in the entry below**, which also found a third copy of the bug class.
+
+## 2026-09-17 — the duplicated runner helpers, and the drift they were already hiding
+
+The review's one recorded-not-fixed finding, closed: `format_run_config`, `_same` and
+`diagnose` now live once, in `src/fedswarm/utils/runner.py`, alongside the `flwr run`
+invocation itself and the result-file reader.
+
+Extracting them turned up what the finding predicted but had not looked for — **the two
+copies of `diagnose` had already diverged, and the sweep's was the broken one.** It
+filtered log noise with `"arn" not in line.lower()`, a stand-in for "not a warning" that
+also discards every line containing *learn*:
+
+```python
+# scripts/run_sweep.py, before
+lines = [line.strip() for line in output.splitlines() if "arn" not in line.lower()]
+```
+
+So `ValueError: learning rate must be positive` — the likeliest way a tuning cell dies,
+and the reason `diagnose` exists at all — was thrown away, and the sweep printed "no
+diagnostic line found in output" for exactly the failures it most needed to explain. The
+search's copy had been fixed weeks of commits earlier to filter `Warning`/`warn`
+explicitly. Nobody had ever seen the two side by side. The shared copy is the search's.
+
+Four helpers were shared, not three, because the fourth is where the worst failure lives:
+`run_flwr` now owns the `flwr run` invocation, so `--stream` and `FEDSWARM_REPO_ROOT` are
+passed from one place. Dropping either is silent — without `--stream` every run is
+launched asynchronously and reported as failed while the orphans keep computing; without
+the env var every run fails to find the image cache from *inside* the simulation, where
+the outer process still exits 0. Neither had a test. Both do now
+(`tests/test_runner.py`), along with an identity check that the two scripts hold the
+*same* function objects, which is what stops the copies drifting a third time.
+
+The result-file reader is shared too, across five scripts, with one deliberate
+difference preserved as a parameter: the runners read a flat `--output-dir` (matching a
+result to the wrong sweep would corrupt resume), the analysis scripts `rglob` all of
+`results/` (a main sweep and an ablation sweep live in separate subdirectories).
+
+Behaviour otherwise unchanged: 288 tests pass, and `make_tables.py`,
+`check_fedaco_health.py` and `check_iid_band.py` produce the same output as before the
+change when run against the same result files.

@@ -37,6 +37,8 @@ import statistics
 import sys
 from pathlib import Path
 
+from fedswarm.utils.runner import load_result_files
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 METRIC_KEYS = {
@@ -50,11 +52,7 @@ METRIC_KEYS = {
 
 def load_iid_results(results_dir: Path) -> list[dict]:
     results = []
-    for path in sorted(results_dir.rglob("*.json")):
-        try:
-            result = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
+    for _, result in load_result_files(results_dir, recursive=True):
         config = result.get("config", {})
         run_config = config.get("run_config", {})
         if str(run_config.get("regime", "")).lower() != "iid":

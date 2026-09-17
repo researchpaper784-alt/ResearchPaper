@@ -46,6 +46,14 @@ from pathlib import Path
 
 import yaml
 
+from fedswarm.utils.runner import (
+    diagnose,
+    format_run_config,
+    load_result_files,
+    run_flwr,
+    same_value,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = "results/manifest.jsonl"
 
@@ -130,27 +138,6 @@ def expand(spec: dict) -> list[Cell]:
     return cells
 
 
-def format_run_config(config: dict) -> str:
-    """Render a run config as the TOML fragment `--run-config` expects.
-
-    Booleans must be lowercase: flwr parses the assembled string with tomli, and Python's
-    `str(False)` is `"False"`, which is not valid TOML. The whole config string is then
-    rejected with a bare "[code: 15]" naming nothing -- so a single boolean override kills
-    every cell that carries it. `ablation_all.yaml`'s `no_safety_fallback` variant (the one
-    that separates "the colony helped" from "the fallback protected it") is exactly such a
-    cell.
-    """
-    parts = []
-    for key, value in sorted(config.items()):
-        if isinstance(value, bool):
-            parts.append(f"{key}={str(value).lower()}")
-        elif isinstance(value, str):
-            parts.append(f"{key}='{value}'")
-        else:
-            parts.append(f"{key}={value}")
-    return " ".join(parts)
-
-
 # ======================================================================================
 # Manifest -- the resume index CLAUDE.md specifies.
 # ======================================================================================
@@ -225,13 +212,13 @@ def find_result(
     # cell forever.
     foreign_pairs = _foreign_variant_values(spec_variants, cell.variant, wanted)
 
-    for path, result in _load_output_dir(output_dir):
+    for path, result in load_result_files(output_dir, use_cache=True):
         if result.get("status") != "completed":
             continue
         run_config = result.get("config", {}).get("run_config", {})
-        if not all(_same(run_config.get(k), v) for k, v in wanted.items()):
+        if not all(same_value(run_config.get(k), v) for k, v in wanted.items()):
             continue
-        if any(_same(run_config.get(k), v) for k, v in foreign_pairs):
+        if any(same_value(run_config.get(k), v) for k, v in foreign_pairs):
             continue
         return path
     return None
@@ -253,41 +240,6 @@ def _foreign_variant_values(
             if key != "name" and key not in wanted:
                 pairs.append((key, value))
     return pairs
-
-
-_OUTPUT_CACHE: dict[tuple[str, int], list[tuple[Path, dict]]] = {}
-
-
-def _load_output_dir(output_dir: Path) -> list[tuple[Path, dict]]:
-    """Parse every result file in the directory once, not once per cell.
-
-    `find_result` is called for all 360 cells at resume and again after each completed
-    run; re-globbing and re-parsing the whole directory each time is O(cells x files),
-    roughly 130,000 file reads before a resumed main sweep starts. Keyed by file count so
-    the cache invalidates as soon as a new result lands.
-    """
-    paths = sorted(output_dir.glob("*.json"))
-    key = (str(output_dir), len(paths))
-    if key in _OUTPUT_CACHE:
-        return _OUTPUT_CACHE[key]
-    loaded = []
-    for path in paths:
-        try:
-            loaded.append((path, json.loads(path.read_text())))
-        except (json.JSONDecodeError, OSError):
-            continue
-    _OUTPUT_CACHE.clear()
-    _OUTPUT_CACHE[key] = loaded
-    return loaded
-
-
-def _same(left, right) -> bool:
-    if isinstance(right, float) or isinstance(left, float):
-        try:
-            return abs(float(left) - float(right)) < 1e-12
-        except (TypeError, ValueError):
-            return False
-    return left == right
 
 
 # ======================================================================================
@@ -372,32 +324,8 @@ def project_cost(cells: int, rounds: int, seconds_per_round: float, k: int) -> s
 
 
 def run_cell(cell: Cell, common: dict, stream: bool) -> tuple[int, str]:
-    config = format_run_config(cell.run_config(common))
-    # --stream is required for the call to block; see the module docstring.
-    cmd = ["flwr", "run", ".", "--stream", "--run-config", config]
-    env = {**os.environ, "FEDSWARM_REPO_ROOT": str(REPO_ROOT)}
-    if stream:
-        completed = subprocess.run(cmd, cwd=REPO_ROOT, env=env)
-        return completed.returncode, ""
-    completed = subprocess.run(cmd, cwd=REPO_ROOT, env=env, capture_output=True, text=True)
-    return completed.returncode, (completed.stdout or "") + (completed.stderr or "")
-
-
-def diagnose(output: str) -> str:
-    lines = [line.strip() for line in output.splitlines() if "arn" not in line.lower()]
-    for marker in (
-        "Invalid run configuration",
-        "Dataset root does not exist",
-        "No cache at",
-        "FileNotFoundError",
-        "Traceback",
-        "Exit Code:",
-        "Error",
-    ):
-        for line in lines:
-            if marker in line:
-                return line[:300]
-    return "no diagnostic line found in output"
+    # `run_flwr` passes --stream unconditionally; see its docstring and this module's.
+    return run_flwr(format_run_config(cell.run_config(common)), REPO_ROOT, stream=stream)
 
 
 def main() -> int:

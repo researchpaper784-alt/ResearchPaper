@@ -49,6 +49,8 @@ import statistics
 import sys
 from pathlib import Path
 
+from fedswarm.utils.runner import load_result_files
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # How close to log(L) counts as "uniform". Entropy is a log-scale quantity and the top of
@@ -59,12 +61,12 @@ DEFAULT_FLAT_FRACTION = 0.02
 
 
 def load_results(results_dir: Path, strategy: str | None = None) -> list[dict]:
+    """Every result under `results_dir` that has per-round records, optionally one
+    strategy's. A run still in progress or killed mid-write has no `rounds` and is
+    skipped; this check reads round-by-round behaviour, so it has nothing to say about a
+    result that has none."""
     out = []
-    for path in sorted(results_dir.rglob("*.json")):
-        try:
-            result = json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
+    for path, result in load_result_files(results_dir, recursive=True):
         if "rounds" not in result or "config" not in result:
             continue
         if strategy and str(result["config"].get("strategy", "")).lower() != strategy:
