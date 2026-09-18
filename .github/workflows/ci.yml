@@ -1,0 +1,76 @@
+name: CI
+
+# Phase 10 (plan): "lint + unit tests + 2-round smoke on CPU." The `smoke` job is a
+# genuinely new capability this session added, not just process -- ubuntu-latest is
+# Linux x86_64, where `flwr[simulation]` (`ray`) actually has real wheels (verified,
+# docs/FLOWER_API_NOTES.md's platform-blocker note is Intel-macOS-specific), so this
+# is the first place this repo's FL harness runs continuously and automatically,
+# independent of a human's Colab/Kaggle session. Uses scripts/ci_smoke_dataset.py's
+# fully synthetic dataset (no Kaggle credentials available to a CI runner).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Create venv and install (dev only, no simulation extra)
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install -e ".[dev]" --python .venv/bin/python
+      - name: Lint
+        run: .venv/bin/python -m ruff check src tests scripts
+      - name: Unit tests
+        run: .venv/bin/python -m pytest -q
+
+  smoke:
+    runs-on: ubuntu-latest
+    needs: test
+    # Real history with this exact command hanging/failing on Colab
+    # ("No heartbeat received from the task", docs/OPEN_QUESTIONS.md) -- bound the
+    # blast radius to a fast, cheap failure instead of consuming the job's full
+    # default timeout if this CI environment hits the same thing.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pip install uv
+      - name: Create venv and install (with simulation extra)
+        run: |
+          uv venv --python 3.12 .venv
+          uv pip install -e ".[dev,simulation]" --python .venv/bin/python
+      - name: Build a tiny synthetic dataset (no real MRI data / Kaggle creds in CI)
+        run: .venv/bin/python scripts/ci_smoke_dataset.py --out-dir /tmp/fedswarm_ci_smoke
+      - name: Run the FL smoke test against the synthetic dataset
+        env:
+          FEDSWARM_REPO_ROOT: ${{ github.workspace }}
+          # Real, documented lever (docs/FLOWER_API_NOTES.md), kept on here for the
+          # same reason it's on in notebooks/colab_fl_smoke.ipynb -- harmless either
+          # way, possibly relevant if this CI environment hits the same isolated-
+          # uv-sync-environment issue Colab did.
+          FLWR_DISABLE_RUNTIME_DEPENDENCY_INSTALLATION: "1"
+        run: |
+          .venv/bin/flwr run . --stream --run-config "num-clients=2 min-client-size=2 image-size=16 local-batch-size=4 num-rounds=2 num-classes=4 cache-dir='/tmp/fedswarm_ci_smoke/cache' manifest-path='/tmp/fedswarm_ci_smoke/manifest.csv' partition-cache-dir='/tmp/fedswarm_ci_smoke/partitions' output-dir='/tmp/fedswarm_ci_smoke/results' checkpoint-dir='/tmp/fedswarm_ci_smoke/checkpoints'"
+      - name: Verify a completed result was written
+        run: |
+          ls /tmp/fedswarm_ci_smoke/results/*.json
+          .venv/bin/python -c "
+          import json, glob
+          paths = glob.glob('/tmp/fedswarm_ci_smoke/results/*.json')
+          assert paths, 'no result file was written'
+          payload = json.load(open(paths[0]))
+          assert payload['status'] == 'completed', payload['status']
+          print('CI smoke result:', payload['final'])
+          "
