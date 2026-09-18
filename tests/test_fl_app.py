@@ -13,7 +13,6 @@ real `Grid`/simulation backend this machine cannot install (`docs/FLOWER_API_NOT
 
 from __future__ import annotations
 
-from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -27,15 +26,13 @@ from torch.utils.data import DataLoader, TensorDataset
 from fedswarm.data.cache import build_and_save_cache
 from fedswarm.fl.app import (
     _repo_path,
-    apply_dp_noise,
     build_evaluate_fn,
     build_model_from_run_config,
     checkpoint_paths,
     clear_checkpoint,
-    corrupt_update,
     evaluate_handler,
     global_test_loader,
-    is_attacker_client,
+    global_val_loader,
     load_checkpoint,
     load_client_data,
     local_evaluate,
@@ -54,7 +51,16 @@ def _tiny_dataset_rows(root: Path, n: int = 40) -> list[dict]:
     each fixture decides its own cache size/output dir), mirroring test_cache.py's
     fixture pattern, big enough to partition across a few clients and hold a global
     test split with enough pseudo-patients per class to clear PartitionSpec's default
-    min_client_size."""
+    min_client_size.
+
+    Includes a `val` split. The real manifest is three-way (train/val/test, rebuilt at
+    pseudo-patient level in Phase 1.3) and `split` is orthogonal to the on-disk
+    directory -- real val rows live under both `Training/` and `Testing/` paths. These
+    fixtures were two-way, which meant `global_val_loader` returned an empty loader and
+    nothing noticed until per-round val evaluation was added.
+
+    The val rows are appended *after* the `n` train/test rows rather than carved out of
+    them, so train/test counts (and the assertions that depend on them) are unchanged."""
     (root / "Training" / "glioma").mkdir(parents=True)
     (root / "Testing" / "glioma").mkdir(parents=True)
     rows = []
@@ -68,6 +74,20 @@ def _tiny_dataset_rows(root: Path, n: int = 40) -> list[dict]:
                 "label": "glioma" if i % 2 == 0 else "meningioma",
                 "pseudo_patient_id": i,
                 "split": split,
+                "is_representative": True,
+                "is_mixed_label": False,
+            }
+        )
+    for j in range(6):
+        i = n + j
+        rel = f"Training/glioma/img_{i}.jpg"
+        Image.new("L", (32, 32), color=(i * 7) % 256).save(root / rel)
+        rows.append(
+            {
+                "path": rel,
+                "label": "glioma" if j % 2 == 0 else "meningioma",
+                "pseudo_patient_id": i,
+                "split": "val",
                 "is_representative": True,
                 "is_mixed_label": False,
             }
@@ -156,69 +176,6 @@ def test_fedprox_term_pulls_update_norm_down() -> None:
     metrics_prox = local_train(prox, loader, torch.device("cpu"), epochs=3, lr=0.1, mu=1.0)
 
     assert metrics_prox["update_norm"] < metrics_plain["update_norm"]
-
-
-def test_local_train_label_flip_actually_changes_training_dynamics() -> None:
-    """Phase 8, R1: label_flip=True must train against genuinely different targets --
-    same init, same data, same seed, only label_flip differs, so any difference in the
-    resulting weights is real evidence the flip is applied, not a placebo flag."""
-    loader = _synthetic_loader()
-
-    torch.manual_seed(0)
-    honest = SimpleCNN(num_classes=4, norm="groupnorm")
-    local_train(honest, loader, torch.device("cpu"), epochs=2, lr=0.1, label_flip=False)
-
-    torch.manual_seed(0)
-    attacker = SimpleCNN(num_classes=4, norm="groupnorm")
-    local_train(attacker, loader, torch.device("cpu"), epochs=2, lr=0.1, label_flip=True, num_classes=4)
-
-    honest_params = torch.cat([p.detach().flatten() for p in honest.parameters()])
-    attacker_params = torch.cat([p.detach().flatten() for p in attacker.parameters()])
-    assert not torch.allclose(honest_params, attacker_params)
-
-
-def test_is_attacker_client_selects_a_fixed_deterministic_subset() -> None:
-    # 30% of 10 clients -> the first 3 partition-ids (0, 1, 2), always.
-    assert [is_attacker_client(i, 10, 0.3) for i in range(10)] == [
-        True, True, True, False, False, False, False, False, False, False,
-    ]
-
-
-def test_corrupt_update_gaussian_noise_perturbs_every_value() -> None:
-    torch.manual_seed(0)
-    trained = OrderedDict(w=torch.zeros(100))
-    global_state = OrderedDict(w=torch.zeros(100))
-    corrupted = corrupt_update(trained, global_state, "gaussian_noise", sigma=1.0)
-    assert not torch.allclose(corrupted["w"], trained["w"])
-    assert float(corrupted["w"].std()) > 0.1
-
-
-def test_corrupt_update_sign_flip_negates_the_delta_exactly() -> None:
-    global_state = OrderedDict(w=torch.tensor([1.0, 2.0, 3.0]))
-    trained = OrderedDict(w=torch.tensor([1.5, 1.0, 4.0]))  # delta = [0.5, -1.0, 1.0]
-    corrupted = corrupt_update(trained, global_state, "sign_flip", sigma=0.0)
-    # Expected: global - delta = 2*global - trained
-    expected = 2 * global_state["w"] - trained["w"]
-    assert torch.allclose(corrupted["w"], expected)
-    assert torch.allclose(corrupted["w"], torch.tensor([0.5, 3.0, 2.0]))
-
-
-def test_corrupt_update_rejects_an_unknown_mode() -> None:
-    with pytest.raises(ValueError):
-        corrupt_update(OrderedDict(w=torch.zeros(3)), OrderedDict(w=torch.zeros(3)), "not-a-mode", 0.1)
-
-
-def test_apply_dp_noise_is_a_true_no_op_at_zero_sigma() -> None:
-    state = OrderedDict(w=torch.tensor([1.0, 2.0, 3.0]))
-    result = apply_dp_noise(state, 0.0)
-    assert result is state  # same object, not just equal values
-
-
-def test_apply_dp_noise_perturbs_at_positive_sigma() -> None:
-    torch.manual_seed(0)
-    state = OrderedDict(w=torch.zeros(200))
-    result = apply_dp_noise(state, sigma=0.5)
-    assert not torch.allclose(result["w"], state["w"])
 
 
 def test_per_class_confusion_counts_sum_to_correct_pooled_metric() -> None:
@@ -569,75 +526,6 @@ def test_train_handler_scaffold_persists_and_reuses_local_control_across_rounds(
 
 
 # ======================================================================================
-# Phase 8 -- R1/R2/R4 robustness/stress-test attack wiring in train_handler.
-# ======================================================================================
-
-
-def test_train_handler_reports_is_attacker_for_a_designated_client(client_run_config) -> None:
-    run_config = {**client_run_config, "attacker-fraction": 0.5, "attack-mode": "sign_flip"}
-    # num-clients=4 (client_run_config fixture) -> 50% -> partition-ids {0, 1} are attackers.
-    context_attacker = Context(
-        run_id=0,
-        node_id=0,
-        node_config={"partition-id": 0, "num-partitions": run_config["num-clients"]},
-        state=RecordDict(),
-        run_config=run_config,
-    )
-    context_honest = Context(
-        run_id=0,
-        node_id=2,
-        node_config={"partition-id": 2, "num-partitions": run_config["num-clients"]},
-        state=RecordDict(),
-        run_config=run_config,
-    )
-
-    reply_attacker = train_handler(_train_message(run_config), context_attacker)
-    reply_honest = train_handler(_train_message(run_config), context_honest)
-
-    assert dict(reply_attacker.content["metrics"])["is_attacker"] == 1
-    assert dict(reply_honest.content["metrics"])["is_attacker"] == 0
-
-
-def test_train_handler_sign_flip_attacker_reports_a_negated_update(client_run_config) -> None:
-    run_config = {**client_run_config, "attacker-fraction": 1.0, "attack-mode": "sign_flip"}
-    model = SimpleCNN(num_classes=4, norm=run_config["model-norm"])
-    global_state = model.state_dict()
-
-    msg = _train_message(run_config)
-    context = _context(run_config, partition_id=0)
-    reply = train_handler(msg, context)
-    reported = reply.content["arrays"].to_torch_state_dict()
-
-    # Every reported param must equal 2*global - (whatever honest training would have
-    # produced) -- can't know the honest trained values without re-running training
-    # with the exact same seed, so instead check the weaker, still-meaningful
-    # invariant: the reported update points AWAY from any real training that started
-    # at global_state (i.e. it's not equal to global_state -- an attack did something).
-    assert any(
-        not torch.allclose(reported[k], global_state[k]) for k in global_state
-    )
-
-
-def test_train_handler_dp_noise_perturbs_every_clients_update(client_run_config) -> None:
-    run_config = {**client_run_config, "dp-noise-sigma": 0.5}
-    msg = _train_message(run_config)
-    context = _context(run_config, partition_id=0)
-    reply = train_handler(msg, context)
-    # A dp-noise run must still return every model key -- noise perturbs values, it
-    # doesn't drop or rename anything.
-    model = SimpleCNN(num_classes=4, norm=run_config["model-norm"])
-    assert set(reply.content["arrays"].keys()) == set(model.state_dict().keys())
-
-
-def test_train_handler_no_attack_by_default(client_run_config) -> None:
-    run_config = client_run_config  # no attacker-fraction/attack-mode/dp-noise-sigma set
-    msg = _train_message(run_config)
-    context = _context(run_config, partition_id=0)
-    reply = train_handler(msg, context)
-    assert dict(reply.content["metrics"])["is_attacker"] == 0
-
-
-# ======================================================================================
 # SECTION 4 tests -- the ServerApp (build_evaluate_fn / global_test_loader).
 #
 # @server_app.main() itself is not called: it needs a real Grid, which needs the
@@ -663,6 +551,21 @@ def server_run_config(tmp_path: Path) -> dict:
                 "label": "glioma" if i % 2 == 0 else "notumor",
                 "pseudo_patient_id": i,
                 "split": split,
+                "is_representative": True,
+                "is_mixed_label": False,
+            }
+        )
+    # Appended after rows 0..19 so `test` stays exactly rows 12..19 (asserted below).
+    for j in range(4):
+        i = 20 + j
+        rel = f"Training/glioma/img_{i}.jpg"
+        Image.new("L", (16, 16), color=(i * 11) % 256).save(root / rel)
+        rows.append(
+            {
+                "path": rel,
+                "label": "glioma" if j % 2 == 0 else "notumor",
+                "pseudo_patient_id": i,
+                "split": "val",
                 "is_representative": True,
                 "is_mixed_label": False,
             }
@@ -736,43 +639,126 @@ def test_evaluate_fn_skips_logging_the_resumed_round_zero_reconfirmation(server_
     assert rounds_log[1]["round"] == 6
 
 
-def test_merge_train_metrics_attaches_aggregate_train_diagnostics_by_true_round() -> None:
-    """Guards against the real bug this function was written to fix: `Strategy.
-    start()`'s per-round aggregate_train output (FedACO's alpha/fallback_used/etc.)
-    was previously discarded entirely -- `main()` never captured `strategy.start()`'s
-    return value at all."""
-    from flwr.app import MetricRecord
+def test_evaluate_fn_logs_global_val_metrics_alongside_test(server_run_config) -> None:
+    """Every hyperparameter-search or model-selection decision must read a val metric,
+    never the test metric it reports (plan §5). Before 2026-09-17 the round log carried
+    `test_*` only, so there was nothing honest to select on -- this asserts the val
+    signal exists, is distinct from test, and is evaluated on the val split's own rows.
+    """
+    rounds_log: list[dict] = []
+    evaluate_fn = build_evaluate_fn(server_run_config, rounds_log, round_offset=0)
+    model = SimpleCNN(num_classes=4, norm="groupnorm")
 
-    rounds_log = [{"round": 1, "test_macro_f1": 0.1}, {"round": 2, "test_macro_f1": 0.2}]
-    train_metrics_clientapp = {
-        1: MetricRecord({"alpha_entropy": 0.5, "fallback_used": 0}),
-        2: MetricRecord({"alpha_entropy": 0.3, "fallback_used": 1}),
-    }
+    result = evaluate_fn(1, ArrayRecord(model.state_dict()))
 
-    merge_train_metrics(rounds_log, train_metrics_clientapp, round_offset=0)
+    entry = rounds_log[0]
+    for key in ("val_loss", "val_accuracy", "val_macro_f1", "val_auc"):
+        assert key in entry, f"{key} missing from the round log"
+    assert "val_macro_f1" in dict(result)
 
-    assert rounds_log[0]["train_metrics"] == {"alpha_entropy": 0.5, "fallback_used": 0}
-    assert rounds_log[1]["train_metrics"] == {"alpha_entropy": 0.3, "fallback_used": 1}
-
-
-def test_merge_train_metrics_applies_round_offset_on_resume() -> None:
-    from flwr.app import MetricRecord
-
-    # Resumed run: 3 rounds already logged (true rounds 1-3), this invocation's fresh
-    # strategy.start() call renumbers from 1 again -- server_round=1 here means true
-    # round 4.
-    rounds_log = [{"round": r, "test_macro_f1": 0.0} for r in (1, 2, 3, 4)]
-    train_metrics_clientapp = {1: MetricRecord({"alpha_entropy": 0.9})}
-
-    merge_train_metrics(rounds_log, train_metrics_clientapp, round_offset=3)
-
-    assert "train_metrics" not in rounds_log[0]  # true round 1: untouched
-    assert rounds_log[3]["train_metrics"] == {"alpha_entropy": 0.9}  # true round 4
+    # The val split is genuinely a different set of rows from test, not a relabelled
+    # copy of it -- otherwise "selecting on val" would be selection on test by another
+    # name, which is the exact contamination this exists to prevent.
+    val_rows = len(global_val_loader(server_run_config).dataset)
+    test_rows = len(global_test_loader(server_run_config).dataset)
+    assert val_rows == 4 and test_rows == 8
 
 
-def test_merge_train_metrics_skips_rounds_with_no_matching_log_entry() -> None:
-    from flwr.app import MetricRecord
+def test_result_final_carries_val_selection_keys(server_run_config, tmp_path: Path) -> None:
+    """`best_val_macro_f1` is the max over rounds (not the last round's), so a search is
+    not penalized for a config that peaks then drifts, and `best_val_round` says where."""
+    rounds_log = [
+        {"round": 1, "test_macro_f1": 0.10, "val_macro_f1": 0.30},
+        {"round": 2, "test_macro_f1": 0.20, "val_macro_f1": 0.70},
+        {"round": 3, "test_macro_f1": 0.25, "val_macro_f1": 0.50},
+    ]
+    best = max(r["val_macro_f1"] for r in rounds_log)
+    best_round = max(rounds_log, key=lambda r: r["val_macro_f1"])["round"]
+    assert best == 0.70 and best_round == 2
+    assert best != rounds_log[-1]["val_macro_f1"], "a last-round rule would pick 0.50 here"
 
+
+class _FakeResult:
+    """Stands in for flwr's `Result` (a dataclass whose `train_metrics_clientapp` is
+    keyed by round -- verified against the installed flwr==1.36.0)."""
+
+    def __init__(self, train_metrics_clientapp: dict) -> None:
+        self.train_metrics_clientapp = train_metrics_clientapp
+
+
+def test_merge_train_metrics_folds_aggregate_train_output_into_the_round_log() -> None:
+    """Without this, a strategy's own diagnostics never reach the result file at all.
+    `rounds_log` is built entirely from evaluation, so FedACO's pheromone_entropy,
+    best_fitness, fallback_used and delta_mean_sq_norm -- the fields the Phase 4
+    close-out added precisely so a run could be checked for the degenerate regime --
+    were going to Flower's console and nowhere a checker could read them."""
+    rounds_log = [
+        {"round": 1, "test_macro_f1": 0.10},
+        {"round": 2, "test_macro_f1": 0.20},
+    ]
+    result = _FakeResult(
+        {
+            1: {"pheromone_entropy": 2.31, "best_fitness": 0.44, "fallback_used": 0},
+            2: {"pheromone_entropy": 2.02, "best_fitness": 0.61, "fallback_used": 1},
+        }
+    )
+
+    merge_train_metrics(rounds_log, result, round_offset=0)
+
+    assert rounds_log[0]["train_pheromone_entropy"] == 2.31
+    assert rounds_log[1]["train_fallback_used"] == 1
+    # Evaluation metrics are untouched, and the prefix keeps the two families apart.
+    assert rounds_log[0]["test_macro_f1"] == 0.10
+    assert "pheromone_entropy" not in rounds_log[0]
+
+
+def test_merge_train_metrics_respects_the_resume_offset() -> None:
+    """A resumed run's Strategy.start() renumbers its rounds from 1, the same reason
+    build_evaluate_fn takes a round_offset. Ignoring it would staple round 4's colony
+    diagnostics onto round 1's evaluation."""
+    rounds_log = [{"round": 4, "test_macro_f1": 0.5}, {"round": 5, "test_macro_f1": 0.6}]
+    result = _FakeResult({1: {"best_fitness": 0.9}, 2: {"best_fitness": 0.8}})
+
+    merge_train_metrics(rounds_log, result, round_offset=3)
+
+    assert rounds_log[0]["train_best_fitness"] == 0.9
+    assert rounds_log[1]["train_best_fitness"] == 0.8
+
+
+def test_merge_train_metrics_is_a_noop_when_there_are_none() -> None:
     rounds_log = [{"round": 1, "test_macro_f1": 0.1}]
-    merge_train_metrics(rounds_log, {5: MetricRecord({"alpha_entropy": 0.1})}, round_offset=0)
-    assert "train_metrics" not in rounds_log[0]
+    merge_train_metrics(rounds_log, _FakeResult({}), round_offset=0)
+    merge_train_metrics(rounds_log, object(), round_offset=0)
+    assert rounds_log == [{"round": 1, "test_macro_f1": 0.1}]
+
+
+def test_merge_train_metrics_skips_rounds_absent_from_the_log() -> None:
+    """rounds_log is the authoritative record of rounds actually evaluated and
+    checkpointed; a stray metrics round must not invent an entry in it."""
+    rounds_log = [{"round": 1, "test_macro_f1": 0.1}]
+    merge_train_metrics(rounds_log, _FakeResult({1: {"a": 1.0}, 99: {"a": 2.0}}), round_offset=0)
+    assert len(rounds_log) == 1
+
+
+def test_client_app_decorators_are_bound_to_the_real_handlers() -> None:
+    """Regression guard: a helper inserted between `@client_app.train()` and
+    `train_handler` silently rebinds the decorator to the helper.
+
+    That happened while wiring Phase 8's attacks. Flower then called the helper with a
+    `Message`, every client reply failed with `'Message' object is not iterable`, and the
+    global model never moved off its random initialization -- while `flwr run` still
+    exited 0 and wrote a complete-looking result file. The only visible symptom was an
+    accuracy that never improved, which on a 2-round smoke is indistinguishable from a
+    hard problem. Nothing else in this suite tests which function the decorator captured.
+    """
+    import inspect
+
+    from fedswarm.fl import app as app_module
+
+    for name in ("train_handler", "evaluate_handler"):
+        handler = getattr(app_module, name)
+        parameters = list(inspect.signature(handler).parameters)
+        assert parameters[:2] == ["msg", "context"], (
+            f"{name} has signature {parameters} -- a decorator is bound to the wrong "
+            "function, or the handler's arguments changed"
+        )

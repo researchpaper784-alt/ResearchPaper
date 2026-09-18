@@ -18,10 +18,21 @@ EXPERIMENT_DIR = REPO_ROOT / "configs" / "experiment"
 
 # configs/experiment/centralized*.yaml is a different, older config family
 # (scripts/run_experiment.py's OmegaConf-composed layers -- Phase 2, centralized
-# training) with no strategies/partitions/seeds grid at all; only the FL sweep
-# configs (scripts/run_sweep.py's schema) belong to this lint.
+# training) with no strategies/partitions/seeds grid at all.
+#
+# Two independent sweep-config schemas coexist in this directory (merge of two
+# parallel sessions' Phase 6 work, see docs/OPEN_QUESTIONS.md): this repo's own
+# `fedswarm.sweep`-driven shape (`strategies`/`partitions` as file-or-inline-override
+# entries, run by `scripts/run_sweep_granular.py`) -- what this lint checks -- and a
+# second shape (`strategies` as bare name strings, `regimes` instead of
+# `partitions`, `common` instead of `base_overrides`) run by `scripts/run_sweep.py`
+# over `fedswarm.utils.runner` (`main.yaml`, `ablation_all.yaml`, `robustness.yaml`).
+# Selecting on `partitions` (not just `strategies`, which both shapes have) is what
+# keeps the second family out of this lint.
 _ALL_EXPERIMENT_FILES = sorted(EXPERIMENT_DIR.glob("*.yaml"))
-EXPERIMENT_FILES = [p for p in _ALL_EXPERIMENT_FILES if "strategies" in yaml.safe_load(p.read_text())]
+EXPERIMENT_FILES = [
+    p for p in _ALL_EXPERIMENT_FILES if "partitions" in yaml.safe_load(p.read_text())
+]
 
 
 @pytest.fixture(autouse=True, scope="module")

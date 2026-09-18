@@ -1,389 +1,349 @@
-"""Phase 6, Step 6.2 -- fedswarm.sweep: config-grid expansion, run_id prediction,
-resume-skip, locking, ordering, and command construction. All pure Python, no live
-Flower runtime needed -- `run_sweep`'s subprocess call is injected via `runner`."""
+"""Phase 6 tests -- scripts/run_sweep.py.
+
+The sweep's job is to run 330+ cells unattended and resume correctly after an
+interruption. Everything that can go wrong there goes wrong *quietly*: a cell silently
+reused from the wrong seed, a torn manifest line swallowing a run, a machine that stalls
+instead of erroring. These test the decisions, not the subprocess plumbing.
+"""
 
 from __future__ import annotations
 
 import json
-import time
+import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
-from fedswarm.sweep import (
-    RunSpec,
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+from run_sweep import (  # noqa: E402
+    REPO_ROOT,
+    Cell,
+    _record_path,
     append_manifest,
-    build_run_config_arg,
-    execute_run,
-    expand_grid,
-    format_toml_value,
-    is_completed,
-    lock_path,
-    order_seed_first,
-    predict_run_id,
-    pyproject_flat_defaults,
-    release_lock,
-    run_sweep,
-    try_acquire_lock,
+    expand,
+    find_result,
+    format_run_config,
+    load_sweep,
+    preflight,
+    read_manifest,
 )
-from fedswarm.utils.results import make_run_id
+import run_sweep  # noqa: E402,F401
+
+SPEC = {
+    "name": "test",
+    "strategies": ["fedavg", "fedaco"],
+    "regimes": [
+        {"name": "iid", "regime": "iid"},
+        {"name": "dirichlet_0.3", "regime": "dirichlet", "alpha": 0.3},
+    ],
+    "seeds": [0, 1, 2],
+    "common": {"num-clients": 4, "num-rounds": 10},
+}
 
 
 # ======================================================================================
-# expand_grid / order_seed_first
+# Expansion
 # ======================================================================================
 
 
-def test_expand_grid_is_a_full_factorial() -> None:
-    strategies = [{"name": "fedavg", "overrides": {"strategy-name": "fedavg"}},
-                  {"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}]
-    partitions = [{"name": "iid", "overrides": {"regime": "iid"}},
-                  {"name": "dirichlet_0.3", "overrides": {"regime": "dirichlet", "alpha": 0.3}}]
-    seeds = [0, 1]
-
-    runs = expand_grid(strategies, partitions, seeds, base_overrides={"num-rounds": 5})
-
-    assert len(runs) == 2 * 2 * 2
-    labels = {r.label for r in runs}
-    assert "fedaco/dirichlet_0.3/seed=1" in labels
-    for run in runs:
-        assert run.overrides["num-rounds"] == 5
-        assert "seed" in run.overrides
+def test_expand_is_the_full_factorial() -> None:
+    cells = expand(SPEC)
+    assert len(cells) == 2 * 2 * 3
+    assert len({c.label for c in cells}) == 12  # every cell distinct
 
 
-def test_expand_grid_strategy_overrides_win_over_base_and_partition_on_key_collision() -> None:
-    strategies = [{"name": "s", "overrides": {"regime": "overridden-by-strategy"}}]
-    partitions = [{"name": "p", "overrides": {"regime": "from-partition"}}]
-    runs = expand_grid(strategies, partitions, [0], base_overrides={"regime": "from-base"})
-    assert runs[0].overrides["regime"] == "overridden-by-strategy"
+def test_seed_is_the_innermost_loop() -> None:
+    """So an interruption leaves whole (strategy, regime) groups finished rather than one
+    seed of everything -- a partial sweep is then still analysable for what it covered,
+    instead of having no complete group at all."""
+    labels = [c.label for c in expand(SPEC)]
+
+    assert labels[:3] == ["fedavg/iid/seed0", "fedavg/iid/seed1", "fedavg/iid/seed2"]
+    assert labels[3].startswith("fedavg/dirichlet_0.3/")
 
 
-def test_order_seed_first_groups_by_seed_preserving_within_seed_order() -> None:
-    strategies = [{"name": "a", "overrides": {}}, {"name": "b", "overrides": {}}]
-    partitions = [{"name": "p", "overrides": {}}]
-    runs = expand_grid(strategies, partitions, [0, 1, 2])
-    ordered = order_seed_first(runs)
+def test_regime_overrides_reach_the_run_config() -> None:
+    cells = expand(SPEC)
+    dirichlet = next(c for c in cells if c.regime_name == "dirichlet_0.3")
 
-    seeds_in_order = [r.overrides["seed"] for r in ordered]
-    # Every seed=0 run appears before every seed=1 run, which appears before seed=2.
-    assert seeds_in_order == sorted(seeds_in_order, key=lambda s: [0, 1, 2].index(s))
-    # Within seed=0, strategy 'a' still comes before 'b' (original order preserved).
-    seed0 = [r for r in ordered if r.overrides["seed"] == 0]
-    assert seed0[0].label.startswith("a/")
-    assert seed0[1].label.startswith("b/")
+    config = dirichlet.run_config(SPEC["common"])
+
+    assert config["regime"] == "dirichlet"
+    assert config["alpha"] == 0.3
+    assert config["strategy-name"] == "fedavg"
+    assert config["num-clients"] == 4
+    # `name` is the label, not a flwr run-config key -- passing it through would be
+    # rejected as undeclared with a bare "[code: 15]".
+    assert "name" not in config
+
+
+def test_load_sweep_rejects_an_incomplete_spec(tmp_path: Path) -> None:
+    path = tmp_path / "bad.yaml"
+    path.write_text(yaml.safe_dump({"strategies": ["fedavg"], "seeds": [0]}))
+
+    with pytest.raises(ValueError, match="regimes"):
+        load_sweep(path)
+
+
+def test_format_run_config_quotes_strings_only() -> None:
+    formatted = format_run_config({"strategy-name": "fedaco", "alpha": 0.3, "num-clients": 4})
+
+    assert "strategy-name='fedaco'" in formatted
+    assert "alpha=0.3" in formatted
+    assert "num-clients=4" in formatted
 
 
 # ======================================================================================
-# run_id prediction -- must match fl/app.py::main() exactly
+# Manifest / resume
 # ======================================================================================
 
 
-@pytest.fixture
-def sample_pyproject(tmp_path: Path) -> Path:
-    path = tmp_path / "pyproject.toml"
+def test_manifest_roundtrips(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.jsonl"
+    append_manifest(path, {"label": "fedavg/iid/seed0", "status": "completed"})
+    append_manifest(path, {"label": "fedaco/iid/seed0", "status": "completed"})
+
+    entries = read_manifest(path)
+
+    assert set(entries) == {"fedavg/iid/seed0", "fedaco/iid/seed0"}
+
+
+def test_manifest_survives_a_torn_final_line(tmp_path: Path) -> None:
+    """A hard kill mid-write leaves a partial line. That must cost one cell (which simply
+    re-runs), not the whole index -- which is the reason the manifest is JSON Lines rather
+    than one JSON document."""
+    path = tmp_path / "manifest.jsonl"
+    append_manifest(path, {"label": "fedavg/iid/seed0", "status": "completed"})
+    with path.open("a") as handle:
+        handle.write('{"label": "fedaco/iid/seed0", "sta')
+
+    entries = read_manifest(path)
+
+    assert set(entries) == {"fedavg/iid/seed0"}
+
+
+def test_missing_manifest_is_empty_not_an_error(tmp_path: Path) -> None:
+    assert read_manifest(tmp_path / "nope.jsonl") == {}
+
+
+# ======================================================================================
+# Result matching -- the variance-destroying bug class
+# ======================================================================================
+
+
+def _write_result(path: Path, run_config: dict, status: str = "completed") -> None:
     path.write_text(
-        """
-[tool.flwr.app.config]
-regime = "iid"
-num-clients = 2
-num-rounds = 2
-seed = 0
-strategy-name = "fedavg"
-"""
+        json.dumps(
+            {
+                "run_id": path.stem,
+                "status": status,
+                "config": {"strategy": run_config.get("strategy-name"), "run_config": run_config},
+                "rounds": [],
+                "final": {},
+            }
+        )
     )
-    return path
 
 
-def test_pyproject_flat_defaults_reads_the_config_table(sample_pyproject: Path) -> None:
-    defaults = pyproject_flat_defaults(sample_pyproject)
-    assert defaults == {
-        "regime": "iid",
-        "num-clients": 2,
-        "num-rounds": 2,
-        "seed": 0,
-        "strategy-name": "fedavg",
+def test_find_result_will_not_reuse_another_seeds_run(tmp_path: Path) -> None:
+    """Matching on too little is how a sweep silently reuses one seed's result for
+    another and destroys the variance every error bar in the paper depends on. The same
+    bug hit the Phase 5 search; this is the sweep's version of that guard."""
+    common = {"num-clients": 4, "num-rounds": 10}
+    seed0 = Cell("fedavg", "iid", 0, {"regime": "iid"})
+    seed1 = Cell("fedavg", "iid", 1, {"regime": "iid"})
+    _write_result(tmp_path / "a.json", seed0.run_config(common))
+
+    assert find_result(tmp_path, seed0, common) is not None
+    assert find_result(tmp_path, seed1, common) is None
+
+
+def test_find_result_will_not_reuse_another_regimes_run(tmp_path: Path) -> None:
+    common = {"num-clients": 4, "num-rounds": 10}
+    iid = Cell("fedavg", "iid", 0, {"regime": "iid"})
+    dirichlet = Cell("fedavg", "dirichlet_0.3", 0, {"regime": "dirichlet", "alpha": 0.3})
+    _write_result(tmp_path / "a.json", iid.run_config(common))
+
+    assert find_result(tmp_path, dirichlet, common) is None
+
+
+def test_find_result_ignores_incomplete_runs(tmp_path: Path) -> None:
+    """A crashed run must be retried, not counted as done."""
+    common = {"num-clients": 4}
+    cell = Cell("fedavg", "iid", 0, {"regime": "iid"})
+    _write_result(tmp_path / "a.json", cell.run_config(common), status="failed")
+
+    assert find_result(tmp_path, cell, common) is None
+
+
+def test_find_result_ignores_path_only_differences(tmp_path: Path) -> None:
+    """A cache or output directory that moved between machines says nothing about what
+    was computed, so it must not defeat resume."""
+    common = {"num-clients": 4, "cache-dir": "/local/cache"}
+    cell = Cell("fedavg", "iid", 0, {"regime": "iid"})
+    stored = cell.run_config({**common, "cache-dir": "/colab/cache"})
+    _write_result(tmp_path / "a.json", stored)
+
+    assert find_result(tmp_path, cell, common) is not None
+
+
+# ======================================================================================
+# Preflight
+# ======================================================================================
+
+
+def test_preflight_notes_but_does_not_block_on_more_clients_than_cores() -> None:
+    """Superseded diagnosis. A K=4 run that stalled at round 0 was recorded as CPU
+    oversubscription; it was not -- only 2 supernodes existed while `min-train-nodes=4`
+    waited for 4 that were never created. With `--num-supernodes 4` the same run completes
+    on the same 4-core box. More clients than cores is now a note about the ETA being
+    optimistic, not a refusal."""
+    warnings = preflight(num_clients=1000, skip=False)
+
+    notes = [w for w in warnings if "queue rather than run concurrently" in w]
+    assert notes, warnings
+    assert all(w.startswith("NOTE") for w in notes)
+
+
+def test_preflight_can_be_skipped() -> None:
+    assert preflight(num_clients=1000, skip=True) == []
+
+
+def test_preflight_is_quiet_when_resources_fit() -> None:
+    warnings = preflight(num_clients=1, skip=False)
+
+    assert not any("stalls silently" in w for w in warnings)
+
+
+def test_record_path_falls_back_to_absolute_outside_the_repo(tmp_path: Path) -> None:
+    """`Path.relative_to` raises rather than falling back, and `output-dir` is routinely
+    outside the clone -- Colab writes to Drive, Kaggle to /kaggle/working. An unguarded
+    call aborted this runner one cell into its first real sweep, *after* the run finished
+    but before the manifest append, so the completed run went unindexed too."""
+    outside = tmp_path / "elsewhere" / "result.json"
+
+    assert _record_path(outside) == str(outside)
+    assert Path(_record_path(outside)).is_absolute()
+
+    inside = REPO_ROOT / "results" / "fl" / "x.json"
+    assert _record_path(inside) == "results/fl/x.json"
+
+
+def test_a_result_with_no_manifest_entry_counts_as_done(tmp_path: Path) -> None:
+    """The result file is the authority; the manifest is an index over it. Gating resume
+    on the manifest too means a lost entry -- a torn line, a crash between the run
+    finishing and the append, a manifest not carried between machines -- silently
+    recomputes a cell whose result is sitting right there."""
+    common = {"num-clients": 4}
+    cell = Cell("fedavg", "iid", 0, {"regime": "iid"})
+    _write_result(tmp_path / "a.json", cell.run_config(common))
+
+    # Nothing in the manifest, but the result exists and is completed.
+    assert read_manifest(tmp_path / "missing.jsonl") == {}
+    assert find_result(tmp_path, cell, common) is not None
+
+
+def test_booleans_render_as_lowercase_toml() -> None:
+    """flwr parses the assembled --run-config string with tomli, where `False` is not a
+    valid value -- the whole string is rejected with a bare "[code: 15]" naming nothing.
+    `ablation_all.yaml`'s no_safety_fallback variant is exactly such a cell, so this bug
+    would have killed all 15 cells of the one ablation that separates "the colony helped"
+    from "the fallback protected it"."""
+    import tomllib
+
+    rendered = format_run_config({"aco-safety-fallback": False, "attack": "sign_flip", "n": 3})
+
+    assert "aco-safety-fallback=false" in rendered
+    # The real check: flwr's own parser must accept it.
+    tomllib.loads("\n".join(part.replace("=", " = ", 1) for part in rendered.split(" ")))
+
+
+def test_a_variantless_control_does_not_match_another_variants_result(tmp_path: Path) -> None:
+    """The `default` control in ablation_all.yaml and `clean` in robustness.yaml set no
+    keys, so matching on their own overrides alone matches ANY sibling variant sharing the
+    output dir. The control would be marked complete, never run, and every ablation delta
+    differenced against another ablation."""
+    common = {"num-clients": 4}
+    variants = [{"name": "default"}, {"name": "p_none", "aco-persistence": "none"}]
+    control = Cell("fedaco", "iid", 0, {}, variant="default")
+    ablated = Cell("fedaco", "iid", 0, {"aco-persistence": "none"}, variant="p_none")
+
+    _write_result(tmp_path / "a.json", ablated.run_config(common))
+
+    assert find_result(tmp_path, ablated, common, variants) is not None
+    assert find_result(tmp_path, control, common, variants) is None
+
+
+def test_configure_federation_is_required_not_optional() -> None:
+    """num-clients is this project's partitioning key; the Simulation Runtime's own
+    supernode count is `num_supernodes` and defaults to 2. Nothing in the repo ever set
+    it, so every sweep cell would have run 2 clients while recording num-clients=20 --
+    and in robustness.yaml a '10% malicious' cell would have had the entire participating
+    federation compromised."""
+    import inspect
+
+
+    source = inspect.getsource(run_sweep.main)
+    assert "configure_federation(" in source
+    assert "Refusing" in source, "a failed federation setup must abort, not warn"
+
+
+def test_a_variantless_control_still_matches_its_own_result(tmp_path: Path) -> None:
+    """The other half of the discrimination, and the one a key-presence check gets wrong.
+
+    Every variant key is declared in pyproject (it must be, or `flwr run` rejects it), so
+    it appears in EVERY resolved run_config carrying its default -- not only in the
+    variant that overrides it. Rejecting candidates that merely carry the key therefore
+    rejects the control's own result: verified on a live sweep, where `clean` was handed
+    its own file, reported "no result file" and would have re-run forever.
+    """
+    common = {"num-clients": 4}
+    variants = [{"name": "clean"}, {"name": "nofb", "aco-safety-fallback": False}]
+    control = Cell("fedaco", "iid", 0, {}, variant="clean")
+    ablated = Cell("fedaco", "iid", 0, {"aco-safety-fallback": False}, variant="nofb")
+
+    # As flwr resolves them: the declared default is present on the control's run too.
+    _write_result(tmp_path / "clean.json", {**control.run_config(common), "aco-safety-fallback": True})
+    _write_result(tmp_path / "nofb.json", ablated.run_config(common))
+
+    assert find_result(tmp_path, control, common, variants).name == "clean.json"
+    assert find_result(tmp_path, ablated, common, variants).name == "nofb.json"
+
+
+def test_two_variants_sharing_a_key_value_are_still_told_apart(tmp_path: Path) -> None:
+    """The Phase 7 penalty-shape ablation introduced the first pair of variants that
+    *share* an override value: `penalty_gini` sets both `aco-concentration-penalty=gini`
+    and `aco-gamma-entropy=0.25`, and `penalty_entropy_strong` sets the same gamma so the
+    shape is isolated from the level. If the discriminator let the shared gamma carry the
+    match, each would be handed the other's result and the ablation would difference a
+    variant against itself.
+    """
+    common = {"num-clients": 20}
+    variants = [
+        {"name": "default"},
+        {"name": "penalty_gini", "aco-concentration-penalty": "gini", "aco-gamma-entropy": 0.25},
+        {"name": "penalty_entropy_strong", "aco-gamma-entropy": 0.25},
+    ]
+    cells = {
+        "default": Cell("fedaco", "iid", 0, {}, variant="default"),
+        "penalty_gini": Cell(
+            "fedaco",
+            "iid",
+            0,
+            {"aco-concentration-penalty": "gini", "aco-gamma-entropy": 0.25},
+            variant="penalty_gini",
+        ),
+        "penalty_entropy_strong": Cell(
+            "fedaco", "iid", 0, {"aco-gamma-entropy": 0.25}, variant="penalty_entropy_strong"
+        ),
     }
-
-
-def test_predict_run_id_matches_fl_app_mains_own_hashing(sample_pyproject: Path) -> None:
-    """Reproduces fl/app.py::main()'s exact resolved_config construction by hand and
-    checks predict_run_id agrees -- this is the one thing resume-skip depends on
-    entirely; a mismatch here would mean the sweep runner can never recognize its
-    own completed runs."""
-    defaults = pyproject_flat_defaults(sample_pyproject)
-    overrides = {"strategy-name": "fedaco", "seed": 3, "regime": "dirichlet", "alpha": 0.3}
-
-    predicted = predict_run_id(defaults, overrides)
-
-    merged_run_config = {**defaults, **overrides}
-    seed = int(merged_run_config.get("seed", 0))
-    strategy_name = str(merged_run_config.get("strategy-name", "fedavg")).lower()
-    resolved_config = {"run_config": merged_run_config, "strategy": strategy_name, "seed": seed}
-    expected = make_run_id(resolved_config, seed)
-
-    assert predicted == expected
-
-
-def test_predict_run_id_changes_when_a_relevant_key_changes(sample_pyproject: Path) -> None:
-    defaults = pyproject_flat_defaults(sample_pyproject)
-    id_a = predict_run_id(defaults, {"seed": 0})
-    id_b = predict_run_id(defaults, {"seed": 1})
-    assert id_a != id_b
-
-
-def test_is_completed_true_only_for_a_real_completed_status(tmp_path: Path) -> None:
-    output_dir = tmp_path / "fl"
-    output_dir.mkdir()
-    (output_dir / "abc_0.json").write_text(json.dumps({"status": "completed"}))
-    (output_dir / "def_0.json").write_text(json.dumps({"status": "failed"}))
-
-    assert is_completed("abc_0", output_dir) is True
-    assert is_completed("def_0", output_dir) is False
-    assert is_completed("missing_0", output_dir) is False
-
-
-# ======================================================================================
-# --run-config command-string construction
-# ======================================================================================
-
-
-def test_format_toml_value_covers_every_type() -> None:
-    assert format_toml_value(True) == "true"
-    assert format_toml_value(False) == "false"
-    assert format_toml_value(3) == "3"
-    assert format_toml_value(0.3) == "0.3"
-    assert format_toml_value("dirichlet") == '"dirichlet"'
-    assert format_toml_value('has "quotes"') == '"has \\"quotes\\""'
-
-
-def test_build_run_config_arg_joins_key_value_pairs() -> None:
-    arg = build_run_config_arg({"regime": "dirichlet", "alpha": 0.3, "seed": 2})
-    assert arg == 'regime="dirichlet" alpha=0.3 seed=2'
-
-
-def test_execute_run_builds_the_real_flwr_cli_invocation() -> None:
-    captured = {}
-
-    def fake_runner(cmd: list[str]) -> int:
-        captured["cmd"] = cmd
-        return 0
-
-    run = RunSpec(label="x", group="g", overrides={"strategy-name": "fedaco", "seed": 0})
-    code = execute_run(run, runner=fake_runner)
-
-    assert code == 0
-    assert captured["cmd"][:3] == ["flwr", "run", "."]
-    assert "--stream" in captured["cmd"]
-    assert "--run-config" in captured["cmd"]
-    run_config_idx = captured["cmd"].index("--run-config")
-    assert captured["cmd"][run_config_idx + 1] == 'strategy-name="fedaco" seed=0'
-
-
-# ======================================================================================
-# Locking
-# ======================================================================================
-
-
-def test_try_acquire_lock_then_second_attempt_fails(tmp_path: Path) -> None:
-    assert try_acquire_lock("run1", tmp_path) is True
-    assert try_acquire_lock("run1", tmp_path) is False  # still held
-
-
-def test_try_acquire_lock_succeeds_after_release(tmp_path: Path) -> None:
-    try_acquire_lock("run1", tmp_path)
-    release_lock("run1", tmp_path)
-    assert try_acquire_lock("run1", tmp_path) is True
-
-
-def test_stale_lock_is_treated_as_crashed_and_replaced(tmp_path: Path) -> None:
-    try_acquire_lock("run1", tmp_path, timeout_s=3600)
-    # Backdate the lock file's mtime to simulate a crashed session from long ago.
-    old_time = time.time() - 7200
-    path = lock_path("run1", tmp_path)
-    import os
-
-    os.utime(path, (old_time, old_time))
-
-    assert try_acquire_lock("run1", tmp_path, timeout_s=3600) is True
-
-
-def test_release_lock_on_a_missing_lock_does_not_raise(tmp_path: Path) -> None:
-    release_lock("never-acquired", tmp_path)  # must not raise
-
-
-# ======================================================================================
-# run_sweep orchestration
-# ======================================================================================
-
-
-def test_run_sweep_skips_already_completed_runs(tmp_path: Path, sample_pyproject: Path) -> None:
-    output_dir = tmp_path / "fl"
-    output_dir.mkdir()
-    defaults = pyproject_flat_defaults(sample_pyproject)
-    run = RunSpec(label="x", group="g", overrides={"seed": 0})
-    run_id = predict_run_id(defaults, run.overrides)
-    (output_dir / f"{run_id}.json").write_text(json.dumps({"status": "completed"}))
-
-    calls = []
-    entries = run_sweep(
-        [run],
-        pyproject_path=sample_pyproject,
-        output_dir=output_dir,
-        manifest_path=tmp_path / "manifest.jsonl",
-        lock_dir=tmp_path / "locks",
-        runner=lambda cmd: calls.append(cmd) or 0,
-    )
-
-    assert entries[0]["status"] == "skipped_completed"
-    assert calls == []  # never actually invoked flwr
-
-
-def test_run_sweep_dry_run_touches_nothing(tmp_path: Path, sample_pyproject: Path) -> None:
-    run = RunSpec(label="x", group="g", overrides={"seed": 0})
-    calls = []
-
-    entries = run_sweep(
-        [run],
-        pyproject_path=sample_pyproject,
-        output_dir=tmp_path / "fl",
-        manifest_path=tmp_path / "manifest.jsonl",
-        lock_dir=tmp_path / "locks",
-        dry_run=True,
-        runner=lambda cmd: calls.append(cmd) or 0,
-    )
-
-    assert entries[0]["status"] == "planned"
-    assert calls == []
-    assert not (tmp_path / "manifest.jsonl").exists()
-    assert not (tmp_path / "locks").exists()
-
-
-def test_run_sweep_executes_and_records_completed_status(tmp_path: Path, sample_pyproject: Path) -> None:
-    output_dir = tmp_path / "fl"
-    defaults = pyproject_flat_defaults(sample_pyproject)
-    run = RunSpec(label="x", group="g", overrides={"seed": 0})
-    run_id = predict_run_id(defaults, run.overrides)
-
-    def fake_runner(cmd: list[str]) -> int:
-        # Simulate the FL harness actually writing its result file.
-        output_dir.mkdir(parents=True, exist_ok=True)
-        (output_dir / f"{run_id}.json").write_text(json.dumps({"status": "completed"}))
-        return 0
-
-    manifest_path = tmp_path / "manifest.jsonl"
-    entries = run_sweep(
-        [run],
-        pyproject_path=sample_pyproject,
-        output_dir=output_dir,
-        manifest_path=manifest_path,
-        lock_dir=tmp_path / "locks",
-        runner=fake_runner,
-    )
-
-    assert entries[0]["status"] == "completed"
-    assert manifest_path.exists()
-    logged = json.loads(manifest_path.read_text().strip().splitlines()[0])
-    assert logged["status"] == "completed"
-    assert not lock_path(run_id, tmp_path / "locks").exists()  # released
-
-
-def test_run_sweep_records_failed_when_return_code_nonzero_and_no_result(
-    tmp_path: Path, sample_pyproject: Path
-) -> None:
-    run = RunSpec(label="x", group="g", overrides={"seed": 0})
-    entries = run_sweep(
-        [run],
-        pyproject_path=sample_pyproject,
-        output_dir=tmp_path / "fl",
-        manifest_path=tmp_path / "manifest.jsonl",
-        lock_dir=tmp_path / "locks",
-        runner=lambda cmd: 1,
-    )
-    assert entries[0]["status"] == "failed"
-
-
-def test_run_sweep_records_unknown_when_return_code_zero_but_no_result(
-    tmp_path: Path, sample_pyproject: Path
-) -> None:
-    """The exact ambiguous case this repo has real history with: `flwr run` exits
-    cleanly (return code 0) but the FL round itself never produced a completed
-    result (docs/OPEN_QUESTIONS.md's heartbeat saga)."""
-    run = RunSpec(label="x", group="g", overrides={"seed": 0})
-    entries = run_sweep(
-        [run],
-        pyproject_path=sample_pyproject,
-        output_dir=tmp_path / "fl",
-        manifest_path=tmp_path / "manifest.jsonl",
-        lock_dir=tmp_path / "locks",
-        runner=lambda cmd: 0,
-    )
-    assert entries[0]["status"] == "unknown"
-
-
-def test_run_sweep_skips_a_locked_run_without_releasing_the_other_holders_lock(
-    tmp_path: Path, sample_pyproject: Path
-) -> None:
-    run = RunSpec(label="x", group="g", overrides={"seed": 0})
-    defaults = pyproject_flat_defaults(sample_pyproject)
-    run_id = predict_run_id(defaults, run.overrides)
-    lock_dir = tmp_path / "locks"
-    try_acquire_lock(run_id, lock_dir)  # simulate another in-flight sweep process
-
-    calls = []
-    entries = run_sweep(
-        [run],
-        pyproject_path=sample_pyproject,
-        output_dir=tmp_path / "fl",
-        manifest_path=tmp_path / "manifest.jsonl",
-        lock_dir=lock_dir,
-        runner=lambda cmd: calls.append(cmd) or 0,
-    )
-
-    assert entries[0]["status"] == "skipped_locked"
-    assert calls == []
-    assert lock_path(run_id, lock_dir).exists()  # the other holder's lock, untouched
-
-
-def test_append_manifest_writes_one_json_line(tmp_path: Path) -> None:
-    manifest_path = tmp_path / "manifest.jsonl"
-    append_manifest(manifest_path, {"run_id": "a"})
-    append_manifest(manifest_path, {"run_id": "b"})
-    lines = manifest_path.read_text().strip().splitlines()
-    assert [json.loads(line)["run_id"] for line in lines] == ["a", "b"]
-
-
-# ======================================================================================
-# resolve_entry_overrides -- referencing standalone configs/strategy|data/*.yaml files
-# ======================================================================================
-
-
-def test_resolve_entry_overrides_inline() -> None:
-    from fedswarm.sweep import resolve_entry_overrides
-
-    entry = {"name": "fedavg", "overrides": {"strategy-name": "fedavg"}}
-    assert resolve_entry_overrides(entry) == {"strategy-name": "fedavg"}
-
-
-def test_resolve_entry_overrides_from_file(tmp_path: Path) -> None:
-    from fedswarm.sweep import resolve_entry_overrides
-
-    strategy_dir = tmp_path / "configs" / "strategy"
-    strategy_dir.mkdir(parents=True)
-    (strategy_dir / "fedaco.yaml").write_text("strategy-name: fedaco\nfedaco-target-sum: 0.9\n")
-
-    entry = {"name": "fedaco", "file": "configs/strategy/fedaco.yaml"}
-    overrides = resolve_entry_overrides(entry, base_dir=tmp_path)
-    assert overrides == {"strategy-name": "fedaco", "fedaco-target-sum": 0.9}
-
-
-def test_expand_grid_resolves_file_referenced_entries(tmp_path: Path) -> None:
-    strategy_dir = tmp_path / "configs" / "strategy"
-    strategy_dir.mkdir(parents=True)
-    (strategy_dir / "fedavg.yaml").write_text("strategy-name: fedavg\n")
-
-    strategies = [{"name": "fedavg", "file": "configs/strategy/fedavg.yaml"}]
-    partitions = [{"name": "iid", "overrides": {"regime": "iid"}}]
-
-    runs = expand_grid(strategies, partitions, [0], base_dir=tmp_path)
-    assert runs[0].overrides["strategy-name"] == "fedavg"
-    assert runs[0].overrides["regime"] == "iid"
+    # As flwr resolves them: every declared key is present on every run, with its default.
+    defaults = {"aco-concentration-penalty": "entropy", "aco-gamma-entropy": 0.1}
+    for name, cell in cells.items():
+        _write_result(tmp_path / f"{name}.json", {**defaults, **cell.run_config(common)})
+
+    for name, cell in cells.items():
+        found = find_result(tmp_path, cell, common, variants)
+        assert found is not None and found.name == f"{name}.json", name

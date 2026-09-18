@@ -318,36 +318,38 @@ def test_scaffold_configure_train_merges_global_c_into_outgoing_arrays() -> None
 
 
 def test_factory_wires_every_fedaco_ablation_knob_from_run_config() -> None:
+    # Key prefix is "aco-", not "fedaco-" -- strategies/factory.py::strategy_from_run_config
+    # is the ground truth for the real names (verified by grep, not assumed).
     run_config = {
         "strategy-name": "fedaco",
         "num-rounds": 5,
-        "fedaco-num-levels": 7,
-        "fedaco-level-low": 0.1,
-        "fedaco-level-high": 2.0,
-        "fedaco-target-sum": 0.8,
-        "fedaco-ants-start": 20,
-        "fedaco-ants-end": 5,
-        "fedaco-iters-start": 8,
-        "fedaco-iters-end": 2,
-        "fedaco-trim-fraction": 0.3,
-        "fedaco-safety-fallback": False,
-        "fedaco-fitness-mode": "data_free",
-        "fedaco-a-exponent": 2.0,
-        "fedaco-b-exponent": 3.0,
-        "fedaco-q0": 0.5,
-        "fedaco-rho": 0.2,
-        "fedaco-tau-min": 0.05,
-        "fedaco-tau-max": 5.0,
-        "fedaco-tau0": 2.0,
-        "fedaco-rho-round": 0.4,
-        "fedaco-pheromone-persistence": "none",
-        "fedaco-gamma-alignment": 1.5,
-        "fedaco-gamma-dispersion": 0.7,
-        "fedaco-gamma-entropy": 0.2,
-        "fedaco-beta-alignment": 3.0,
-        "fedaco-beta-drift": 1.5,
-        "fedaco-beta-val-improvement": 0.5,
-        "fedaco-beta-data-size": 0.25,
+        "aco-num-levels": 7,
+        "aco-level-low": 0.1,
+        "aco-level-high": 2.0,
+        "aco-target-sum": 0.8,
+        "aco-ants-start": 20,
+        "aco-ants-end": 5,
+        "aco-iters-start": 8,
+        "aco-iters-end": 2,
+        "aco-trim-fraction": 0.3,
+        "aco-safety-fallback": False,
+        "aco-fitness-mode": "data_free",
+        "aco-pheromone-exp": 2.0,
+        "aco-heuristic-exp": 3.0,
+        "aco-q0": 0.5,
+        "aco-rho": 0.2,
+        "aco-tau-min": 0.05,
+        "aco-tau-max": 5.0,
+        "aco-tau0": 2.0,
+        "aco-rho-round": 0.4,
+        "aco-persistence": "none",
+        "aco-gamma-alignment": 1.5,
+        "aco-gamma-dispersion": 0.7,
+        "aco-gamma-entropy": 0.2,
+        "aco-beta-alignment": 3.0,
+        "aco-beta-drift": 1.5,
+        "aco-beta-val-improvement": 0.5,
+        "aco-beta-data-size": 0.25,
     }
     strategy = strategy_from_run_config(run_config)
     cfg = strategy.aco_config
@@ -376,4 +378,4 @@ def test_factory_wires_every_fedaco_ablation_knob_from_run_config() -> None:
 
 def test_factory_fedaco_server_val_mode_requires_model_val_loader_device() -> None:
     with pytest.raises(ValueError):
-        strategy_from_run_config({"strategy-name": "fedaco", "fedaco-fitness-mode": "server_val"})
+        strategy_from_run_config({"strategy-name": "fedaco", "aco-fitness-mode": "server_val"})

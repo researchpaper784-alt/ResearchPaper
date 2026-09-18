@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Literal
+from typing import Iterable
 
 import torch
 from flwr.app import ArrayRecord, ConfigRecord, Message, MetricRecord
@@ -27,35 +27,16 @@ from flwr.serverapp.strategy import FedAvg
 from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig, run_colony
-from fedswarm.aco.controls import coordinate_grid_search, genetic_algorithm_search, pso_search, random_search
 from fedswarm.aco.fitness import (
-    BudgetedFitness,
     DataFreeFitness,
     DataFreeFitnessConfig,
-    Fitness,
     ServerValFitness,
+    corner_margin,
 )
 from fedswarm.aco.gram import apply_delta, flatten_state_dicts, precompute_gram
 from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix, desirability_scores
 from fedswarm.aco.pheromone import Pheromone, PheromoneConfig
 from fedswarm.aco.schedules import colony_budget, level_set
-
-FitnessMode = Literal["data_free", "server_val", "client_probe"]
-
-# Plan §7, ablation A1: "replace the colony with random search, coordinate grid
-# search, PSO, and a GA -- identical fitness function, identical number of
-# evaluations." "aco" is the real method; every other value routes through the
-# matching aco/controls.py function instead of run_colony, both driven by the exact
-# same BudgetedFitness-wrapped Fitness object and the exact same per-round budget
-# colony_budget() would have given the real colony this round.
-SearchMethod = Literal["aco", "random", "coordinate_grid", "pso", "ga"]
-
-_CONTROL_SEARCH_FNS = {
-    "random": random_search,
-    "coordinate_grid": coordinate_grid_search,
-    "pso": pso_search,
-    "ga": genetic_algorithm_search,
-}
 
 
 @dataclass
@@ -66,7 +47,8 @@ class FedACOConfig:
     # Global shrinkage s (plan §4.1) is exposed as a fixed config value, not searched
     # per-ant as an extra decision variable -- a deliberate scope reduction to keep the
     # colony's construction graph exactly the K-station one §4.2 describes. Ablating it
-    # (sweeping this value, not searching it) is Phase 7's A7; see docs/OPEN_QUESTIONS.md.
+    # (sweeping this value, not searching it) is tracked as Phase 7 work; see
+    # docs/OPEN_QUESTIONS.md.
     target_sum: float = 1.0
     num_rounds: int = 1  # must match Strategy.start()'s num_rounds for the budget decay (§4.7) to track real progress
     ants_start: int = 30
@@ -75,13 +57,18 @@ class FedACOConfig:
     iters_end: int = 4
     trim_fraction: float = 0.2
     safety_fallback: bool = True
-    # A3 ablation axis (plan §4.4). "server_val" needs `model`/`val_loader`/`device`
-    # passed to FedACO's constructor; "client_probe" is not wired for live execution
-    # yet (docs/OPEN_QUESTIONS.md's Phase 4 entry) -- selecting it raises, not silently
-    # falls back to data_free.
-    fitness_mode: FitnessMode = "data_free"
-    # A1 ablation axis (plan §7) -- see SearchMethod/_CONTROL_SEARCH_FNS above.
-    search_method: SearchMethod = "aco"
+    # Seeds the colony's own torch.Generator, derived per round as
+    # f(seed, server_round) -- see `aggregate_train`. Set from the run's `seed` so the
+    # colony's stochastic exploration is reproducible under the same determinism
+    # contract as the rest of the codebase (CLAUDE.md), rather than riding on whatever
+    # state the ServerApp process happens to have left in global torch RNG.
+    seed: int = 0
+    # "data_free" (the method as proposed, the only mode wired into the normal round
+    # loop) or "server_val" (upper-bound reference; requires model/val_loader/device on
+    # the strategy and a heavily reduced colony budget). "client_probe" is deliberately
+    # not selectable here: `ClientProbeFitness` implements the aggregation side only,
+    # and its broadcast/collect round-trip is Phase 7 work -- see docs/OPEN_QUESTIONS.md.
+    fitness_mode: str = "data_free"
     colony: ColonyConfig = field(default_factory=ColonyConfig)
     pheromone: PheromoneConfig = field(default_factory=PheromoneConfig)
     fitness: DataFreeFitnessConfig = field(default_factory=DataFreeFitnessConfig)
@@ -94,24 +81,27 @@ class FedACO(FedAvg):
         *args,
         aco_config: FedACOConfig | None = None,
         model: torch.nn.Module | None = None,
-        val_loader: DataLoader | None = None,
+        val_loader: "DataLoader | None" = None,
         device: torch.device | None = None,
         **kwargs,
     ) -> None:
+        """`model`/`val_loader`/`device` are only needed for
+        `aco_config.fitness_mode="server_val"` (same pattern as FedLAW, which needs the
+        same three) -- the default `data_free` mode ignores them entirely, which is the
+        whole point of the method as proposed."""
         super().__init__(*args, **kwargs)
         self.aco_config = aco_config or FedACOConfig()
+        if self.aco_config.fitness_mode not in ("data_free", "server_val"):
+            raise ValueError(
+                f"Unknown fitness_mode {self.aco_config.fitness_mode!r} "
+                "(expected 'data_free' or 'server_val'; 'client_probe' needs the "
+                "broadcast/collect round-trip that is Phase 7 work)"
+            )
         if self.aco_config.fitness_mode == "server_val" and (
             model is None or val_loader is None or device is None
         ):
             raise ValueError(
                 "fitness_mode='server_val' requires model, val_loader, and device"
-            )
-        if self.aco_config.fitness_mode == "client_probe":
-            raise NotImplementedError(
-                "fitness_mode='client_probe' needs the broadcast/collect round-trip "
-                "documented as not-yet-wired in docs/OPEN_QUESTIONS.md's Phase 4 "
-                "entry -- ClientProbeFitness only implements report-aggregation, "
-                "not live execution through this strategy."
             )
         self.model = model
         self.val_loader = val_loader
@@ -123,18 +113,13 @@ class FedACO(FedAvg):
         self._current_arrays: ArrayRecord | None = None
         self.fallback_count = 0
         self.round_count = 0
-
-    def _build_fitness(
-        self,
-        gram,
-        global_state: dict,
-        deltas: torch.Tensor,
-        shapes: list[tuple[str, torch.Size]],
-    ) -> Fitness:
-        if self.aco_config.fitness_mode == "server_val":
-            assert self.model is not None and self.val_loader is not None and self.device is not None
-            return ServerValFitness(self.model, global_state, deltas, shapes, self.val_loader, self.device)
-        return DataFreeFitness(gram, self.aco_config.fitness)
+        # Set by fl/app.py when resuming. `Strategy.start()` renumbers its rounds from 1
+        # on every invocation -- the same reason `build_evaluate_fn` needs an offset -- so
+        # a run resumed after round 50 would otherwise re-seed the colony with round 1's
+        # draws and restart the ant/iteration decay from its start-of-run budget. A
+        # resumed cell would not be the same experiment as an uninterrupted one, which
+        # breaks the determinism contract in CLAUDE.md.
+        self.round_offset = 0
 
     def configure_train(
         self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid
@@ -181,8 +166,15 @@ class FedACO(FedAvg):
         gram = precompute_gram(deltas, trim_fraction=self.aco_config.trim_fraction)
         gram_time_ms = (time.perf_counter() - gram_start) * 1000.0
 
+        d_k = desirability_scores(gram, num_examples, val_improvement, self.aco_config.heuristics)
+        eta = desirability_matrix(d_k, self.levels)
+
+        tau0 = self.pheromone.begin_round(client_ids)
         num_ants, num_iterations = colony_budget(
-            self.round_count,
+            # True round, not a process-local counter: on a resumed run `round_count`
+            # restarts at 0 while `num_rounds` is still the total, so the budget decay
+            # would replay from the start-of-run ant count.
+            self.round_count + int(self.round_offset),
             self.aco_config.num_rounds,
             self.aco_config.ants_start,
             self.aco_config.ants_end,
@@ -190,50 +182,47 @@ class FedACO(FedAvg):
             self.aco_config.iters_end,
         )
         base_weights = num_examples / num_examples.sum()
-        fitness = self._build_fitness(gram, global_state, deltas, shapes)
-
-        pheromone_entropy: float | None = None
-        if self.aco_config.search_method == "aco":
-            d_k = desirability_scores(gram, num_examples, val_improvement, self.aco_config.heuristics)
-            eta = desirability_matrix(d_k, self.levels)
-            tau0 = self.pheromone.begin_round(client_ids)
-            colony_result = run_colony(
-                tau0,
-                eta,
-                self.levels,
-                base_weights,
-                fitness.evaluate,
-                num_ants,
-                num_iterations,
-                self.aco_config.colony,
-                target_sum=self.aco_config.target_sum,
+        if self.aco_config.fitness_mode == "server_val":
+            assert self.model is not None and self.val_loader is not None and self.device is not None
+            fitness = ServerValFitness(
+                self.model, global_state, deltas, shapes, self.val_loader, self.device
             )
-            search_alpha, search_fitness = colony_result.alpha_best, colony_result.best_fitness
-            self.pheromone.end_round(client_ids, colony_result.tau_final)
-            pheromone_entropy = self.pheromone.entropy(client_ids)
-            realized_ants, realized_iterations = colony_result.realized_ants, colony_result.realized_iterations
         else:
-            # A1 (plan §7): identical fitness function, identical evaluation budget,
-            # no pheromone -- these controls have no notion of cross-round memory.
-            budget = num_ants * num_iterations
-            budgeted_fitness = BudgetedFitness(fitness, budget)
-            search_fn = _CONTROL_SEARCH_FNS[self.aco_config.search_method]
-            control_result = search_fn(
-                self.levels, base_weights, budgeted_fitness, budget, target_sum=self.aco_config.target_sum
-            )
-            search_alpha, search_fitness = control_result.alpha_best, control_result.best_fitness
-            realized_ants, realized_iterations = control_result.evaluations_used, 1
+            fitness = DataFreeFitness(gram, self.aco_config.fitness)
+
+        # Derived per round rather than once per run, so a resumed run (fl/app.py
+        # checkpoints every round) reproduces the same colony trajectory it would have
+        # taken uninterrupted -- `server_round` is authoritative for that, not a
+        # process-local counter.
+        true_round = int(server_round) + int(self.round_offset)
+        generator = torch.Generator().manual_seed(
+            (int(self.aco_config.seed) & 0xFFFF_FFFF) * 1_000_003 + true_round
+        )
+
+        colony_result = run_colony(
+            tau0,
+            eta,
+            self.levels,
+            base_weights,
+            fitness.evaluate,
+            num_ants,
+            num_iterations,
+            self.aco_config.colony,
+            target_sum=self.aco_config.target_sum,
+            generator=generator,
+        )
 
         fedavg_alpha = base_weights * self.aco_config.target_sum
         fedavg_fitness = fitness.evaluate(fedavg_alpha)
 
-        fallback_used = self.aco_config.safety_fallback and search_fitness <= fedavg_fitness
+        fallback_used = self.aco_config.safety_fallback and colony_result.best_fitness <= fedavg_fitness
         if fallback_used:
             self.fallback_count += 1
             alpha_final = fedavg_alpha
         else:
-            alpha_final = search_alpha
+            alpha_final = colony_result.alpha_best
 
+        self.pheromone.end_round(client_ids, colony_result.tau_final)
         self.round_count += 1
 
         combined_delta = alpha_final @ deltas
@@ -241,30 +230,84 @@ class FedACO(FedAvg):
         arrays_out = ArrayRecord(new_state)
 
         aco_time_ms = (time.perf_counter() - t_start) * 1000.0
-        metrics: dict[str, float | int | list[float] | list[int]] = {
-            "alpha_entropy": _entropy(alpha_final),
-            "alpha_max": float(alpha_final.max()),
-            # MetricRecord's real value type is int | float | list[int] | list[float]
-            # and explicitly rejects bool (verified: flwr/app/message/metricrecord.py's
-            # is_valid() checks `isinstance(v, bool)` even though bool subclasses int in
-            # Python) -- 0/1, not True/False.
-            "fallback_used": int(fallback_used),
-            "fallback_count": self.fallback_count,
-            "aco_time_ms": aco_time_ms,
-            "gram_time_ms": gram_time_ms,
-            "best_fitness": search_fitness,
-            "fedavg_fitness": fedavg_fitness,
-            "realized_ants": realized_ants,
-            "realized_iterations": realized_iterations,
-            "alpha": alpha_final.tolist(),
-            # MetricRecord list values are int | float only (verified: no list[str]
-            # support) -- client_ids are numeric partition ids under the hood, so
-            # int(...) round-trips exactly; the str keys stay internal to Pheromone.
-            "participating_client_ids": [int(c) for c in client_ids],
-        }
-        if pheromone_entropy is not None:
-            metrics["pheromone_entropy"] = pheromone_entropy
-        return arrays_out, MetricRecord(metrics)
+        # Flower stores exactly what aggregate_train returns as the round's client
+        # metrics, so a hand-built record silently drops everything the clients reported:
+        # `is_malicious` (Phase 8 -- for the strategy under test in the robustness
+        # sweep), `update_norm`, `train_loss_before/after`, `num-examples`. Every baseline
+        # carries those and FedACO would not, which is exactly backwards. Folded in first
+        # so the ACO-specific keys below still win on any name collision.
+        aggregated = _weighted_client_metrics(client_metrics, num_examples)
+        metrics_out = MetricRecord(
+            {
+                **aggregated,
+                "alpha_entropy": _entropy(alpha_final),
+                "alpha_max": float(alpha_final.max()),
+                # MetricRecord's real value type is int | float | list[int] | list[float]
+                # and explicitly rejects bool (verified: flwr/app/message/metricrecord.py's
+                # is_valid() checks `isinstance(v, bool)` even though bool subclasses int in
+                # Python) -- 0/1, not True/False.
+                "fallback_used": int(fallback_used),
+                "fallback_count": self.fallback_count,
+                "aco_time_ms": aco_time_ms,
+                "gram_time_ms": gram_time_ms,
+                "best_fitness": colony_result.best_fitness,
+                "fedavg_fitness": fedavg_fitness,
+                "pheromone_entropy": self.pheromone.entropy(client_ids),
+                # trace(G)/K, the dispersion scale. Logged per round because a run whose
+                # client updates are far larger than the fitness terms assume is the
+                # failure mode the normalization in `DataFreeFitness` exists to prevent
+                # -- and `fallback_used` cannot detect it (both sides of that comparison
+                # use the same fitness). Pair it with `pheromone_entropy`: entropy pinned
+                # at log(num_levels) means tau stayed uniform and the colony degenerated
+                # to heuristic-greedy selection.
+                "delta_mean_sq_norm": gram.mean_sq_norm,
+                # F(best single-client vertex) - F(FedAvg point), exact and O(K^2).
+                # Positive means the fitness itself ranks "discard every client but one"
+                # above the aggregation this method exists to improve on -- a colony
+                # working correctly toward a degenerate answer, which is indistinguishable
+                # in every other logged field from a colony working well. Dispersion is a
+                # weighted variance and is exactly zero at a vertex, so only
+                # `gamma_entropy * log K` stands against it, and that guard weakens as K
+                # falls. Always computed against the data-free fitness, even under
+                # `fitness_mode="server_val"`, so the number means the same thing across
+                # rounds and modes.
+                "corner_margin": corner_margin(
+                    gram, base_weights, self.aco_config.fitness
+                ),
+                "realized_ants": colony_result.realized_ants,
+                "realized_iterations": colony_result.realized_iterations,
+                "alpha": alpha_final.tolist(),
+                # MetricRecord list values are int | float only (verified: no list[str]
+                # support) -- client_ids are numeric partition ids under the hood, so
+                # int(...) round-trips exactly; the str keys stay internal to Pheromone.
+                "participating_client_ids": [int(c) for c in client_ids],
+            }
+        )
+        return arrays_out, metrics_out
+
+
+def _weighted_client_metrics(
+    client_metrics: list, num_examples: torch.Tensor
+) -> dict[str, float]:
+    """Data-size-weighted mean of every scalar the clients reported.
+
+    Matches how Flower's own FedAvg aggregates client metrics, so FedACO's rows carry the
+    same fields as every baseline's and a result file can be read the same way regardless
+    of strategy.
+    """
+    total = float(num_examples.sum()) or 1.0
+    weights = [float(n) / total for n in num_examples]
+    out: dict[str, float] = {}
+    keys = {k for record in client_metrics for k in dict(record)}
+    for key in sorted(keys):
+        values = []
+        for weight, record in zip(weights, client_metrics):
+            value = dict(record).get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values.append(weight * float(value))
+        if len(values) == len(client_metrics):
+            out[key] = sum(values)
+    return out
 
 
 def _entropy(alpha: torch.Tensor, eps: float = 1e-12) -> float:

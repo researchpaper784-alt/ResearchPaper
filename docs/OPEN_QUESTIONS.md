@@ -478,3 +478,391 @@ out from under the old file. Not fixing this now (would mean hashing only the ke
 a given strategy actually reads, a real redesign of `make_run_id`'s contract);
 flagging it so a future "why did resume-skip re-run something identical" question
 has an answer on record.
+## Phase 4 -- closed items, and the two residuals that remain open
+
+**Closed 2026-09-17** (see docs/EXPERIMENT_LOG.md for measurements):
+
+- The dispersion term's scale was silently disabling the colony for any config beyond
+  `lr=0.01, local-epochs=1`. Fixed by dividing by `trace(G)/K`; guarded by two new tests.
+- No FedACO knob was reachable from `run_config` (the factory forwarded only
+  `num-rounds`), which made the Phase 7 A1 persistence ablation and the `target_sum`
+  shrinkage sweep literally unrunnable. All knobs are now declared in
+  `[tool.flwr.app.config]` as `aco-*` keys.
+- The colony's RNG rode on global torch RNG; it now takes a `torch.Generator` seeded
+  from `(seed, server_round)`.
+- `fitness_mode` is now selectable between `data_free` and `server_val`.
+- `test_overhead` was asserting an unmeasured 15%; tightened to the plan's 5% with the
+  real K=20 number recorded.
+
+### Residual 1 -- the deposit floor can still zero out, just not from scale
+
+`colony.py` deposits `rho * Q * max(F, 0)`. Normalization removed the *scale-driven* path
+into that floor, but F can still be negative on its own terms: with dispersion now
+normalized to ~1, a round whose client updates have no consensus direction (alignment
+near 0) yields F ~ -1 for every candidate, and the same degeneracy follows -- uniform
+tau, `tau^a * eta^b` collapsing to `eta^b`. This was observed directly while measuring
+overhead with isotropic-noise deltas: `pheromone_entropy` came back at exactly
+log(11) = 2.3979, its maximum.
+
+**Update, 2026-09-17 (later)** -- the first run measured with the new health checker came
+back `INERT` on question 1 while question 2 was `CLEAR`: tau sat 0.92% below uniform
+(2.3758 vs ceiling 2.3979) *even though* best_fitness was positive every round
+(0.78-0.92) and every round therefore deposited. That combination points away from the
+deposit floor as the cause and toward deposit *magnitude*: the deposit is
+`rho * Q * F ~= 0.1 * 0.8 = 0.08` onto one of 11 levels, against `tau0 = 1.0`, over only
+5-6 iterations, with `end_round` pulling 10% back toward tau0 every round. tau has
+neither the per-iteration step nor the iteration count to move away from uniform. If that
+holds up, the lever is `aco-q-deposit` / `aco-rho` / the iteration budget, not the
+fitness weights -- a different fix from the one this entry originally anticipated.
+⚠️ Measured at K=2 on synthetic pixels with a reduced colony budget, so it is a lead, not
+a finding. The real-data run at K>=10 with the full budget is what settles it.
+
+**Update, 2026-09-17 (later still) -- the INERT verdict itself was unfounded.** tau starts
+*at* log(L) by construction, so the entropy gap measures how far it has travelled from its
+own initialization, at a rate set by `rho`, the deposit and the iteration budget. At that
+run's settings the fastest any colony could concentrate tau averages 3.14% over four
+rounds, so the 2% threshold demanded 64% of a best case that picks the same level every
+iteration -- a colony that has stopped exploring. What the run actually did was move away
+from uniform monotonically every round (0.19% -> 0.56% -> 1.36% -> 1.57%), reaching 29% of
+what the budget allowed, while beating the FedAvg point on fitness in all four rounds.
+
+The reasoning above about deposit *magnitude* stands: `rho * Q * F` against `tau0 = 1.0`
+is a slow walk, and that is exactly why a short run cannot answer the question. What does
+not stand is "pheromone is carrying essentially no signal". `fedswarm/aco/diagnostics.py`
+computes the reachable ceiling for any budget and `check_fedaco_health.py` now judges
+against it, reporting UNDERPOWERED where the old check reported INERT. See
+docs/EXPERIMENT_LOG.md, "the INERT verdict was a statement about the run length".
+
+**Still open, and still needs the real run.** None of this shows the colony *is*
+searching -- only that the measurement taken could not have shown it either way. The
+`make validate-fedaco` gate (15 rounds, default colony budget) requires 22% of the best
+case, which is a bar a working colony can clear and a dead one cannot.
+
+Whether this matters in practice is an open empirical question, not a known bug: on real
+training deltas (which do have a consensus direction) F was positive in every round
+measured. A baseline-centred deposit `max(F - F_fedavg, 0)` would make the mechanism
+sign-robust and was prototyped, but showed no systematic benefit on real deltas and was
+rejected rather than added on speculation. **Decide from the first real multi-round FL
+run**: if `pheromone_entropy` sits at log(num_levels) across rounds, the colony is not
+actually searching and this needs revisiting. `delta_mean_sq_norm` and
+`pheromone_entropy` are both logged per round for exactly this check.
+
+### Residual 2 -- the safety fallback cannot detect a degenerate fitness
+
+`fallback_used` compares `F_best` against `F_fedavg` under the *same* fitness function,
+so it reports 0 ("the colony beat FedAvg") even when the colony never searched at all --
+confirmed across all 9 configs of the scale sweep, including the six where tau was
+exactly uniform. This is not fixed and arguably cannot be fixed from inside F alone; it
+is a reason to read `pheromone_entropy` rather than trust `fallback_used` as a health
+signal. Recorded so no one later reads `fallback_used=0` as evidence the method worked.
+
+**2026-09-18: this residual now has a concrete instance, and it is worse than "cannot
+detect".** See Residual 3 -- in the degenerate-optimum case `fallback_used=0` is not
+merely uninformative, it is *correct and misleading at once*: the colony genuinely did
+beat the FedAvg point, on an objective that wanted a useless answer.
+
+### Residual 3 -- the fitness pays nothing for discarding every client but one
+
+**Status: open, quantified, deliberately not "fixed".**
+
+Dispersion is `sum_k alpha_k ||delta_k - Delta(alpha)||^2`, a weighted variance about the
+weighted mean. At a single-client vertex `alpha = e_j` the weighted mean *is* `delta_j`,
+so the term is exactly zero -- for any Gram matrix, not approximately and not only in
+degenerate rounds. Alignment collapses to `cos(delta_j, robust_mean)` and the
+concentration penalty to its maximum, giving the exact identity
+
+    F(e_j) = gamma_1 * cos(delta_j, robust_mean) - gamma_3 * log K
+
+The whole price of throwing K-1 clients away is `gamma_3 * log K`. Measured on synthetic
+deltas, the `gamma_entropy` needed to keep the corner from winning is 0.168 at K=2, 0.126
+at K=4, 0.090 at K=10 and 0.074 at K=20 -- against the default **0.1**. So the sweep's
+K=20 is (narrowly) safe and a K=4 validation run is not, which is the opposite of what a
+smoke test should be. That is why the `K=4` recommendation has been removed everywhere.
+
+**Why not just raise gamma_entropy.** Because it would be a fix by coincidence. A penalty
+growing as `log K` against a term that vanishes outright is the wrong shape: any gamma_3
+chosen to work at K=20 is still arbitrary at K=5, and one chosen at K=5 over-penalizes
+concentration at K=50, where concentrating on a good subset may be the right answer.
+
+**Update, 2026-09-18 -- the alternative is implemented, measured, and correcting two
+errors in the paragraph this replaces.** The shape is now selectable:
+`aco-concentration-penalty` takes `"entropy"` (the default, the method as proposed,
+`log K - H(alpha)`) or `"gini"` (`sum_k p_k^2 - 1/K`, Simpson concentration).
+
+Two things the earlier note got wrong, recorded rather than quietly edited:
+
+1. **Sign.** It proposed `1 - sum_k alpha_k^2`. That is a *diversity* measure -- it
+   *falls* toward a vertex, so subtracting `gamma_3 *` it from F would have rewarded
+   concentration, making the problem strictly worse. The penalty has to rise toward the
+   vertex, hence `sum_k p_k^2 - 1/K` as implemented.
+2. **The reason.** It justified the swap by the penalty's gradient "not vanishing at the
+   vertex". That is backwards on the facts and irrelevant to the argument. The entropy
+   penalty's gradient is `log alpha_j + 1`, which *diverges* as `alpha_j -> 0`; the Gini
+   penalty's is `2 alpha_j`, which vanishes there. And neither matters, because the
+   colony searches a discrete level set that contains 0 exactly (`level_set`'s explicit
+   floor level) -- it jumps to the vertex, it does not walk there. The operative quantity
+   is the penalty's *value* at the vertex, not its slope near it.
+
+The real argument is scale. Normalized dispersion is bounded and sits near 1 at every K,
+so the penalty holding it in check should be bounded too. Vertex values are `log K` for
+"entropy" (0.69 at K=2, 3.9 at K=50) and `1 - 1/K` for "gini" (0.5 to 0.98). Measured, the
+gamma_3 needed to rule out the degenerate vertex across K in {2, 4, 10, 20, 50}:
+
+| heterogeneity | entropy spread | gini spread |
+|---|---:|---:|
+| 0.5 | 2.71x | 1.06x |
+| 1.0 | 2.88x | 1.01x |
+| 2.0 | 3.44x | 1.20x |
+| 4.0 | 4.41x | 1.53x |
+
+At heterogeneity 1.0 the "gini" requirement is 0.231-0.233 across the whole range -- one
+number works everywhere. Under "entropy" it runs 0.168 down to 0.058.
+
+⚠️ Note what this does *not* fix: the requirement still moves with heterogeneity under
+both shapes (0.10 -> 0.41 for "gini" as noise goes 0.5 -> 4.0). "gini" removes the K
+dependence specifically, not the need to pick gamma_3 for the data.
+
+**What settles it.** `corner_margin` is computed exactly, in O(K^2), honours whichever
+shape is in force, and is logged every round (`strategies/fedaco.py`);
+`check_fedaco_health.py` question 3 reads it. The `penalty_gini` and
+`penalty_entropy_strong` cells in `configs/experiment/ablation_all.yaml` measure the
+choice on real data -- the second isolates the shape from the level, so a win for "gini"
+cannot be confounded with "gamma_3 was simply too small". The default stays "entropy":
+changing it on synthetic deltas would be changing the method under the paper's own
+description of it. `make fitness-landscape` maps the regime in the meantime.
+
+⚠️ The numbers above come from synthetic deltas (a shared direction plus isotropic
+Gaussian noise). Real training deltas are not isotropic, so treat the crossover values as
+indicative. The identity itself is exact and data-independent.
+
+### Still deferred to Phase 7, unchanged
+
+Global shrinkage `s` is swept, not searched; `client_probe`'s broadcast/collect
+round-trip is still unwired (`ClientProbeFitness` is the aggregation side only, and
+`fitness_mode="client_probe"` is now rejected at construction rather than silently
+accepted).
+
+## Phase 3/6 -- `flwr run` rejects any `--run-config` key not declared in pyproject
+
+Found 2026-09-17 while running FedACO end-to-end. `flwr run --run-config "alpha=0.3"`
+fails with a bare `[code: 15] Invalid run configuration` that names no key: overrides are
+only accepted for keys that already exist in `[tool.flwr.app.config]`.
+
+This had already broken something. `pyproject.toml` carried a comment stating that
+`alpha` / `classes-per-client` / `skew-sigma` were "deliberately absent from the smoke
+default -- override alongside `regime` together, e.g. `--run-config "regime='dirichlet'
+alpha=0.3"`". That command has never worked, which means **every non-IID federated run --
+the entire point of the project -- was unreachable from the CLI**. All three are now
+declared, along with every `aco-*` key.
+
+Anything a future phase wants to sweep has to be declared in that table first; a comment
+documenting a key is not enough.
+
+## Phase 3 -- newer scikit-learn returns nan from roc_auc_score instead of raising
+
+`eval/metrics.py` caught `ValueError` to report `auc_ovr_macro: None` when a class is
+absent from a batch -- expected under label-skewed partitions. Newer scikit-learn no
+longer raises: it emits `UndefinedMetricWarning` and returns `nan`, so the `except` never
+fired and `nan` reached the result JSON.
+
+Not cosmetic: `json.dumps` serializes that as a bare `NaN` token, which is **invalid JSON**
+and is rejected by strict parsers -- so Phase 6 result files would have been unparseable
+for exactly the partitions the project is about. Both paths now normalize to `None`.
+Caught by `tests/test_models.py::test_compute_metrics_auc_handles_missing_class_gracefully`
+and `tests/test_fl_app.py::test_evaluate_fn_checkpoints_after_every_round`, which were the
+two failures in the suite before this was fixed.
+
+## Phase 6 -- the simulation's default CPU budget is 2 cores *per client*, which caps K
+
+Observed 2026-09-17 while running FedACO end-to-end on a 4-core CPU box. `flwr run` with
+`num-clients=4` started Ray, created the `ClientAppActor`s, and then sat at round 0
+indefinitely with every actor near 0% CPU -- no error, no timeout, just no progress. The
+same run at `num-clients=2` completed all 3 rounds normally.
+
+Verified, not inferred: `flwr.simulation.run_simulation.DEFAULT_SIMULATION_CONFIG`
+has `client_resources_num_cpus = 2`. So 4 concurrent ClientApps request 8 cores on a
+4-core machine. **The main sweep's K=20 would request 40 cores at this default.**
+
+What is verified is the default and the two observations; the causal link (resource
+starvation specifically, rather than something else that 2 clients happen to avoid) is
+probable but not proven here -- it is consistent with the `clientapp-seconds: 0.0`
+signature recorded in the Colab heartbeat entry above, though that instance was GPU.
+
+**Before Phase 6 commits GPU-hours**: decide how client resources are sized. Either set
+`client_resources` explicitly (a `[tool.flwr.federations]` section, which this project
+currently does not have at all) or confirm the training environment has
+`2 * num-clients` cores available. Do not assume the simulation degrades gracefully to
+time-slicing when it does not -- it appears to stall silently, which in a long sweep is
+indistinguishable from a slow round.
+
+## Phase 5 -- three things that made the honest hyperparameter search impossible to write
+
+All found 2026-09-17 while building `scripts/run_hparam_search.py`, all fixed. Recorded
+because each was silent: nothing failed loudly, the work simply could not have been done
+correctly, and in two cases an incorrect version would have looked fine.
+
+### 1. Result files carried no validation metric at all
+
+The plan requires the search to select "on the val split". `build_evaluate_fn` evaluated
+only the **test** split, so `rounds` and `final` carried `test_*` and nothing else. Any
+search written against those files would have had to rank configurations by
+`final_test_macro_f1` -- tuning every baseline against the exact number the paper
+reports. `global_val_loader` already existed (added in Phase 5 for FedLAW, precisely
+because using test for weight selection "would have been a real methodology bug") but
+nothing in the result path used it.
+
+Now every round logs `val_loss`/`val_accuracy`/`val_macro_f1`/`val_auc`, and `final`
+carries `best_val_macro_f1` (max over rounds, so a config that peaks then drifts is not
+penalized) plus `best_val_round`. `run_hparam_search.py::score` reads that key and no
+other.
+
+### 2. Every baseline hyperparameter was undeclared, so none could be swept
+
+Same root cause as the partition keys (entry above): `flwr run` rejects any
+`--run-config` key absent from `[tool.flwr.app.config]`. `fedprox-mu`, `fedopt-*`,
+`num-malicious-nodes`, `trim-beta`, `lossweight-temperature`, `scaffold-server-lr`,
+`fedlaw-steps`, `fedlaw-lr` were all missing, under a comment asserting they "only need
+overriding via --run-config when actually sweeping them" -- describing the one thing that
+did not work. **Every trial of the Phase 5 search would have failed with `[code: 15]`.**
+
+`tests/test_phase5_search.py::test_every_grid_key_is_declared_in_pyproject` now checks
+the declared table against the search grids, so the two cannot drift apart again.
+
+**A trap inside the fix**: `fedopt-eta`/`fedopt-eta-l` were read by both FedAdam and
+FedYogi with *different* per-strategy defaults (0.1/0.1 vs 0.01/0.0316, from the FedOpt
+paper). Declaring one shared key would have given both the same literal value and made
+those fallbacks dead code -- silently replacing FedYogi's published default. They are now
+per-strategy keys (`fedadam-eta`, `fedyogi-eta`).
+
+### 3. `flwr run` is asynchronous unless `--stream` is passed
+
+A bare `flwr run` submits the run, prints "Successfully started run <id>", and returns
+**exit 0 immediately** while the simulation is still starting. The first end-to-end run
+of the search shelled out without `--stream`, checked for each trial's result file
+microseconds after launching it, found nothing, and reported every trial as failed.
+
+Compounding it: `flwr run` *also* exits 0 when the simulation itself dies (a missing
+cache surfaces as an in-run traceback and "Exit Code: 700" behind a successful outer
+process). So the return code is useless in both directions. The harness now passes
+`--stream` unconditionally and judges success by "did a result file appear", not by the
+subprocess's verdict.
+
+**The second-order effect is worse than the mis-reporting.** Those launched-and-forgotten
+runs do not stop -- they keep executing. After two aborted 2-trial searches this 4-core
+box was running four orphaned simulations across 10 Ray sessions at load average 11.8,
+which then starved the *next* (correctly blocking) trial badly enough that a single round
+had not finished after twelve minutes, against ~70 s when uncontended. Nothing reports
+this: the searches had already exited "cleanly", and the orphans are only visible in
+`ps`. Cleanup required killing `flower-superlink` itself to reap the zombie
+`flwr-simulation` children.
+
+**This applies directly to Phase 6.** Any sweep runner that shells out to `flwr run`
+must pass `--stream`, or it will launch every run in the sweep near-simultaneously,
+conclude that all of them failed, and leave the machine thrashing under a pile of
+orphaned simulations that make every subsequent timing measurement meaningless.
+
+### Also fixed: the test fixtures were two-way, not three-way
+
+`tests/test_fl_app.py`'s fixtures built only `train`/`test` rows, so `global_val_loader`
+returned an empty loader and `evaluate_model` raised `need at least one array to
+concatenate` the moment per-round val evaluation was added. The real manifest is
+three-way and `split` is orthogonal to the on-disk directory (real val rows appear under
+both `Training/` and `Testing/` paths); the fixtures now match.
+
+### Also fixed: `val_loader` was gated on FedLAW alone
+
+`fl/app.py` built the val loader only when `strategy_name == "fedlaw"`, so FedACO's
+`aco-fitness-mode="server_val"` -- declared and supported since the Phase 4 close-out --
+raised "requires model, val_loader, and device" on use. Introduced in `0bb64b7` by making
+the mode selectable without extending the gate. It is now built unconditionally.
+
+## Phase 4/6 -- the strategy's own diagnostics were never written to the result file
+
+Found 2026-09-17 while building `scripts/check_fedaco_health.py`, fixed the same day.
+
+`rounds_log` is built entirely by `build_evaluate_fn`, which only ever sees *evaluation*
+metrics. Everything `aggregate_train` returns went to Flower's console output and nowhere
+else: FedACO's `pheromone_entropy`, `best_fitness`, `fedavg_fitness`, `fallback_used`,
+`alpha`, `alpha_entropy`, `delta_mean_sq_norm`, and the equivalents for every baseline.
+
+The irony is sharp: the Phase 4 close-out added `delta_mean_sq_norm` *specifically* so a
+run could be checked for the degenerate regime, and the field was not persisted anywhere
+a checker could read. `paper/ALGORITHM.md` lists these as the algorithm's outputs, so the
+result schema was missing the method's entire observable behaviour. Phase 6's analysis
+would have been able to report accuracy and nothing about *why*, and the two residuals
+recorded above (deposit floor, fallback blindness) would have been unanswerable from the
+artifacts.
+
+Fixed by `fl/app.py::merge_train_metrics`, which folds
+`Strategy.start()`'s returned `Result.train_metrics_clientapp` (keyed by round, verified
+against the installed flwr==1.36.0 dataclass) into `rounds_log` under a `train_` prefix,
+respecting the resume `round_offset`.
+
+**Anything Phase 6 wants to analyse must come through this path.** A strategy that
+returns a metric from `aggregate_train` now gets it persisted automatically; one that
+stashes state on `self` and never returns it still will not.
+
+## Phase 6 -- how to actually size client CPUs
+
+Follow-up to the entry above about 2 CPUs per ClientApp. The supported, non-deprecated
+lever is:
+
+    flwr federation simulation-config --client-resources-num-cpus 1
+
+It writes to `~/.flwr/config.toml` and persists per machine, so it is a one-time setup
+step rather than a per-run flag. The `[tool.flwr.federations]` `options.backend.
+client-resources.*` form still parses but `flwr run` prints a deprecation warning and
+points at this command (and at `--federation-config`) instead.
+
+Unverified: whether pinning to 1 CPU is *sufficient* for K=20 on a 4-core box, or merely
+necessary. The failure mode is a silent stall, so this wants an explicit check at the
+target K before the sweep is launched, not an assumption.
+
+## Phase 8 -- `train_is_malicious` counts examples, not clients
+
+The per-reply `is_malicious` flag aggregates into the round metrics as
+`train_is_malicious`, and Flower aggregates client metrics **weighted by `num-examples`**.
+So the value is the fraction of malicious *examples*, not of malicious *clients*, and the
+two diverge exactly where this project operates -- under label/quantity skew, clients hold
+very different amounts of data.
+
+Measured on a verified live run: `attack-fraction=0.5` over 2 dirichlet-skewed clients
+reported `train_is_malicious = 0.293`, because the compromised client held 29% of the
+examples. Reading that number as "29% of clients were malicious" would be wrong by a
+factor of nearly two.
+
+Use it to confirm an attack fired at all; read `attack-fraction` from the run config for
+the client fraction. Not changed, because overriding Flower's aggregation for one key is
+more intrusive than the note is worth -- but any Phase 8 analysis that quotes a malicious
+*client* fraction has to take it from the config.
+
+## Phase 6/8 -- CORRECTION: the K=4 stall was not CPU oversubscription
+
+Recorded above, twice, as a client-resources problem: "the Simulation Runtime assigns 2
+CPUs per ClientApp by default, so K=20 requests 40 cores... oversubscription stalls
+silently at round 0 rather than queueing." **That diagnosis was wrong**, and it was
+propagated into `run_sweep.py`'s preflight, the Makefile, the README and the Colab
+notebook.
+
+The real cause: **`num_supernodes` defaults to 2** (`flwr/supercore/constant.py`) and
+nothing in this repository ever set it. `num-clients` is *this project's* run-config key —
+it tells `partition_spec_from_run_config` how many ways to split the data — and has no
+connection to how many ClientApps the Simulation Runtime creates. The K=4 run asked for
+`min-train-nodes=4` while only 2 supernodes existed, so the server waited forever for
+nodes that were never going to appear. Idle actors, no error, no progress: exactly the
+observed symptom, and nothing to do with CPU count.
+
+Verified 2026-09-17: with `--num-supernodes 4 --client-resources-num-cpus 1`, the same
+K=4 run completes normally on the same 4-core box ("Sampled 4 nodes (out of 4)").
+
+**The consequence had this not been caught** is worse than a stall. A sweep whose
+`min-train-nodes` is low enough not to hang would not hang — it would quietly run 2
+clients while every result file recorded `num-clients: 20`, with 18/20 of the data never
+trained on. In `robustness.yaml` it compounds: `malicious_ids(20, 0.1) == {0, 1}`, so a
+cell labelled "10% malicious" would have had *the entire participating federation*
+compromised.
+
+`scripts/run_sweep.py` now calls `flwr federation simulation-config --num-supernodes
+<num-clients>` itself before the first cell and refuses to start if that fails, rather
+than relying on an operator having run a setup command. More clients than cores is now a
+note that the ETA is optimistic (Ray queues them), not a refusal.

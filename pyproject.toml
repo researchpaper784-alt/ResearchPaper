@@ -113,9 +113,24 @@ min-client-size = 5
 partition-seed = 0
 local-val-fraction = 0.1
 partition-cache-dir = "data/processed/partitions"
-# alpha / classes-per-client / skew-sigma: regime-specific, deliberately absent from
-# the smoke default (regime="iid" doesn't read any of them) -- override alongside
-# `regime` together, e.g. --run-config "regime='dirichlet' alpha=0.3".
+# alpha / classes-per-client / skew-sigma are regime-specific: `regime="iid"` reads none
+# of them, and `partition_spec_from_run_config` only reads the one its regime calls for.
+#
+# They were previously left undeclared here, with a comment saying to "override
+# alongside `regime` together, e.g. --run-config "regime='dirichlet' alpha=0.3"". That
+# never worked: `flwr run` rejects undeclared keys outright ([code: 15]), so every
+# non-IID federated run -- i.e. the entire point of the project -- was unreachable from
+# the CLI (verified 2026-09-17). Declared below so they can be overridden at all.
+#
+# PartitionSpec's own defaults are None (each regime requires its parameter explicitly),
+# so these are not those; the values are the ones this project actually characterized in
+# Phase 1.4 -- see scripts/make_partition_figures.py::REGIMES and the measured
+# heterogeneity table in docs/EXPERIMENT_LOG.md. The full sweep varies alpha over
+# {0.1, 0.3, 0.5, 1.0}; 0.3 is its mid point and partition.py's own CLI example.
+# Each is read only when `regime` selects it.
+alpha = 0.3
+classes-per-client = 2
+skew-sigma = 1.0
 
 # Data.
 image-size = 112
@@ -139,9 +154,93 @@ mu = 0.0  # static FedProx fallback; the real installed FedProx strategy overrid
 # One of: fedavg, fedprox, fedadam, fedyogi, krum, trimmed-mean, median, fednova,
 # loss-based, scaffold, fedlaw, fedaco. Strategy-specific knobs (fedprox-mu,
 # fedopt-eta/-eta-l/-beta1/-beta2/-tau, num-malicious-nodes, trim-beta,
-# lossweight-temperature, scaffold-server-lr, fedlaw-steps/-lr) all have defaults in
-# the factory and only need overriding via --run-config when actually sweeping them.
+# lossweight-temperature, scaffold-server-lr, fedlaw-steps/-lr) are declared below at
+# their factory defaults.
+#
+# ⚠️ They used to be omitted here, with a comment saying they "only need overriding via
+# --run-config when actually sweeping them". That was wrong for the same reason the
+# partition keys above were: `flwr run` rejects undeclared keys with a bare "[code: 15]",
+# so *none* of them could be swept -- which would have failed every trial of Phase 5's
+# per-baseline hyperparameter search, the one thing they exist for. Found 2026-09-17 by
+# tests/test_phase5_search.py::test_every_grid_key_is_declared_in_pyproject, which now
+# checks this table against the search grids so the two cannot drift apart again.
 strategy-name = "fedavg"
+fedprox-mu = 0.01
+# Per-strategy rather than a shared `fedopt-eta`: FedAdam and FedYogi have different
+# published defaults, and one declared key would give both the same value. See
+# strategies/factory.py.
+fedadam-eta = 0.1
+fedadam-eta-l = 0.1
+fedyogi-eta = 0.01
+fedyogi-eta-l = 0.0316
+fedopt-beta1 = 0.9
+fedopt-beta2 = 0.99
+fedopt-tau = 0.001
+num-malicious-nodes = 0
+trim-beta = 0.2
+lossweight-temperature = 1.0
+scaffold-server-lr = 1.0
+fedlaw-steps = 20
+fedlaw-lr = 0.1
+
+# FedACO knobs (Phase 4, strategies/factory.py::_build_fedaco). Every one is declared
+# here at its dataclass default and only needs a --run-config override when swept.
+#
+# ⚠️ They have to be *declared*, not just documented in a comment: `flwr run
+# --run-config` rejects any key absent from this table with a bare "[code: 15] Invalid
+# run configuration", naming nothing. Verified by running it, 2026-09-17. Anything
+# Phases 6-7 want to sweep must therefore appear below.
+#
+# The colony's RNG is seeded from the run-level `seed` further down, not set separately.
+aco-num-levels = 11
+aco-level-low = 0.0
+aco-level-high = 2.5
+# The global shrinkage s. SWEPT as fixed values, never searched per-round -- the
+# deliberate Phase 4 scope reduction recorded in docs/OPEN_QUESTIONS.md.
+aco-target-sum = 1.0
+aco-ants-start = 30
+aco-ants-end = 10
+aco-iters-start = 10
+aco-iters-end = 4
+# ACS transition rule and within-round pheromone update (aco/colony.py).
+aco-q0 = 0.9
+aco-pheromone-exp = 1.0
+aco-heuristic-exp = 2.0
+aco-rho = 0.1
+aco-q-deposit = 1.0
+aco-tau-min = 0.01
+aco-tau-max = 10.0
+aco-global-best-every = 5
+aco-stagnation-patience = 5
+# Cross-round pheromone persistence (aco/pheromone.py). `aco-persistence` is the Phase 7
+# A1 ablation: "none" | "full" | "decayed". Note aco-tau-min/aco-tau-max above are
+# shared by the colony and the pheromone store, which use the same bounds by design.
+aco-persistence = "decayed"
+aco-tau0 = 1.0
+aco-rho-round = 0.1
+aco-absence-decay = 0.5
+# Data-free fitness (aco/fitness.py). `aco-normalize-dispersion=false` restores the
+# pre-2026-09-17 unnormalized dispersion term; there is no experimental reason to set
+# it, see docs/EXPERIMENT_LOG.md. `aco-fitness-mode` is "data_free" (the method as
+# proposed) or "server_val" (upper-bound reference, needs a much smaller colony budget);
+# "client_probe" is not selectable -- its round-trip is Phase 7 work.
+aco-gamma-alignment = 1.0
+aco-gamma-dispersion = 1.0
+aco-gamma-entropy = 0.1
+aco-normalize-dispersion = true
+aco-fitness-mode = "data_free"
+# The concentration penalty's shape: "entropy" (log K - H(alpha), the method as proposed)
+# or "gini" (sum_k p_k^2 - 1/K). Only the vertex value differs in practice -- log K vs
+# 1 - 1/K -- and that is what decides whether one `aco-gamma-entropy` can hold across K.
+# See docs/OPEN_QUESTIONS.md, "Residual 3".
+aco-concentration-penalty = "entropy"
+# Heuristic desirability weights (aco/heuristics.py).
+aco-beta-alignment = 2.0
+aco-beta-drift = 1.0
+aco-beta-val-improvement = 1.0
+aco-beta-data-size = 0.5
+aco-trim-fraction = 0.2
+aco-safety-fallback = true
 
 # FedAvg-family node sampling (flwr.serverapp.strategy.FedAvg and every baseline
 # above, all of which share this constructor shape -- strategies/factory.py).
@@ -149,6 +248,25 @@ fraction-train = 1.0
 min-train-nodes = 2
 min-evaluate-nodes = 2
 min-available-nodes = 2
+
+# Phase 8 -- adversarial clients (fl/attacks.py). `attack="none"` leaves every code path
+# untouched, so a non-robustness run behaves exactly as it did before this existed.
+#   attack           none | sign_flip | scaled | gaussian | label_flip
+#                    sign_flip/scaled/gaussian poison the *update* after honest training
+#                    (what Krum/FedTrimmedAvg/FedMedian defend against); label_flip
+#                    poisons the *data* before it, so the update is well-formed and
+#                    aggregation-level defences have far less grip. A robustness claim has
+#                    to name which of the two it was tested against.
+#   attack-fraction  share of clients compromised; the lowest ceil(f*K) partition ids,
+#                    fixed rather than resampled per round so the result file identifies
+#                    exactly who attacked.
+#   attack-scale     amplification for sign_flip/scaled, noise multiple for gaussian.
+#
+# NOT to be confused with `num-malicious-nodes` above, which is Krum's own hyperparameter
+# -- how many Byzantine clients Krum should *assume* -- and makes nobody misbehave.
+attack = "none"
+attack-fraction = 0.0
+attack-scale = 1.0
 
 # Run-level.
 num-rounds = 2

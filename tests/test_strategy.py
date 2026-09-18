@@ -16,6 +16,7 @@ from flwr.app import ArrayRecord, Message, MetricRecord, RecordDict
 from fedswarm.aco.colony import ColonyConfig
 from fedswarm.aco.fitness import DataFreeFitnessConfig
 from fedswarm.aco.heuristics import HeuristicWeights
+from fedswarm.strategies.factory import strategy_from_run_config
 from fedswarm.strategies.fedaco import FedACO, FedACOConfig
 from fedswarm.fl.app import local_train
 from fedswarm.models.simple_cnn import SimpleCNN
@@ -175,91 +176,145 @@ def test_overhead() -> None:
 
     aco_time_s = metrics_out["aco_time_ms"] / 1000.0
     round_time_s = num_clients * one_client_train_time_s  # sequential-equivalent, a conservative floor
-    # 15%, not the plan's 5% (§4.8), to absorb timing noise from other tests/processes
-    # running concurrently -- the algorithmic argument (O(K) per fitness eval vs. a
-    # full local epoch) doesn't depend on exactly where the line is drawn; a wall-clock
-    # assertion in a shared CI/test-suite environment does need slack.
-    assert aco_time_s < 0.15 * round_time_s, (aco_time_s, round_time_s)
+    # The plan's own 5% bar (§4.8). This previously asserted 15% "to absorb timing
+    # noise" without the margin ever having been measured; it is actually ~1.8% in this
+    # setup, and 0.26% at the real primary-config scale (K=20, SimpleCNN@112, d=390,404:
+    # 145ms of ACO against a 56.8s sequential round, of which 60ms is the one-off Gram
+    # precompute -- docs/EXPERIMENT_LOG.md, 2026-09-17). A ~2.8x margin here is enough
+    # for wall-clock noise in a shared test environment without weakening the criterion.
+    assert aco_time_s < 0.05 * round_time_s, (aco_time_s, round_time_s)
 
 
-def test_fedaco_server_val_fitness_mode_requires_model_val_loader_device() -> None:
-    with pytest.raises(ValueError):
-        FedACO(aco_config=FedACOConfig(fitness_mode="server_val"))
-
-
-def test_fedaco_client_probe_fitness_mode_raises_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        FedACO(aco_config=FedACOConfig(fitness_mode="client_probe"))
-
-
-def test_fedaco_server_val_fitness_mode_runs_end_to_end() -> None:
-    """A3 ablation axis (plan §4.4): fitness_mode='server_val' materializes a real
-    candidate model each colony evaluation and scores it on a server val batch,
-    instead of the Gram-trick surrogate."""
-    torch.manual_seed(0)
-    model = SimpleCNN(num_classes=4, norm="groupnorm")
-    global_state = model.state_dict()
-
-    images = torch.randn(8, 3, 16, 16)
-    labels = torch.randint(0, 4, (8,))
-    val_loader = DataLoader(TensorDataset(images, labels), batch_size=8)
-
-    client_states = [
-        OrderedDict((k, v + 0.01 * torch.randn_like(v)) for k, v in global_state.items())
-        for _ in range(2)
+def test_colony_is_reproducible_and_independent_of_global_rng() -> None:
+    """The colony's exploration draws (`aco/colony.py::_select_levels`) used to come from
+    global torch RNG, because `FedACO.aggregate_train` never passed `run_colony` the
+    `generator` it accepts. A seeded run is now a function of (aco_config.seed,
+    server_round) alone -- asserted by deliberately churning global RNG between two
+    otherwise-identical runs, which under the old behavior changed the result.
+    """
+    global_state = _state()
+    replies = [
+        _make_reply(i, _add(global_state, _state(seed=100 + i)), num_examples=float(50 + 10 * i))
+        for i in range(4)
     ]
-    replies = [_make_reply(i, s, 100.0) for i, s in enumerate(client_states)]
 
-    strategy = FedACO(
-        min_train_nodes=2,
-        min_evaluate_nodes=2,
-        model=model,
-        val_loader=val_loader,
-        device=torch.device("cpu"),
-        aco_config=FedACOConfig(
-            fitness_mode="server_val",
-            num_rounds=1,
-            ants_start=3,
-            ants_end=3,
-            iters_start=2,
-            iters_end=2,
-        ),
+    def run_once(seed: int, server_round: int = 1) -> list[float]:
+        strategy = _new_strategy(num_rounds=4, seed=seed, colony=ColonyConfig(q0=0.5))
+        strategy._current_arrays = ArrayRecord(global_state)
+        _, metrics = strategy.aggregate_train(server_round, list(replies))
+        assert metrics is not None
+        return list(metrics["alpha"])
+
+    first = run_once(7)
+    torch.manual_seed(999)
+    torch.randn(5000)  # churn global RNG; the old implementation would drift here
+    second = run_once(7)
+    assert first == second
+
+    # The seed is load-bearing, not decorative: a different seed explores differently.
+    assert run_once(8) != first
+    # ...and so is the round index, so a resumed run replays the same trajectory rather
+    # than repeating round 1's draws on every round.
+    assert run_once(7, server_round=2) != first
+
+
+def test_run_config_reaches_every_fedaco_knob() -> None:
+    """Phase 6's sweep and Phase 7's ablations vary FedACO through `--run-config`; until
+    2026-09-17 the factory forwarded only `num-rounds`, so `aco-persistence="none"` (the
+    A1 ablation) and the `aco-target-sum` shrinkage sweep had no way in at all."""
+    strategy = strategy_from_run_config(
+        {
+            "strategy-name": "fedaco",
+            "num-rounds": 9,
+            "seed": 5,
+            "aco-persistence": "none",
+            "aco-target-sum": 0.75,
+            "aco-num-levels": 7,
+            "aco-ants-start": 12,
+            "aco-q0": 0.5,
+            "aco-gamma-dispersion": 0.25,
+            "aco-beta-drift": 3.0,
+            "aco-safety-fallback": False,
+            "aco-concentration-penalty": "gini",
+        }
     )
+    assert isinstance(strategy, FedACO)
+    cfg = strategy.aco_config
+    assert cfg.num_rounds == 9 and cfg.seed == 5
+    assert cfg.pheromone.persistence == "none"
+    assert cfg.target_sum == 0.75 and cfg.num_levels == 7 and cfg.ants_start == 12
+    assert cfg.colony.q0 == 0.5
+    assert cfg.fitness.gamma_dispersion == 0.25
+    assert cfg.heuristics.beta_drift == 3.0
+    assert cfg.safety_fallback is False
+    # Unspecified knobs keep their documented defaults rather than being zeroed.
+    assert cfg.iters_start == FedACOConfig.iters_start
+    assert cfg.fitness.normalize_dispersion is True
+    assert cfg.fitness_mode == "data_free"
+    assert cfg.fitness.concentration_penalty == "gini"
+
+
+def test_a_mistyped_penalty_shape_is_rejected_at_construction() -> None:
+    """Not at first use. `concentration_penalty` runs once per ant per iteration, so an
+    unknown value would surface from inside the colony mid-round -- where `flwr run`
+    reports it as "Exit Code: 700" while the outer process still exits 0, and a sweep
+    counts the cell as simply having produced no result file."""
+    with pytest.raises(ValueError, match="aco-concentration-penalty"):
+        strategy_from_run_config(
+            {"strategy-name": "fedaco", "aco-concentration-penalty": "simpson"}
+        )
+
+
+def test_server_val_fitness_mode_requires_its_dependencies() -> None:
+    with pytest.raises(ValueError, match="server_val"):
+        FedACO(min_train_nodes=2, aco_config=FedACOConfig(fitness_mode="server_val"))
+    with pytest.raises(ValueError, match="client_probe"):
+        FedACO(min_train_nodes=2, aco_config=FedACOConfig(fitness_mode="client_probe"))
+
+
+def test_resumed_colony_uses_the_true_round_not_the_restarted_one() -> None:
+    """`Strategy.start()` renumbers its rounds from 1 on every invocation -- the same
+    reason build_evaluate_fn needs a round_offset. Without the offset, a run resumed after
+    round 50 re-seeds the colony with round 1's exploration draws and restarts the ant
+    budget decay from its start-of-run value, so a resumed cell is not the same experiment
+    as an uninterrupted one."""
+    global_state = _state()
+    replies = [
+        _make_reply(i, _add(global_state, _state(seed=200 + i)), num_examples=float(40 + i))
+        for i in range(3)
+    ]
+
+    def alpha_for(server_round: int, offset: int) -> list[float]:
+        strategy = _new_strategy(num_rounds=10, seed=3, colony=ColonyConfig(q0=0.5))
+        strategy.round_offset = offset
+        strategy._current_arrays = ArrayRecord(global_state)
+        _, metrics = strategy.aggregate_train(server_round, list(replies))
+        assert metrics is not None
+        return list(metrics["alpha"])
+
+    # Round 4 reached directly, and round 4 reached as round 1 of a run resumed after 3.
+    assert alpha_for(4, 0) == alpha_for(1, 3)
+    # And the offset genuinely changes the draw, rather than being ignored.
+    assert alpha_for(1, 0) != alpha_for(1, 3)
+
+
+def test_corner_margin_is_recorded_every_round() -> None:
+    """A degenerate fitness optimum is invisible in every other logged field: the colony
+    finds the corner, `fallback_used` stays 0 (both sides of that comparison use the same
+    fitness), `best_fitness` sits comfortably above `fedavg_fitness`, and alpha looks
+    confident. `corner_margin` is the only field that can tell "the colony searched well"
+    from "the colony searched well for a useless answer", so a run without it cannot be
+    diagnosed after the fact."""
+    global_state = _state()
+    replies = [
+        _make_reply(i, _add(global_state, _state(seed=100 + i)), num_examples=float(50 + 10 * i))
+        for i in range(4)
+    ]
+    strategy = _new_strategy(num_rounds=4)
     strategy._current_arrays = ArrayRecord(global_state)
-    arrays_out, metrics_out = strategy.aggregate_train(1, list(replies))
-    assert arrays_out is not None and metrics_out is not None
-    assert len(metrics_out["alpha"]) == 2
 
+    _, metrics = strategy.aggregate_train(1, list(replies))
 
-@pytest.mark.parametrize("method", ["random", "coordinate_grid", "pso", "ga"])
-def test_fedaco_a1_control_methods_run_end_to_end(method: str) -> None:
-    """A1 ablation (plan §7): every control routes through FedACO's own
-    aggregate_train, using the identical BudgetedFitness-wrapped fitness and the
-    identical per-round evaluation budget the real colony would have used."""
-    torch.manual_seed(3)
-    global_state = _state(seed=0)
-    client_states = [_add(global_state, _state(seed=s)) for s in (1, 2, 3)]
-    num_examples = [100.0, 50.0, 200.0]
-    replies = [_make_reply(i, s, n) for i, (s, n) in enumerate(zip(client_states, num_examples))]
-
-    strategy = _new_strategy(
-        search_method=method, num_rounds=1, ants_start=4, ants_end=4, iters_start=3, iters_end=3
-    )
-    strategy._current_arrays = ArrayRecord(global_state)
-    arrays_out, metrics_out = strategy.aggregate_train(1, list(replies))
-
-    assert arrays_out is not None and metrics_out is not None
-    assert "pheromone_entropy" not in dict(metrics_out)  # controls have no pheromone
-    assert metrics_out["realized_ants"] <= 12  # <= the aco/colony budget (4 ants * 3 iters) for this round
-    assert len(metrics_out["alpha"]) == 3
-
-
-def test_fedaco_aco_method_still_reports_pheromone_entropy() -> None:
-    global_state = _state(seed=0)
-    client_states = [_add(global_state, _state(seed=s)) for s in (1, 2)]
-    replies = [_make_reply(i, s, 100.0) for i, s in enumerate(client_states)]
-
-    strategy = _new_strategy(search_method="aco", num_rounds=1)
-    strategy._current_arrays = ArrayRecord(global_state)
-    _, metrics_out = strategy.aggregate_train(1, list(replies))
-    assert "pheromone_entropy" in dict(metrics_out)
+    assert metrics is not None
+    assert "corner_margin" in metrics
+    assert isinstance(metrics["corner_margin"], float)

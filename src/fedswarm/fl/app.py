@@ -85,6 +85,12 @@ from fedswarm.data.partition import PartitionSpec, load_or_build
 from fedswarm.data.splits import MANIFEST_CSV
 from fedswarm.data.transforms import build_transforms
 from fedswarm.eval.evaluator import evaluate as evaluate_model
+from fedswarm.fl.attacks import (
+    attack_from_run_config,
+    is_malicious,
+    poison_labels,
+    poison_update,
+)
 from fedswarm.models.factory import build_model
 from fedswarm.strategies.factory import strategy_from_run_config
 from fedswarm.utils.results import make_run_id, write_result
@@ -206,8 +212,6 @@ def local_train(
     lr: float,
     mu: float = 0.0,
     correction: "dict[str, torch.Tensor] | None" = None,
-    label_flip: bool = False,
-    num_classes: int = 4,
 ) -> dict:
     """Runs `epochs` of local SGD. Returns every scalar the plan's Step 3.1 says the
     server might need to weight this client (`num-examples`, `train_loss_before/after`,
@@ -231,11 +235,6 @@ def local_train(
     parameter is exactly `correction[name]` itself -- the standard way to inject a
     constant additive term into a gradient via autograd rather than hand-editing
     `param.grad` after `loss.backward()`.
-
-    `label_flip` (Phase 8, R1) trains against `(label + 1) % num_classes` for every
-    batch -- a designated-attacker client's own local labels, permuted, not a random
-    per-round corruption, so the same clients are corrupted for the whole run
-    (`train_handler` decides which clients via `attacker-fraction`).
     """
     model.to(device)
     # Always snapshotted, not just when mu > 0: update_norm is a standard field every
@@ -253,8 +252,6 @@ def local_train(
         batch_losses = []
         for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
-            if label_flip:
-                labels = (labels + 1) % num_classes
             optimizer.zero_grad()
             loss = F.cross_entropy(model(images), labels)
             if mu > 0:
@@ -284,47 +281,6 @@ def local_train(
         "train_loss_after": epoch_losses[-1] if epoch_losses else float("nan"),
         "update_norm": update_norm,
     }
-
-
-def is_attacker_client(partition_id: int, num_partitions: int, attacker_fraction: float) -> bool:
-    """Phase 8, R1/R2: a FIXED subset of clients is corrupted for the whole run, not
-    re-chosen each round -- the first `round(attacker_fraction * num_partitions)`
-    partition-ids, a deterministic function of identity alone, so this project's
-    attack-fraction sweeps (10%/20%/30%) are reproducible without any extra state."""
-    return partition_id < round(attacker_fraction * num_partitions)
-
-
-def corrupt_update(
-    trained_state: "OrderedDict[str, torch.Tensor]",
-    global_state: "OrderedDict[str, torch.Tensor]",
-    mode: str,
-    sigma: float,
-) -> "OrderedDict[str, torch.Tensor]":
-    """Phase 8, R1/R2 -- corrupts an attacker client's reported update *after*
-    training, simulating a Byzantine client rather than a training-time behavior.
-    `mode="gaussian_noise"`: adds N(0, sigma^2) to every trained parameter.
-    `mode="sign_flip"`: reports `2*global - trained`, i.e. the negated update
-    `global - (trained - global)` -- the classic sign-flipping attack."""
-    if mode == "gaussian_noise":
-        return OrderedDict(
-            (k, v + sigma * torch.randn_like(v)) for k, v in trained_state.items()
-        )
-    if mode == "sign_flip":
-        return OrderedDict((k, 2 * global_state[k] - v) for k, v in trained_state.items())
-    raise ValueError(f"Unknown attack mode: {mode!r}, expected 'gaussian_noise' or 'sign_flip'")
-
-
-def apply_dp_noise(
-    state: "OrderedDict[str, torch.Tensor]", sigma: float
-) -> "OrderedDict[str, torch.Tensor]":
-    """Phase 8, R4 -- Gaussian mechanism noise on EVERY client's update (an honest
-    privacy behavior every client applies, unlike `corrupt_update`'s attacker-only
-    corruption). `sigma=0.0` is a no-op returning `state` unchanged, not a copy --
-    callers relying on this being a fresh object when sigma>0 should not assume the
-    same when sigma==0."""
-    if sigma <= 0.0:
-        return state
-    return OrderedDict((k, v + sigma * torch.randn_like(v)) for k, v in state.items())
 
 
 def per_class_confusion_counts(labels: np.ndarray, predictions: np.ndarray) -> dict[str, dict[str, int]]:
@@ -480,29 +436,70 @@ _SCAFFOLD_CONTROL_PREFIX = "scaffold_c/"
 _SCAFFOLD_DELTA_PREFIX = "scaffold_dc/"
 
 
+class _LabelFlipDataset(torch.utils.data.Dataset):
+    """Wraps a dataset so its labels are cyclically shifted on read (Phase 8 `label_flip`).
+
+    Wrapping lazily rather than materializing one pass matters twice over.
+
+    It must not mutate the source: the underlying dataset reads from a memory-mapped cache
+    shared with every other client, so poisoning in place would poison the honest clients
+    too -- a bug that would look like a devastatingly effective attack.
+
+    And it must not freeze the augmentation. The train loader applies RandomResizedCrop,
+    RandomHorizontalFlip, RandomRotation and ColorJitter, resampled on every `__getitem__`.
+    Draining the loader once into a TensorDataset would give a poisoned client the same
+    augmented images every epoch while honest clients get fresh draws, so with
+    `local-epochs > 1` the measured effect of label-flipping would be confounded with a
+    reduced-augmentation effect that has nothing to do with poisoning.
+    """
+
+    def __init__(self, base, num_classes: int) -> None:
+        self.base = base
+        self.num_classes = num_classes
+
+    def __len__(self) -> int:
+        return len(self.base)
+
+    def __getitem__(self, index):
+        image, label = self.base[index]
+        return image, int(poison_labels(torch.as_tensor(label), self.num_classes))
+
+
+def _poisoned_loader(loader: DataLoader, num_classes: int) -> DataLoader:
+    """A loader over the same data with cyclically shifted labels, preserving the source
+    loader's batching and worker settings."""
+    return DataLoader(
+        _LabelFlipDataset(loader.dataset, num_classes),
+        batch_size=loader.batch_size or 32,
+        shuffle=True,
+        num_workers=getattr(loader, "num_workers", 0),
+        drop_last=getattr(loader, "drop_last", False),
+    )
+
+
 @client_app.train()
 def train_handler(msg: Message, context: Context) -> Message:
     model = build_model_from_run_config(context.run_config)
     full_state = msg.content["arrays"].to_torch_state_dict()
     model_keys = list(model.state_dict().keys())
     model.load_state_dict(OrderedDict((k, full_state[k]) for k in model_keys))
-    global_state_before_training = OrderedDict((k, model.state_dict()[k].clone()) for k in model_keys)
 
     train_loader, _ = load_client_data(_partition_id(context), context.run_config)
     config = msg.content["config"]
 
-    # Phase 8, R1/R2/R4 -- robustness/stress tests. A FIXED subset of clients (by
-    # partition-id, see is_attacker_client) simulates a Byzantine participant for
-    # the whole run; dp-noise-sigma, separately, applies to every client regardless
-    # of attacker status (an honest privacy mechanism, not an attack).
-    num_partitions = int(context.node_config.get("num-partitions", 1))
-    attacker_fraction = float(context.run_config.get("attacker-fraction", 0.0))
-    attack_mode = str(context.run_config.get("attack-mode", "none"))
-    attack_noise_sigma = float(context.run_config.get("attack-noise-sigma", 0.1))
-    dp_noise_sigma = float(context.run_config.get("dp-noise-sigma", 0.0))
-    is_attacker = attacker_fraction > 0.0 and is_attacker_client(
-        _partition_id(context), num_partitions, attacker_fraction
+    # Phase 8. `attack="none"` (the default) leaves every path below untouched, so a
+    # non-robustness run behaves exactly as it did before this existed.
+    attack, attack_fraction, attack_scale = attack_from_run_config(context.run_config)
+    compromised = attack != "none" and is_malicious(
+        _partition_id(context),
+        int(context.run_config.get("num-clients", 20)),
+        attack_fraction,
     )
+    if compromised and attack == "label_flip":
+        # Data poisoning: corrupt before training, so the client honestly reports a model
+        # trained on a lie. The update itself is well-formed, which is exactly why
+        # aggregation-level defences have little grip on it.
+        train_loader = _poisoned_loader(train_loader, int(context.run_config.get("num-classes", 4)))
 
     # SCAFFOLD (strategies/scaffold.py): present only when that strategy is active.
     scaffold_keys = [k for k in full_state if k.startswith(_SCAFFOLD_CONTROL_PREFIX)]
@@ -538,21 +535,34 @@ def train_handler(msg: Message, context: Context) -> Message:
         # is set (plain FedAvg).
         mu=float(config.get("proximal-mu", config.get("mu", context.run_config.get("mu", 0.0)))),
         correction=correction,
-        label_flip=is_attacker and attack_mode == "label_flip",
-        num_classes=int(context.run_config.get("num-classes", 4)),
     )
     metrics["client_id"] = _partition_id(context)
     metrics["server_round"] = int(config.get("server_round", -1))
-    metrics["is_attacker"] = int(is_attacker)
+    # Recorded per reply so a result file says who attacked, rather than leaving it to be
+    # inferred from the run config and a rule about which ids are compromised.
+    #
+    # ⚠️ In the *aggregated* round metrics this lands as `train_is_malicious`, and Flower
+    # aggregates client metrics weighted by `num-examples` -- so it is the fraction of
+    # malicious **examples**, not of malicious **clients**. A verified live run at
+    # attack-fraction=0.5 over 2 dirichlet-skewed clients reported 0.293, because the
+    # compromised client happened to hold 29% of the data. Use it to confirm the attack
+    # fired; read `attack-fraction` from the config for the client fraction itself.
+    metrics["is_malicious"] = int(compromised)
 
-    trained_state = OrderedDict((k, model.state_dict()[k]) for k in model_keys)
-    if is_attacker and attack_mode in ("gaussian_noise", "sign_flip"):
-        trained_state = corrupt_update(
-            trained_state, global_state_before_training, attack_mode, attack_noise_sigma
+    local_state = model.state_dict()
+    if compromised and attack != "label_flip":
+        # Update poisoning: train honestly, then corrupt what gets sent. This is the
+        # threat model Krum, FedTrimmedAvg and FedMedian exist to survive.
+        local_state = poison_update(
+            OrderedDict((k, full_state[k]) for k in model_keys),
+            local_state,
+            attack,
+            attack_scale,
+            generator=torch.Generator().manual_seed(
+                int(context.run_config.get("seed", 0)) * 7919 + _partition_id(context)
+            ),
         )
-    trained_state = apply_dp_noise(trained_state, dp_noise_sigma)
-
-    arrays_out = ArrayRecord(trained_state)
+    arrays_out = ArrayRecord(local_state)
     if global_c is not None and local_c is not None and params_before is not None:
         lr = float(config.get("lr", context.run_config.get("local-lr", 0.01)))
         tau = max(metrics["num_batches"], 1)
@@ -620,6 +630,41 @@ def evaluate_handler(msg: Message, context: Context) -> Message:
 server_app = ServerApp()
 
 
+def merge_train_metrics(rounds_log: list[dict], strategy_result, round_offset: int = 0) -> None:
+    """Fold the per-round `aggregate_train` MetricRecord into `rounds_log`, in place.
+
+    Without this, a strategy's own diagnostics never reach the result file. `rounds_log`
+    is built entirely by `build_evaluate_fn`, which only ever sees *evaluation* metrics;
+    everything `aggregate_train` returns -- FedACO's `pheromone_entropy`, `best_fitness`,
+    `fallback_used`, `delta_mean_sq_norm`, `alpha`, and the equivalents for every
+    baseline -- went to Flower's console output and nowhere else. The Phase 4 close-out
+    added `delta_mean_sq_norm` specifically so a run could be checked for the degenerate
+    regime, and it was not actually persisted anywhere a checker could read it.
+    `paper/ALGORITHM.md` lists these as the algorithm's outputs, so their absence from
+    the result schema was a real hole, not a nicety.
+
+    `Strategy.start()` returns a `Result` whose `train_metrics_clientapp` is keyed by
+    round (verified against the installed flwr==1.36.0 dataclass, not assumed). Its
+    rounds are numbered from 1 within this invocation, so `round_offset` maps them onto
+    the true round count the same way `build_evaluate_fn` does for a resumed run.
+
+    Keys are prefixed `train_` to keep them from colliding with the `test_`/`val_`
+    evaluation metrics already in each entry. A round present in the metrics but absent
+    from `rounds_log` is skipped rather than appended: `rounds_log` is the authoritative
+    record of rounds that were actually evaluated and checkpointed.
+    """
+    metrics = getattr(strategy_result, "train_metrics_clientapp", None)
+    if not metrics:
+        return
+    by_round = {entry["round"]: entry for entry in rounds_log}
+    for round_number, record in metrics.items():
+        entry = by_round.get(int(round_number) + round_offset)
+        if entry is None:
+            continue
+        for key, value in dict(record).items():
+            entry[f"train_{key}"] = value
+
+
 def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offset: int):
     """Closes over `rounds_log` so every call appends to the same list the caller holds
     a reference to -- `Strategy.start()` calls `evaluate_fn` itself and only returns a
@@ -634,6 +679,7 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
     """
     device = _device()
     test_loader = global_test_loader(run_config)
+    val_loader = global_val_loader(run_config)
     checkpoint_dir = _repo_path(str(run_config.get("checkpoint-dir", "results/fl/_checkpoints")))
     run_id = str(run_config.get("_run_id", "unknown"))
 
@@ -642,6 +688,15 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
         model = build_model_from_run_config(run_config).to(device)
         model.load_state_dict(arrays.to_torch_state_dict())
         metrics = evaluate_model(model, test_loader, device)
+        # The global val split (735 images, server-held, never partitioned) is evaluated
+        # every round alongside test, and is the ONLY signal any model-selection or
+        # hyperparameter-search decision may read (plan §5's "honest hyperparameter
+        # search on the val split"). Before this, result files carried `test_*` and
+        # nothing else, so any search would have had to select on the very metric it
+        # reports -- the same contamination `global_val_loader` was introduced to avoid
+        # for FedLAW's weight selection. Costs one extra forward pass over 735 images per
+        # round, ~52% of the existing test pass and negligible against local training.
+        val_metrics = evaluate_model(model, val_loader, device)
 
         if server_round == 0 and round_offset > 0:
             print(f"[round {true_round}] re-confirmed resumed checkpoint (not re-logged)")
@@ -655,39 +710,28 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
                 "test_macro_f1": metrics["macro_f1"],
                 "test_auc": metrics.get("auc_ovr_macro"),
                 "per_class_recall": metrics["per_class_recall"],
+                "val_loss": val_metrics["loss"],
+                "val_accuracy": val_metrics["accuracy"],
+                "val_macro_f1": val_metrics["macro_f1"],
+                "val_auc": val_metrics.get("auc_ovr_macro"),
             }
         )
         save_checkpoint(checkpoint_dir, run_id, true_round, rounds_log, model.state_dict())
         print(
-            f"[round {true_round}] test_macro_f1={metrics['macro_f1']:.4f} "
-            f"test_acc={metrics['accuracy']:.4f}"
+            f"[round {true_round}] val_macro_f1={val_metrics['macro_f1']:.4f} "
+            f"test_macro_f1={metrics['macro_f1']:.4f} test_acc={metrics['accuracy']:.4f}"
         )
+        # `val_macro_f1` is returned too so it is visible in Flower's own round summary,
+        # but selection reads the result file, not this record.
         return MetricRecord(
-            {"test_macro_f1": metrics["macro_f1"], "test_accuracy": metrics["accuracy"]}
+            {
+                "test_macro_f1": metrics["macro_f1"],
+                "test_accuracy": metrics["accuracy"],
+                "val_macro_f1": val_metrics["macro_f1"],
+            }
         )
 
     return evaluate_fn
-
-
-def merge_train_metrics(
-    rounds_log: list[dict], train_metrics_clientapp: dict[int, MetricRecord], round_offset: int
-) -> None:
-    """`Strategy.start()` only returns its `Result` at the very end (verified,
-    `docs/FLOWER_API_NOTES.md`), so every round's own `aggregate_train` diagnostics --
-    FedACO's `alpha`/`alpha_entropy`/`fallback_used`/`aco_time_ms`/`pheromone_entropy`
-    (plan §6.1's schema), or whatever a simpler baseline's `train_metrics_aggr_fn`
-    returns -- can only be merged into `rounds_log` after the fact, not from inside
-    `build_evaluate_fn`'s closure (which never sees `Result` at all). Mutates
-    `rounds_log` in place. `result.train_metrics_clientapp` is keyed by `strategy.
-    start()`'s own internal round numbering (always renumbered from 1 on a fresh
-    call), remapped the same way `build_evaluate_fn` remaps `server_round` ->
-    `true_round`. A `server_round` with no matching `rounds_log` entry (shouldn't
-    happen; defensive only) is silently skipped rather than raising."""
-    rounds_by_number = {entry["round"]: entry for entry in rounds_log}
-    for server_round, metrics in train_metrics_clientapp.items():
-        entry = rounds_by_number.get(server_round + round_offset)
-        if entry is not None:
-            entry["train_metrics"] = dict(metrics)
 
 
 @server_app.main()
@@ -724,11 +768,19 @@ def main(grid: Grid, context: Context) -> None:
         return
 
     device = _device()
-    needs_val_loader = strategy_name == "fedlaw" or (
-        strategy_name == "fedaco" and str(run_config.get("fedaco-fitness-mode", "data_free")) == "server_val"
-    )
-    val_loader = global_val_loader(run_config) if needs_val_loader else None
+    # Built unconditionally rather than gated on `strategy_name == "fedlaw"`. Two
+    # strategies need a server-held val set to choose weights against -- FedLAW, and
+    # FedACO under `aco-fitness-mode="server_val"` -- and the old gate named only the
+    # first, so selecting the second raised "requires model, val_loader, and device"
+    # despite being a declared, supported mode. Constructing it is a mmap'd cache read;
+    # strategies that don't need it ignore it.
+    val_loader = global_val_loader(run_config)
     strategy = strategy_from_run_config(run_config, model=model, val_loader=val_loader, device=device)
+    # FedACO seeds its colony and decays its ant budget from the true round number;
+    # Strategy.start() renumbers from 1 on a resume, so it needs the same offset
+    # build_evaluate_fn gets.
+    if hasattr(strategy, "round_offset"):
+        strategy.round_offset = round_offset
     train_config = ConfigRecord(
         {
             "local-epochs": int(run_config.get("local-epochs", 2)),
@@ -742,7 +794,7 @@ def main(grid: Grid, context: Context) -> None:
     evaluate_fn = build_evaluate_fn(run_config, rounds_log, round_offset)
 
     t_start = time.time()
-    result = strategy.start(
+    strategy_result = strategy.start(
         grid=grid,
         initial_arrays=initial_arrays,
         num_rounds=remaining_rounds,
@@ -750,8 +802,7 @@ def main(grid: Grid, context: Context) -> None:
         evaluate_fn=evaluate_fn,
     )
     wall_clock_s = time.time() - t_start
-
-    merge_train_metrics(rounds_log, result.train_metrics_clientapp, round_offset)
+    merge_train_metrics(rounds_log, strategy_result, round_offset)
 
     write_result(
         output_dir / f"{run_id}.json",
@@ -761,6 +812,24 @@ def main(grid: Grid, context: Context) -> None:
             "wall_clock_s": wall_clock_s,
             "num_rounds_completed": num_rounds,
             "final_test_macro_f1": rounds_log[-1]["test_macro_f1"] if rounds_log else None,
+            # The selection key. `best_val_macro_f1` is the max over rounds, not the last
+            # round's, so a search is not penalized for a config that peaks and then
+            # drifts; `best_val_round` records where it peaked. Anything choosing between
+            # configurations must read these and never `final_test_macro_f1`.
+            "final_val_macro_f1": rounds_log[-1].get("val_macro_f1") if rounds_log else None,
+            "best_val_macro_f1": (
+                max(r["val_macro_f1"] for r in rounds_log if r.get("val_macro_f1") is not None)
+                if any(r.get("val_macro_f1") is not None for r in rounds_log)
+                else None
+            ),
+            "best_val_round": (
+                max(
+                    (r for r in rounds_log if r.get("val_macro_f1") is not None),
+                    key=lambda r: r["val_macro_f1"],
+                )["round"]
+                if any(r.get("val_macro_f1") is not None for r in rounds_log)
+                else None
+            ),
         },
         seed=seed,
     )
@@ -783,9 +852,6 @@ __all__ = [
     "local_train",
     "local_evaluate",
     "per_class_confusion_counts",
-    "is_attacker_client",
-    "corrupt_update",
-    "apply_dp_noise",
     "partition_spec_from_run_config",
     "checkpoint_paths",
     "save_checkpoint",
