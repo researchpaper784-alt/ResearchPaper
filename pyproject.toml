@@ -229,6 +229,11 @@ aco-gamma-dispersion = 1.0
 aco-gamma-entropy = 0.1
 aco-normalize-dispersion = true
 aco-fitness-mode = "data_free"
+# The concentration penalty's shape: "entropy" (log K - H(alpha), the method as proposed)
+# or "gini" (sum_k p_k^2 - 1/K). Only the vertex value differs in practice -- log K vs
+# 1 - 1/K -- and that is what decides whether one `aco-gamma-entropy` can hold across K.
+# See docs/OPEN_QUESTIONS.md, "Residual 3".
+aco-concentration-penalty = "entropy"
 # Heuristic desirability weights (aco/heuristics.py).
 aco-beta-alignment = 2.0
 aco-beta-drift = 1.0

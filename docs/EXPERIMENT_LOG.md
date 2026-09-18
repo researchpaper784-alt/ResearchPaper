@@ -1281,3 +1281,68 @@ Worth stating plainly, because it changes how the earlier entries read: α = [0.
 was the colony finding the optimum it was given, at a K it should never have been run at
 (the `num_supernodes=2` bug put it there). Two separate diagnostics — the INERT verdict
 withdrawn yesterday and this one — both turned out to be artifacts of that same K=2.
+
+
+## 2026-09-18 (later) — the penalty shape, implemented as an ablation rather than a decision
+
+Yesterday's entry named the degenerate optimum and stopped there, on the grounds that
+fixing it would be changing the method on synthetic evidence. That was right about the
+default and wrong about stopping: the fix can be *implemented and left off*, so the first
+real run measures it instead of prompting a second round trip through the GPU budget.
+
+`aco-concentration-penalty` now selects the shape — `"entropy"` (default, the method as
+proposed, `log K - H(alpha)`) or `"gini"` (`sum_k p_k^2 - 1/K`). `corner_margin` reads the
+shape rather than assuming `log K`, and `configs/experiment/ablation_all.yaml` gains two
+cells: `penalty_gini` and `penalty_entropy_strong`. The second exists so a win for the
+first cannot be confounded with "gamma_3 was simply too small" — both run at 0.25, so only
+the shape differs. Ablation sweep goes 150 → 180 cells.
+
+### The argument is scale, and it measures cleanly
+
+Normalized dispersion is bounded and sits near 1 at every K, so a penalty holding it in
+check should be bounded too. Vertex values: `log K` runs 0.69 → 3.9 over K ∈ {2..50};
+`1 - 1/K` runs 0.50 → 0.98. The gamma_3 each shape needs to rule out the degenerate
+vertex, over that same range:
+
+| heterogeneity | entropy | gini | entropy spread | gini spread |
+|---|---|---|---:|---:|
+| 0.5 | 0.070 → 0.026 | 0.097 → 0.103 | 2.71× | 1.06× |
+| 1.0 | 0.168 → 0.058 | 0.233 → 0.232 | 2.88× | **1.01×** |
+| 2.0 | 0.256 → 0.074 | 0.355 → 0.297 | 3.44× | 1.20× |
+| 4.0 | 0.294 → 0.067 | 0.408 → 0.266 | 4.41× | 1.53× |
+
+At heterogeneity 1.0, one gamma_3 covers K=2 through K=50 under "gini" to within 1%.
+
+⚠️ And what it does not fix: the requirement still moves with heterogeneity under both
+shapes — 0.10 to 0.41 for "gini" as noise goes 0.5 → 4.0. "gini" removes the *K*
+dependence, not the need to pick gamma_3 for the data. Saying otherwise would oversell it.
+
+### Two errors in yesterday's own proposal
+
+Yesterday's OPEN_QUESTIONS note proposed `1 - sum_k alpha_k^2` and justified it by the
+gradient "not vanishing at the vertex". Writing the implementation made both wrong:
+
+- **Sign.** `1 - sum alpha^2` is a *diversity* measure; it falls toward a vertex.
+  Subtracting `gamma_3 *` it from F would have *rewarded* concentration — strictly worse
+  than the bug it was meant to fix. The penalty must rise toward the vertex:
+  `sum_k p_k^2 - 1/K`.
+- **The reason.** Entropy's gradient is `log alpha_j + 1`, which *diverges* as
+  `alpha_j -> 0`; Gini's is `2 alpha_j`, which vanishes there — the opposite of what was
+  claimed. And it is beside the point: the colony searches a discrete level set containing
+  0 exactly, so it jumps to the vertex rather than walking there. Only the penalty's
+  *value* at the vertex matters.
+
+Both corrected in place in docs/OPEN_QUESTIONS.md, with the error stated rather than
+edited away. The measured claim above replaces the hand-wave.
+
+### A new variant-overlap case, checked before trusting it
+
+`penalty_gini` and `penalty_entropy_strong` are the first two variants in this project
+that share an override *value* (`aco-gamma-entropy=0.25`). That is the exact shape of the
+resume bug that hit in September — a control handed a sibling's result file. Verified on
+real expanded cells and pinned by
+`test_two_variants_sharing_a_key_value_are_still_told_apart`: each of the three cells
+resolves to its own result. The by-value discriminator handles it, which is what it was
+rewritten for.
+
+324 tests pass, `ruff check .` clean.

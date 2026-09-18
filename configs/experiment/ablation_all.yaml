@@ -95,6 +95,32 @@ variants:
   - name: no_safety_fallback
     aco-safety-fallback: false
 
+  # --- The concentration penalty's shape -----------------------------------------
+  # Dispersion is a weighted variance, so it is exactly zero at a single-client vertex:
+  # the fitness pays nothing for discarding every client but one, and the only thing
+  # standing against that is `gamma_3 * P_max(K)` -- log K under the proposed "entropy"
+  # penalty, 1 - 1/K under "gini". Dispersion is bounded and sits near 1 at every K after
+  # normalization, so "gini" is on its scale and "entropy" is not: the gamma_3 needed to
+  # rule out the degenerate vertex varies 2.7-4.4x across K in {2..50} under "entropy"
+  # and 1.01-1.53x under "gini" (docs/EXPERIMENT_LOG.md, 2026-09-18).
+  #
+  # Measured on synthetic deltas, which is why this is an ablation rather than a changed
+  # default: whether it matters on real brain-MRI deltas at K=20 is what these cells
+  # settle. Read them next to `corner_margin`, which is logged per round -- if the
+  # default's margin is comfortably negative at this K, the two variants should differ by
+  # very little, and that null result is the useful answer.
+  - name: penalty_gini
+    aco-concentration-penalty: gini
+    # gamma_3 is re-pointed with the shape, not held fixed: the two penalties have
+    # different vertex values, so the same number means a different strength under each.
+    # 0.23 is the measured K-invariant requirement at heterogeneity 1.0, rounded up.
+    aco-gamma-entropy: 0.25
+  # The same strengthening applied to the *proposed* shape, so `penalty_gini` is not
+  # confounded with "gamma_3 was simply too small". Under "entropy" this is well above
+  # every K's requirement, which is the point: it isolates the shape from the level.
+  - name: penalty_entropy_strong
+    aco-gamma-entropy: 0.25
+
   # --- gamma_2, the dispersion weight --------------------------------------------
   # Left at 1.0 in the Phase 4 close-out rather than retuned, because normalizing
   # dispersion by trace(G)/K made it co-equal with alignment and silently changing a

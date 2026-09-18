@@ -310,3 +310,40 @@ def test_a_variantless_control_still_matches_its_own_result(tmp_path: Path) -> N
 
     assert find_result(tmp_path, control, common, variants).name == "clean.json"
     assert find_result(tmp_path, ablated, common, variants).name == "nofb.json"
+
+
+def test_two_variants_sharing_a_key_value_are_still_told_apart(tmp_path: Path) -> None:
+    """The Phase 7 penalty-shape ablation introduced the first pair of variants that
+    *share* an override value: `penalty_gini` sets both `aco-concentration-penalty=gini`
+    and `aco-gamma-entropy=0.25`, and `penalty_entropy_strong` sets the same gamma so the
+    shape is isolated from the level. If the discriminator let the shared gamma carry the
+    match, each would be handed the other's result and the ablation would difference a
+    variant against itself.
+    """
+    common = {"num-clients": 20}
+    variants = [
+        {"name": "default"},
+        {"name": "penalty_gini", "aco-concentration-penalty": "gini", "aco-gamma-entropy": 0.25},
+        {"name": "penalty_entropy_strong", "aco-gamma-entropy": 0.25},
+    ]
+    cells = {
+        "default": Cell("fedaco", "iid", 0, {}, variant="default"),
+        "penalty_gini": Cell(
+            "fedaco",
+            "iid",
+            0,
+            {"aco-concentration-penalty": "gini", "aco-gamma-entropy": 0.25},
+            variant="penalty_gini",
+        ),
+        "penalty_entropy_strong": Cell(
+            "fedaco", "iid", 0, {"aco-gamma-entropy": 0.25}, variant="penalty_entropy_strong"
+        ),
+    }
+    # As flwr resolves them: every declared key is present on every run, with its default.
+    defaults = {"aco-concentration-penalty": "entropy", "aco-gamma-entropy": 0.1}
+    for name, cell in cells.items():
+        _write_result(tmp_path / f"{name}.json", {**defaults, **cell.run_config(common)})
+
+    for name, cell in cells.items():
+        found = find_result(tmp_path, cell, common, variants)
+        assert found is not None and found.name == f"{name}.json", name

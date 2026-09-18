@@ -273,3 +273,68 @@ def test_the_guard_strengthens_with_K_and_with_gamma_entropy() -> None:
         small, torch.full((2,), 0.5)
     )
     assert corner_margin(small, torch.full((2,), 0.5), DataFreeFitnessConfig(gamma_entropy=1.0)) < 0
+
+
+# ======================================================================================
+# The concentration penalty's shape
+# ======================================================================================
+
+
+def test_both_penalty_shapes_are_zero_at_uniform_and_maximal_at_a_vertex() -> None:
+    """The invariant that makes them comparable at all: each charges nothing for the
+    FedAvg point and its full price for a single-client answer."""
+    from fedswarm.aco.fitness import concentration_penalty
+
+    for shape, expected_max in (("entropy", math.log(8)), ("gini", 1 - 1 / 8)):
+        assert concentration_penalty(torch.full((8,), 1 / 8), shape) == pytest.approx(0.0, abs=1e-6)
+        assert concentration_penalty(torch.eye(8)[0], shape) == pytest.approx(expected_max, abs=1e-6)
+
+
+def test_gini_stays_on_dispersions_scale_as_K_grows_and_entropy_does_not() -> None:
+    """Why the shape matters rather than the constant. Dispersion is bounded and sits near
+    1 at every K once normalized, so the penalty holding it in check has to be bounded too.
+    `log K` is not: by K=50 it charges four times what it charged at K=2 for the same
+    degenerate answer, so one `gamma_entropy` cannot be right at both ends."""
+    from fedswarm.aco.fitness import concentration_penalty
+
+    entropy = [concentration_penalty(torch.eye(k)[0], "entropy") for k in (2, 50)]
+    gini = [concentration_penalty(torch.eye(k)[0], "gini") for k in (2, 50)]
+
+    assert entropy[1] / entropy[0] > 4
+    assert gini[1] / gini[0] < 2
+    assert all(0 < g < 1 for g in gini)
+
+
+def test_corner_margin_follows_the_shape() -> None:
+    """`corner_margin` computes the vertex side in closed form, so it has to know which
+    penalty is in force -- reading `log K` under a "gini" run would report a margin the
+    run does not have."""
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, corner_margin
+
+    gram = precompute_gram(_consensus_deltas(6, noise=1.5))
+    base = torch.full((6,), 1 / 6)
+
+    for shape in ("entropy", "gini"):
+        config = DataFreeFitnessConfig(concentration_penalty=shape, gamma_entropy=0.25)
+        fitness = DataFreeFitness(gram, config)
+        direct = max(fitness.evaluate(torch.eye(6)[j]) for j in range(6)) - fitness.evaluate(base)
+        assert corner_margin(gram, base, config) == pytest.approx(direct, abs=1e-5)
+
+
+def test_an_unknown_penalty_shape_raises_rather_than_defaulting() -> None:
+    """Silently falling back to "entropy" would turn a mistyped ablation into a
+    valid-looking run of the control -- the same failure mode `aco-persistence` guards
+    against."""
+    from fedswarm.aco.fitness import concentration_penalty
+
+    with pytest.raises(ValueError, match="Unknown concentration_penalty"):
+        concentration_penalty(torch.full((4,), 0.25), "simpson")
+
+
+def test_the_default_is_still_the_method_as_proposed() -> None:
+    """"gini" exists so Phase 7 can measure the choice on real data. Making it the default
+    on synthetic evidence would be changing the method under the paper's own description
+    of it."""
+    from fedswarm.aco.fitness import DataFreeFitnessConfig
+
+    assert DataFreeFitnessConfig().concentration_penalty == "entropy"

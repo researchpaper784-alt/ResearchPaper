@@ -16,7 +16,7 @@ from flwr.serverapp.strategy import FedAdam, FedAvg, FedMedian, FedProx, FedTrim
 from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig
-from fedswarm.aco.fitness import DataFreeFitnessConfig
+from fedswarm.aco.fitness import CONCENTRATION_PENALTIES, DataFreeFitnessConfig
 from fedswarm.aco.heuristics import HeuristicWeights
 from fedswarm.aco.pheromone import PheromoneConfig
 from fedswarm.strategies.fedaco import FedACO, FedACOConfig
@@ -185,6 +185,17 @@ def _build_fedaco(
         # The Phase 7 A1 ablation: "none" | "full" | "decayed".
         persistence=persistence,
     )
+    penalty_shape = str(
+        run_config.get("aco-concentration-penalty", DataFreeFitnessConfig.concentration_penalty)
+    )
+    if penalty_shape not in CONCENTRATION_PENALTIES:
+        # Validated here rather than at first use: `concentration_penalty` is called once
+        # per ant per iteration, so an unknown value would surface from inside the colony
+        # mid-round -- where `flwr run` reports it as "Exit Code: 700" and still exits 0.
+        raise ValueError(
+            f"Unknown aco-concentration-penalty {penalty_shape!r} "
+            f"(expected one of {CONCENTRATION_PENALTIES})"
+        )
     fitness = DataFreeFitnessConfig(
         gamma_alignment=float(
             run_config.get("aco-gamma-alignment", DataFreeFitnessConfig.gamma_alignment)
@@ -199,6 +210,8 @@ def _build_fedaco(
             run_config.get("aco-normalize-dispersion", DataFreeFitnessConfig.normalize_dispersion),
             DataFreeFitnessConfig.normalize_dispersion,
         ),
+        # Phase 7's penalty-shape ablation: "entropy" (the method as proposed) | "gini".
+        concentration_penalty=penalty_shape,
     )
     heuristics = HeuristicWeights(
         beta_alignment=float(run_config.get("aco-beta-alignment", HeuristicWeights.beta_alignment)),

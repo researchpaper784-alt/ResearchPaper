@@ -527,21 +527,56 @@ K=20 is (narrowly) safe and a K=4 validation run is not, which is the opposite o
 smoke test should be. That is why the `K=4` recommendation has been removed everywhere.
 
 **Why not just raise gamma_entropy.** Because it would be a fix by coincidence. A penalty
-growing as `log K` against a term that vanishes outright is the wrong shape: any
-gamma_3 chosen to work at K=20 is still arbitrary at K=5, and one chosen at K=5
-over-penalizes concentration at K=50, where concentrating on a good subset may be the
-right answer. The structurally correct options are a dispersion floor, or replacing the
-entropy penalty with `1 - sum_k alpha_k^2` (bounded, and its gradient does not vanish at
-the vertex). Both change the method as proposed in plan §4.5, so neither is being adopted
-on synthetic evidence.
+growing as `log K` against a term that vanishes outright is the wrong shape: any gamma_3
+chosen to work at K=20 is still arbitrary at K=5, and one chosen at K=5 over-penalizes
+concentration at K=50, where concentrating on a good subset may be the right answer.
 
-**What settles it.** `corner_margin` is computed exactly, in O(K^2), and logged every
-round (`strategies/fedaco.py`), and `check_fedaco_health.py` question 3 reads it. The
-first real multi-round run at K>=10 will say whether the margin is positive on actual
-brain-MRI deltas. If it is, the penalty shape is the thing to change and the ablation
-belongs in Phase 7; if it is comfortably negative at the sweep's K, this stays recorded as
-a sensitivity of the method rather than a defect. `make fitness-landscape` maps the regime
-in the meantime.
+**Update, 2026-09-18 -- the alternative is implemented, measured, and correcting two
+errors in the paragraph this replaces.** The shape is now selectable:
+`aco-concentration-penalty` takes `"entropy"` (the default, the method as proposed,
+`log K - H(alpha)`) or `"gini"` (`sum_k p_k^2 - 1/K`, Simpson concentration).
+
+Two things the earlier note got wrong, recorded rather than quietly edited:
+
+1. **Sign.** It proposed `1 - sum_k alpha_k^2`. That is a *diversity* measure -- it
+   *falls* toward a vertex, so subtracting `gamma_3 *` it from F would have rewarded
+   concentration, making the problem strictly worse. The penalty has to rise toward the
+   vertex, hence `sum_k p_k^2 - 1/K` as implemented.
+2. **The reason.** It justified the swap by the penalty's gradient "not vanishing at the
+   vertex". That is backwards on the facts and irrelevant to the argument. The entropy
+   penalty's gradient is `log alpha_j + 1`, which *diverges* as `alpha_j -> 0`; the Gini
+   penalty's is `2 alpha_j`, which vanishes there. And neither matters, because the
+   colony searches a discrete level set that contains 0 exactly (`level_set`'s explicit
+   floor level) -- it jumps to the vertex, it does not walk there. The operative quantity
+   is the penalty's *value* at the vertex, not its slope near it.
+
+The real argument is scale. Normalized dispersion is bounded and sits near 1 at every K,
+so the penalty holding it in check should be bounded too. Vertex values are `log K` for
+"entropy" (0.69 at K=2, 3.9 at K=50) and `1 - 1/K` for "gini" (0.5 to 0.98). Measured, the
+gamma_3 needed to rule out the degenerate vertex across K in {2, 4, 10, 20, 50}:
+
+| heterogeneity | entropy spread | gini spread |
+|---|---:|---:|
+| 0.5 | 2.71x | 1.06x |
+| 1.0 | 2.88x | 1.01x |
+| 2.0 | 3.44x | 1.20x |
+| 4.0 | 4.41x | 1.53x |
+
+At heterogeneity 1.0 the "gini" requirement is 0.231-0.233 across the whole range -- one
+number works everywhere. Under "entropy" it runs 0.168 down to 0.058.
+
+⚠️ Note what this does *not* fix: the requirement still moves with heterogeneity under
+both shapes (0.10 -> 0.41 for "gini" as noise goes 0.5 -> 4.0). "gini" removes the K
+dependence specifically, not the need to pick gamma_3 for the data.
+
+**What settles it.** `corner_margin` is computed exactly, in O(K^2), honours whichever
+shape is in force, and is logged every round (`strategies/fedaco.py`);
+`check_fedaco_health.py` question 3 reads it. The `penalty_gini` and
+`penalty_entropy_strong` cells in `configs/experiment/ablation_all.yaml` measure the
+choice on real data -- the second isolates the shape from the level, so a win for "gini"
+cannot be confounded with "gamma_3 was simply too small". The default stays "entropy":
+changing it on synthetic deltas would be changing the method under the paper's own
+description of it. `make fitness-landscape` maps the regime in the meantime.
 
 ⚠️ The numbers above come from synthetic deltas (a shared direction plus isotropic
 Gaussian noise). Real training deltas are not isotropic, so treat the crossover values as

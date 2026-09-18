@@ -235,6 +235,7 @@ def test_run_config_reaches_every_fedaco_knob() -> None:
             "aco-gamma-dispersion": 0.25,
             "aco-beta-drift": 3.0,
             "aco-safety-fallback": False,
+            "aco-concentration-penalty": "gini",
         }
     )
     assert isinstance(strategy, FedACO)
@@ -250,6 +251,18 @@ def test_run_config_reaches_every_fedaco_knob() -> None:
     assert cfg.iters_start == FedACOConfig.iters_start
     assert cfg.fitness.normalize_dispersion is True
     assert cfg.fitness_mode == "data_free"
+    assert cfg.fitness.concentration_penalty == "gini"
+
+
+def test_a_mistyped_penalty_shape_is_rejected_at_construction() -> None:
+    """Not at first use. `concentration_penalty` runs once per ant per iteration, so an
+    unknown value would surface from inside the colony mid-round -- where `flwr run`
+    reports it as "Exit Code: 700" while the outer process still exits 0, and a sweep
+    counts the cell as simply having produced no result file."""
+    with pytest.raises(ValueError, match="aco-concentration-penalty"):
+        strategy_from_run_config(
+            {"strategy-name": "fedaco", "aco-concentration-penalty": "simpson"}
+        )
 
 
 def test_server_val_fitness_mode_requires_its_dependencies() -> None:

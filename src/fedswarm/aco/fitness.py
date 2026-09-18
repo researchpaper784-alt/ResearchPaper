@@ -22,10 +22,40 @@ class Fitness(Protocol):
     def evaluate(self, alpha: torch.Tensor) -> float: ...
 
 
+CONCENTRATION_PENALTIES = ("entropy", "gini")
+
+
 def _entropy(alpha: torch.Tensor, eps: float = 1e-12) -> float:
     total = alpha.sum().clamp_min(eps)
     probs = (alpha / total).clamp_min(eps)
     return float(-(probs * probs.log()).sum())
+
+
+def concentration_penalty(alpha: torch.Tensor, shape: str = "entropy") -> float:
+    """How much the fitness charges for putting the weight on few clients.
+
+    Zero at uniform under both shapes, maximal at a single-client vertex, and that
+    maximum is the whole story: `log K` for "entropy", `1 - 1/K` for "gini". Dispersion,
+    the term this is holding in check, is bounded and sits near 1 after normalization at
+    every K -- so "gini" is on its scale and "entropy" is not.
+    """
+    if shape not in CONCENTRATION_PENALTIES:
+        raise ValueError(
+            f"Unknown concentration_penalty {shape!r} -- expected one of "
+            f"{CONCENTRATION_PENALTIES}"
+        )
+    num_clients = alpha.numel()
+    if shape == "entropy":
+        return math.log(num_clients) - _entropy(alpha)
+    probs = alpha / alpha.sum().clamp_min(1e-12)
+    return float((probs * probs).sum()) - 1.0 / num_clients
+
+
+def _max_concentration_penalty(num_clients: int, shape: str) -> float:
+    """The penalty at a single-client vertex -- what `corner_margin` needs, in closed
+    form. Kept next to `concentration_penalty` so the two cannot drift apart; the tests
+    check them against each other."""
+    return math.log(num_clients) if shape == "entropy" else 1.0 - 1.0 / num_clients
 
 
 @dataclass
@@ -39,6 +69,17 @@ class DataFreeFitnessConfig:
     # results produced before 2026-09-17; there is no experimental reason to set it
     # False. See docs/EXPERIMENT_LOG.md for the measured justification.
     normalize_dispersion: bool = True
+    # Which shape the concentration penalty takes. "entropy" is the method as proposed
+    # (plan §4.5): `log K - H(alpha)`, worth `gamma_3 * log K` at a single-client vertex.
+    # "gini" is `sum_k p_k^2 - 1/K` (Simpson concentration), worth `gamma_3 * (1 - 1/K)`
+    # there. The difference is not cosmetic: dispersion is bounded and saturates near 1
+    # after normalization, so a penalty that grows as log K is not on its scale, and the
+    # gamma_3 needed to rule out the degenerate vertex then depends on K. Measured over
+    # K in {2..50}, that requirement varies 2.7-4.4x under "entropy" and 1.01-1.53x under
+    # "gini" (docs/EXPERIMENT_LOG.md, 2026-09-18). "entropy" remains the default because
+    # it is the method as proposed; "gini" exists so the Phase 7 ablation can measure the
+    # choice on real data instead of the question being settled on synthetic deltas.
+    concentration_penalty: str = "entropy"
 
 
 class DataFreeFitness:
@@ -74,12 +115,12 @@ class DataFreeFitness:
         dispersion = weighted_dispersion(alpha, self.gram.gram)
         if self.config.normalize_dispersion:
             dispersion = dispersion / max(self.gram.mean_sq_norm, eps)
-        concentration_penalty = math.log(alpha.numel()) - _entropy(alpha)
+        penalty = concentration_penalty(alpha, self.config.concentration_penalty)
 
         f = (
             self.config.gamma_alignment * alignment
             - self.config.gamma_dispersion * dispersion
-            - self.config.gamma_entropy * concentration_penalty
+            - self.config.gamma_entropy * penalty
         )
         return float(f)
 
@@ -103,7 +144,10 @@ def corner_margin(
     collapses to `cos(delta_j, robust_mean)` and the concentration penalty to its maximum
     `log K`. So, for any Gram matrix whatsoever:
 
-        F(e_j) = gamma_1 * cos(delta_j, robust_mean) - gamma_3 * log K
+        F(e_j) = gamma_1 * cos(delta_j, robust_mean) - gamma_3 * P_max(K)
+
+    where `P_max(K)` is the concentration penalty at a vertex: `log K` under the default
+    "entropy" shape, `1 - 1/K` under "gini".
 
     That identity is what makes this cheap and exact rather than a search. The penalty is
     the only thing standing against a term that vanishes outright, and it grows only as
@@ -123,8 +167,10 @@ def corner_margin(
     cosines = gram.g_rob / (norms * math.sqrt(max(gram.rob_norm_sq, eps)))
 
     num_clients = int(base_weights.numel())
-    best_vertex = config.gamma_alignment * float(cosines.max()) - config.gamma_entropy * math.log(
-        num_clients
+    best_vertex = config.gamma_alignment * float(
+        cosines.max()
+    ) - config.gamma_entropy * _max_concentration_penalty(
+        num_clients, config.concentration_penalty
     )
     fedavg = DataFreeFitness(gram, config).evaluate(base_weights)
     return best_vertex - fedavg
