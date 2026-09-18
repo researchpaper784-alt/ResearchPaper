@@ -22,7 +22,7 @@ centralized ceiling is measured on real data (SimpleCNN@112: 0.9300 macro-F1 Bat
 ⚠️ **No federated results exist yet.** Every FL run so far has been against a synthetic
 pixel cache, because the raw images need Kaggle credentials the build environment does not
 have — so the pipeline is verified end to end and not one number in it is. `results/` is
-empty by design (gitignored). Run `make validate-fedaco K=4 && make health` before
+empty by design (gitignored). Run `make validate-fedaco && make health` before
 committing compute to any sweep: it is about twenty minutes, and it says whether FedACO's
 mechanism is doing anything at all.
 
@@ -73,16 +73,27 @@ what is missing.
 
 ```bash
 make pheromone-budget       # can a run of this length answer question 1 at all?
-make validate-fedaco K=4    # two short runs: FedACO and FedAvg, same seed and partition
+make fitness-landscape      # is the fitness optimum degenerate at this K?
+make validate-fedaco        # two short runs: FedACO and FedAvg, same seed and partition
 make health                 # does FedACO's mechanism actually do anything?
 ```
 
-`make health` answers three questions the accuracy columns cannot: whether the colony is
+`make health` answers four questions the accuracy columns cannot: whether the colony is
 searching at all (pheromone entropy against its `log(L)` ceiling), whether the deposit
-floor has engaged, and whether the safety fallback — not the colony — is carrying any
-margin over FedAvg. A sweep run before that check can produce 360 cells of numbers about
+floor has engaged, whether the fitness optimum is degenerate, and whether the safety
+fallback — not the colony — is carrying any margin over FedAvg. A sweep run before that check can produce 360 cells of numbers about
 a mechanism that was never running. It costs about twenty minutes against the sweep's
 several hundred hours.
+
+⚠️ **Don't shrink K for the validation run.** Dispersion is a weighted variance, so it is
+*exactly zero* at a single-client vertex — the fitness pays nothing for discarding every
+client but one, and the only guard is `gamma_entropy * log K`, which weakens as the
+federation shrinks. On synthetic deltas that guard needs `gamma_entropy > 0.17` at K=2 and
+`> 0.13` at K=4 against the default `0.1`, so a K=4 smoke test sits in the regime where
+the fitness optimum is degenerate while the K=20 sweep it is validating does not. A
+correctly working colony there returns a one-client answer and every other signal reads as
+success. `corner_margin` is logged per round and question 3 reads it;
+`make fitness-landscape` maps the regime before the run.
 
 Question 1 is judged against what the run's own budget makes reachable, not against a
 fixed gap, and `make pheromone-budget` prints that ceiling for each budget. τ starts *at*

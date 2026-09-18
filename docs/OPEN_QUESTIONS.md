@@ -503,6 +503,50 @@ exactly uniform. This is not fixed and arguably cannot be fixed from inside F al
 is a reason to read `pheromone_entropy` rather than trust `fallback_used` as a health
 signal. Recorded so no one later reads `fallback_used=0` as evidence the method worked.
 
+**2026-09-18: this residual now has a concrete instance, and it is worse than "cannot
+detect".** See Residual 3 -- in the degenerate-optimum case `fallback_used=0` is not
+merely uninformative, it is *correct and misleading at once*: the colony genuinely did
+beat the FedAvg point, on an objective that wanted a useless answer.
+
+### Residual 3 -- the fitness pays nothing for discarding every client but one
+
+**Status: open, quantified, deliberately not "fixed".**
+
+Dispersion is `sum_k alpha_k ||delta_k - Delta(alpha)||^2`, a weighted variance about the
+weighted mean. At a single-client vertex `alpha = e_j` the weighted mean *is* `delta_j`,
+so the term is exactly zero -- for any Gram matrix, not approximately and not only in
+degenerate rounds. Alignment collapses to `cos(delta_j, robust_mean)` and the
+concentration penalty to its maximum, giving the exact identity
+
+    F(e_j) = gamma_1 * cos(delta_j, robust_mean) - gamma_3 * log K
+
+The whole price of throwing K-1 clients away is `gamma_3 * log K`. Measured on synthetic
+deltas, the `gamma_entropy` needed to keep the corner from winning is 0.168 at K=2, 0.126
+at K=4, 0.090 at K=10 and 0.074 at K=20 -- against the default **0.1**. So the sweep's
+K=20 is (narrowly) safe and a K=4 validation run is not, which is the opposite of what a
+smoke test should be. That is why the `K=4` recommendation has been removed everywhere.
+
+**Why not just raise gamma_entropy.** Because it would be a fix by coincidence. A penalty
+growing as `log K` against a term that vanishes outright is the wrong shape: any
+gamma_3 chosen to work at K=20 is still arbitrary at K=5, and one chosen at K=5
+over-penalizes concentration at K=50, where concentrating on a good subset may be the
+right answer. The structurally correct options are a dispersion floor, or replacing the
+entropy penalty with `1 - sum_k alpha_k^2` (bounded, and its gradient does not vanish at
+the vertex). Both change the method as proposed in plan §4.5, so neither is being adopted
+on synthetic evidence.
+
+**What settles it.** `corner_margin` is computed exactly, in O(K^2), and logged every
+round (`strategies/fedaco.py`), and `check_fedaco_health.py` question 3 reads it. The
+first real multi-round run at K>=10 will say whether the margin is positive on actual
+brain-MRI deltas. If it is, the penalty shape is the thing to change and the ablation
+belongs in Phase 7; if it is comfortably negative at the sweep's K, this stays recorded as
+a sensitivity of the method rather than a defect. `make fitness-landscape` maps the regime
+in the meantime.
+
+⚠️ The numbers above come from synthetic deltas (a shared direction plus isotropic
+Gaussian noise). Real training deltas are not isotropic, so treat the crossover values as
+indicative. The identity itself is exact and data-independent.
+
 ### Still deferred to Phase 7, unchanged
 
 Global shrinkage `s` is swept, not searched; `client_probe`'s broadcast/collect

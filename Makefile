@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke validate-fedaco health pheromone-budget hparam-search hparam-search-plan iid-band main main-plan ablations ablations-plan robustness robustness-plan tables-robustness figures-data figures figures-ablation tables tables-ablation clean
+.PHONY: setup data test lint smoke validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan ablations ablations-plan robustness robustness-plan tables-robustness figures-data figures figures-ablation tables tables-ablation clean
 
 setup:
 	uv venv --python 3.12 .venv
@@ -34,7 +34,13 @@ hparam-search-plan:
 # and partition) so the comparison is like-for-like, then the health check. Everything
 # downstream -- the Phase 6 sweep's shape, its compute budget, and whether FedACO's
 # mechanism is worth sweeping at all -- depends on what this says.
-# K defaults to 10. Override on a small box: `make validate-fedaco K=4`.
+# K defaults to 10. Overriding it *down* is not free, and not only for statistics: the
+# data-free fitness pays nothing for a single-client answer (dispersion is a weighted
+# variance and is exactly zero at a simplex vertex), and the only guard is
+# `gamma_entropy * log K`. On synthetic deltas that guard needs gamma_entropy > 0.17 at
+# K=2 and > 0.13 at K=4, against the default 0.1 -- so a K=4 validation run sits in the
+# regime where the fitness optimum is degenerate while the K=20 sweep it is validating
+# does not. `make fitness-landscape` maps it; `corner_margin` measures it per round.
 # ROUNDS is load-bearing for the health check, not just for accuracy: tau starts uniform
 # and walks away from it at a rate set by the deposit and the iteration budget, so a short
 # run cannot answer "is the colony searching?" at all. At ROUNDS=15 with the default
@@ -66,6 +72,10 @@ health:
 # What a given colony budget makes *reachable* on question 1, before spending a run on it.
 pheromone-budget:
 	.venv/bin/python scripts/analyze_pheromone_dynamics.py
+
+# Where (K, gamma_entropy, heterogeneity) makes the fitness prefer a single-client answer.
+fitness-landscape:
+	.venv/bin/python scripts/analyze_fitness_landscape.py
 
 # Phase 5 -- the IID acceptance gate. Under IID there is little heterogeneity for an
 # aggregation rule to exploit, so a large spread means something other than the method is

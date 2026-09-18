@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from check_fedaco_health import (  # noqa: E402
     check_beats_fedavg,
     check_colony_searching,
+    check_degenerate_optimum,
     check_deposit_floor,
     load_results,
     wall_clock_note,
@@ -235,3 +236,53 @@ def test_load_results_filters_by_strategy(tmp_path: Path) -> None:
     assert len(load_results(tmp_path, "fedaco")) == 1
     assert len(load_results(tmp_path, "fedavg")) == 1
     assert len(load_results(tmp_path)) == 2
+
+
+# ======================================================================================
+# 3. Is the fitness optimum degenerate?
+# ======================================================================================
+
+
+def _margin_run(margins: list[float], num_clients: int = 4, alpha_max: float = 0.5) -> dict:
+    run = _run(
+        "fedaco",
+        [
+            {"round": i + 1, "corner_margin": m, "alpha_max": alpha_max}
+            for i, m in enumerate(margins)
+        ],
+    )
+    run["config"]["run_config"] = {"num-clients": num_clients}
+    return run
+
+
+def test_a_fitness_that_prefers_one_client_is_flagged() -> None:
+    """The failure nothing else in this report can see. A colony that searches well finds
+    the corner; `fallback_used` stays 0, `best_fitness` beats `fedavg_fitness`, alpha looks
+    decisive -- every signal reads as success while the method returns "use one client"."""
+    check = check_degenerate_optimum(_margin_run([0.05, 0.03, 0.06, 0.04], alpha_max=0.98))
+
+    assert check["verdict"] == "DEGENERATE"
+    assert "discard the rest" in check["detail"]
+
+
+def test_a_corner_that_barely_loses_is_not_a_comfortable_pass() -> None:
+    """At the sweep's K under high heterogeneity the margin measured on synthetic deltas
+    is about -0.01: negative, but close enough that a different partition could flip it.
+    Reporting that as CLEAR would be the wrong shape of reassurance."""
+    check = check_degenerate_optimum(_margin_run([-0.011, -0.008, -0.015, -0.009], num_clients=20))
+
+    assert check["verdict"] == "MARGINAL"
+
+
+def test_a_healthy_margin_is_clear() -> None:
+    check = check_degenerate_optimum(_margin_run([-0.20, -0.19, -0.22, -0.18], num_clients=20))
+
+    assert check["verdict"] == "CLEAR"
+
+
+def test_a_run_without_the_metric_is_no_data_not_a_pass() -> None:
+    """Every result file written before 2026-09-18 lacks `corner_margin`. Treating the
+    absence as healthy is how a known failure mode gets silently reintroduced."""
+    check = check_degenerate_optimum(_run("fedaco", [{"round": 1, "alpha_max": 0.9}]))
+
+    assert check["verdict"] == "NO DATA"

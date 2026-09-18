@@ -755,6 +755,15 @@ then `make health`. Client resources have to be pinned first — the target does
 because the Simulation Runtime assigns 2 CPUs per ClientApp by default and oversubscribing
 stalls silently rather than queueing.
 
+> **Superseded, 2026-09-18 — drop the `K=4`.** At K=4 the fitness optimum is degenerate:
+> dispersion is exactly zero at a single-client vertex and `gamma_entropy * log K` is too
+> small to pay for it, so a correctly working colony returns a one-client answer and every
+> other signal reads as success. Run the default K=10 or higher. See "the fitness pays
+> nothing for throwing clients away" below.
+
+> **Also superseded** — the CPU-oversubscription claim in the last sentence was retracted
+> on 2026-09-17; the stall was `num_supernodes` defaulting to 2, not oversubscription.
+
 ---
 
 ## 2026-09-17 — Phase 6: the main sweep runner
@@ -1169,3 +1178,106 @@ way. What it does say is that the reduced smoke budget cannot answer question 1 
 `make validate-fedaco` should run long enough (or with a larger `aco-iters-start` /
 `aco-q-deposit`) that the threshold is reachable. The projection table says the plan's
 default budget clears it from round 1.
+
+
+## 2026-09-18 — the fitness pays nothing for throwing clients away
+
+Reading the α column of the one FedACO run, looking for something else:
+
+| round | α | best F | FedAvg F | fallback |
+|---:|---|---:|---:|---:|
+| 1 | [0.990, 0.010] | 0.780 | 0.663 | 0 |
+| 2 | [0.009, 0.991] | 0.917 | 0.651 | 0 |
+| 3 | [0.998, 0.002] | 0.901 | 0.708 | 0 |
+| 4 | [0.038, 0.962] | 0.891 | 0.713 | 0 |
+
+The colony put essentially all the weight on one client every round, and flipped which
+one. `alpha_entropy` averaged 0.06 against a ceiling of log 2 = 0.69. Every other signal
+said this was going well: the fallback never fired, and the colony beat the FedAvg point
+on fitness by a comfortable margin in all four rounds.
+
+**It was going well. The target is degenerate.** Dispersion is
+`sum_k alpha_k ||delta_k - Delta(alpha)||^2` — a weighted variance about the weighted
+mean. At `alpha = e_j` the mean *is* `delta_j`, so every term is zero. Not small: zero,
+for any Gram matrix whatsoever. Alignment collapses to `cos(delta_j, robust_mean)` and the
+concentration penalty to its maximum, so
+
+    F(e_j) = gamma_1 * cos(delta_j, robust_mean) - gamma_3 * log K
+
+exactly. Verified against `DataFreeFitness.evaluate` at three K with non-default gammas
+(`test_vertex_fitness_has_a_closed_form`). The entire cost of discarding K-1 clients is
+`gamma_3 * log K`, and that guard grows only logarithmically while the thing it guards
+against vanishes outright.
+
+### It bites at small K, which is exactly where validation runs live
+
+`F(best vertex) - F(FedAvg point)` on synthetic deltas (a shared consensus direction plus
+isotropic noise; `noise` is the heterogeneity knob). Positive means the degenerate answer
+wins:
+
+| noise | K=2 | K=4 | K=6 | K=10 | K=20 | K=50 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.3 | −0.049 | −0.107 | −0.144 | −0.192 | −0.258 | −0.348 |
+| 1.0 | **+0.047** | **+0.036** | **+0.014** | −0.023 | −0.079 | −0.164 |
+| 2.0 | **+0.108** | **+0.108** | **+0.093** | **+0.053** | −0.011 | −0.100 |
+| 4.0 | **+0.135** | **+0.125** | **+0.113** | **+0.061** | −0.022 | −0.130 |
+
+and the `gamma_entropy` each K needs to keep the corner from winning at noise 1.0:
+**0.168 at K=2, 0.126 at K=4, 0.090 at K=10, 0.074 at K=20** — against the project's
+default of **0.1**.
+
+So the sweep's K=20 is safe and `make validate-fedaco K=4`, the command the README told
+people to validate it with, was not. A smoke test in the one regime the real run is not
+in. The K=4 recommendation is removed from the README, the Makefile and PROGRESS_REVIEW,
+and the Makefile's `K ?=` now carries the reason.
+
+⚠️ The deltas in that table are synthetic and isotropic; real training deltas are not, so
+the crossover values are indicative. The vertex identity above is exact and holds for any
+data — which is why the fix is to measure it rather than to trust the table.
+
+### What changed
+
+- `fitness.corner_margin(gram, base_weights, config)`: `F(best vertex) - F(FedAvg point)`,
+  exact and O(K^2) because the vertex side needs no search. Logged as `corner_margin`
+  every round by `strategies/fedaco.py`.
+- `check_fedaco_health.py` gains question 3, "is the fitness optimum degenerate?", which
+  reports it. A DEGENERATE verdict prints *before* the other three, because while it holds
+  they cannot be read: a colony that searches well is supposed to find the corner.
+  MARGINAL covers the K=20 high-heterogeneity case, where it loses by ~0.01 — negative,
+  but not a comfortable pass.
+- `scripts/analyze_fitness_landscape.py` (`make fitness-landscape`) maps the regime
+  against K, heterogeneity and gamma_entropy before a run is spent on it.
+
+### What this does not settle
+
+Whether the margin is positive on *real* brain-MRI deltas at the sweep's K, and what
+`gamma_entropy` should be. The honest fix is not to pick a bigger number here — it is that
+a penalty growing as `log K` against a term that vanishes is the wrong shape, and a
+dispersion floor or a `1 - sum_k alpha_k^2` concentration penalty would be the right one.
+That is a change to the method as proposed, not a bug fix, so it is not being made on
+synthetic evidence. The first real multi-round run at K>=10 decides it; `corner_margin` is
+logged so that run answers the question by itself.
+
+### And the validation notebook still had the num_supernodes bug
+
+Checked while removing the `K=4` recommendation, because the Colab notebook is the path
+someone would actually run this on. `notebooks/colab_fl_smoke.ipynb` set
+`--client-resources-num-cpus 1` and **not** `--num-supernodes`, while passing
+`min-train-nodes=K`. With `num_supernodes` defaulting to 2 that run hangs at round 0
+forever -- the exact stall the 2026-09-17 entry retracted the CPU-oversubscription
+diagnosis for, still live in the one file that would have reproduced it. The entry said
+the correction had been propagated to five files; the notebook got the CPU half of it and
+not the half that mattered.
+
+Fixed, along with the retracted diagnosis still being stated as fact in the same cell's
+warning text, and the "three questions" list (now four). The notebooks were also not valid
+nbformat -- eight code cells had no `outputs` field, so `ruff` could not parse the file at
+all and had been reporting a schema error instead of the E401 inside it. Both notebooks
+are valid now and `ruff check .` is clean repo-wide for the first time.
+
+### The run that started this was not a search pathology
+
+Worth stating plainly, because it changes how the earlier entries read: α = [0.99, 0.01]
+was the colony finding the optimum it was given, at a K it should never have been run at
+(the `num_supernodes=2` bug put it there). Two separate diagnostics — the INERT verdict
+withdrawn yesterday and this one — both turned out to be artifacts of that same K=2.

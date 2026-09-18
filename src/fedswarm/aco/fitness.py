@@ -84,6 +84,52 @@ class DataFreeFitness:
         return float(f)
 
 
+def corner_margin(
+    gram: GramPrecompute,
+    base_weights: torch.Tensor,
+    config: DataFreeFitnessConfig | None = None,
+) -> float:
+    """F(best single-client vertex) - F(the FedAvg point), exactly and in O(K^2).
+
+    Positive means the data-free fitness scores "discard every client but one" above the
+    aggregation FedACO exists to improve on -- the colony is then working correctly and
+    optimizing toward a degenerate answer, which looks in the logs exactly like a colony
+    that is working well (`fallback_used=0`, `best_fitness` comfortably above
+    `fedavg_fitness`, a confident alpha).
+
+    The vertex side needs no search, because F at a vertex has a closed form. Dispersion is
+    `sum_k alpha_k ||delta_k - Delta(alpha)||^2`, a weighted variance about the weighted
+    mean; at `alpha = e_j` the mean *is* `delta_j`, so every term is zero. Alignment
+    collapses to `cos(delta_j, robust_mean)` and the concentration penalty to its maximum
+    `log K`. So, for any Gram matrix whatsoever:
+
+        F(e_j) = gamma_1 * cos(delta_j, robust_mean) - gamma_3 * log K
+
+    That identity is what makes this cheap and exact rather than a search. The penalty is
+    the only thing standing against a term that vanishes outright, and it grows only as
+    `log K` -- so the smaller the federation, the weaker the guard. Measured on synthetic
+    deltas, `gamma_entropy` has to exceed ~0.17 at K=2 and ~0.13 at K=4 to keep the corner
+    from winning, against the project's default of 0.1 (docs/EXPERIMENT_LOG.md,
+    2026-09-18). A K=2 or K=4 validation run therefore sits in the regime where this bites
+    and the sweep's K=20 does not, which is the opposite of what a smoke test is for.
+
+    A positive margin does not prove the corner is the global maximum -- an interior point
+    may score higher still. It proves the weaker and more useful thing: that a degenerate
+    answer outscores the reference the method is judged against.
+    """
+    config = config or DataFreeFitnessConfig()
+    eps = 1e-12
+    norms = torch.diagonal(gram.gram).clamp_min(eps).sqrt()
+    cosines = gram.g_rob / (norms * math.sqrt(max(gram.rob_norm_sq, eps)))
+
+    num_clients = int(base_weights.numel())
+    best_vertex = config.gamma_alignment * float(cosines.max()) - config.gamma_entropy * math.log(
+        num_clients
+    )
+    fedavg = DataFreeFitness(gram, config).evaluate(base_weights)
+    return best_vertex - fedavg
+
+
 class ServerValFitness:
     """Macro-F1 of w(alpha) on a small server-held val set (plan §4.4) -- an
     upper-bound reference that assumes the server holds data, unlike `data_free`.

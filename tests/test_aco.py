@@ -3,6 +3,9 @@ pure tensor math, no Flower runtime needed."""
 
 from __future__ import annotations
 
+import math
+
+import pytest
 import torch
 
 from fedswarm.aco.colony import ColonyConfig, run_colony
@@ -175,3 +178,98 @@ def test_pheromone_still_carries_signal_when_updates_are_large() -> None:
         f"pheromone is uniform across levels (spread={float(row_spread):.3e}) -- the "
         "colony has degenerated to heuristic-only selection"
     )
+
+
+# ======================================================================================
+# The degenerate optimum (2026-09-18)
+# ======================================================================================
+
+
+def _consensus_deltas(num_clients: int, noise: float, seed: int = 0, dim: int = 512):
+    """A shared direction plus per-client isotropic noise; `noise` is the heterogeneity."""
+    generator = torch.Generator().manual_seed(seed)
+    direction = torch.randn(dim, generator=generator)
+    direction /= direction.norm()
+    return direction + noise * torch.randn(num_clients, dim, generator=generator) / math.sqrt(dim)
+
+
+def test_dispersion_is_exactly_zero_at_every_vertex() -> None:
+    """The root of the whole problem, and it needs no data to state: dispersion is a
+    weighted variance about the weighted mean, and at `alpha = e_j` the mean *is*
+    `delta_j`. The term does not become small, it vanishes -- so the fitness pays nothing
+    at all for throwing every client but one away."""
+    from fedswarm.aco.gram import weighted_dispersion
+
+    gram = precompute_gram(_consensus_deltas(6, noise=1.0))
+
+    for j in range(6):
+        assert float(weighted_dispersion(torch.eye(6)[j], gram.gram)) == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.parametrize("num_clients,noise", [(2, 1.0), (4, 2.0), (20, 0.5)])
+def test_vertex_fitness_has_a_closed_form(num_clients: int, noise: float) -> None:
+    """`F(e_j) = gamma_1 * cos(delta_j, robust_mean) - gamma_3 * log K`, exactly, for any
+    Gram matrix. `corner_margin` relies on this to be exact and O(K^2) instead of a search
+    over the simplex, so it is checked against the implementation with non-default gammas
+    -- the defaults would hide a term that had been dropped."""
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig
+
+    gram = precompute_gram(_consensus_deltas(num_clients, noise))
+    config = DataFreeFitnessConfig(gamma_alignment=1.3, gamma_dispersion=0.7, gamma_entropy=0.2)
+    fitness = DataFreeFitness(gram, config)
+    norms = torch.diagonal(gram.gram).sqrt()
+    cosines = gram.g_rob / (norms * math.sqrt(gram.rob_norm_sq))
+
+    for j in range(num_clients):
+        predicted = config.gamma_alignment * float(cosines[j]) - config.gamma_entropy * math.log(
+            num_clients
+        )
+        assert fitness.evaluate(torch.eye(num_clients)[j]) == pytest.approx(predicted, abs=1e-5)
+
+
+def test_corner_margin_agrees_with_evaluating_both_points() -> None:
+    """The closed form is an optimization, not a different quantity."""
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, corner_margin
+
+    num_clients = 5
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    config = DataFreeFitnessConfig(gamma_entropy=0.1)
+    fitness = DataFreeFitness(gram, config)
+
+    direct = max(
+        fitness.evaluate(torch.eye(num_clients)[j]) for j in range(num_clients)
+    ) - fitness.evaluate(base)
+
+    assert corner_margin(gram, base, config) == pytest.approx(direct, abs=1e-5)
+
+
+def test_a_small_heterogeneous_federation_prefers_one_client() -> None:
+    """The finding, pinned. At K=2 with the project's default `gamma_entropy=0.1`, the
+    fitness ranks a single-client answer above the FedAvg point -- so a colony that
+    searches well returns a useless aggregation, while `fallback_used=0` and a
+    `best_fitness` well above `fedavg_fitness` both report success.
+
+    This is the regime the project's only FedACO run was in, by way of the
+    `num_supernodes=2` bug, and its alpha of [0.99, 0.01] is that optimum rather than a
+    search pathology."""
+    from fedswarm.aco.fitness import corner_margin
+
+    gram = precompute_gram(_consensus_deltas(2, noise=1.5))
+
+    assert corner_margin(gram, torch.full((2,), 0.5)) > 0
+
+
+def test_the_guard_strengthens_with_K_and_with_gamma_entropy() -> None:
+    """Both stated remedies, checked rather than asserted. The penalty at a vertex is
+    `gamma_3 * log K`, so either term buys the same thing -- which is why a sweep at K=20
+    can be safe while the K=4 smoke test that is supposed to validate it is not."""
+    from fedswarm.aco.fitness import DataFreeFitnessConfig, corner_margin
+
+    small = precompute_gram(_consensus_deltas(2, noise=1.5))
+    large = precompute_gram(_consensus_deltas(20, noise=1.5))
+
+    assert corner_margin(large, torch.full((20,), 1 / 20)) < corner_margin(
+        small, torch.full((2,), 0.5)
+    )
+    assert corner_margin(small, torch.full((2,), 0.5), DataFreeFitnessConfig(gamma_entropy=1.0)) < 0

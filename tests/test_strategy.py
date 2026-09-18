@@ -283,3 +283,25 @@ def test_resumed_colony_uses_the_true_round_not_the_restarted_one() -> None:
     assert alpha_for(4, 0) == alpha_for(1, 3)
     # And the offset genuinely changes the draw, rather than being ignored.
     assert alpha_for(1, 0) != alpha_for(1, 3)
+
+
+def test_corner_margin_is_recorded_every_round() -> None:
+    """A degenerate fitness optimum is invisible in every other logged field: the colony
+    finds the corner, `fallback_used` stays 0 (both sides of that comparison use the same
+    fitness), `best_fitness` sits comfortably above `fedavg_fitness`, and alpha looks
+    confident. `corner_margin` is the only field that can tell "the colony searched well"
+    from "the colony searched well for a useless answer", so a run without it cannot be
+    diagnosed after the fact."""
+    global_state = _state()
+    replies = [
+        _make_reply(i, _add(global_state, _state(seed=100 + i)), num_examples=float(50 + 10 * i))
+        for i in range(4)
+    ]
+    strategy = _new_strategy(num_rounds=4)
+    strategy._current_arrays = ArrayRecord(global_state)
+
+    _, metrics = strategy.aggregate_train(1, list(replies))
+
+    assert metrics is not None
+    assert "corner_margin" in metrics
+    assert isinstance(metrics["corner_margin"], float)

@@ -290,7 +290,7 @@ Phase 4 having added `delta_mean_sq_norm` specifically to diagnose the degenerat
 
 ## Next
 
-**One real-data run, before the sweep.** `make validate-fedaco K=4` then `make health`,
+**One real-data run, before the sweep.** `make validate-fedaco` then `make health`,
 in an environment with the dataset. It is roughly twenty minutes against the sweep's
 several hundred projected hours, and it settles three things at once: whether FedACO's
 mechanism actually runs, what a round really costs (the compute table is still estimates

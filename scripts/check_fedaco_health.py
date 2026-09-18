@@ -32,7 +32,18 @@ stated mechanism sits inert.
     alignment sits near zero. That residual is recorded as open in docs/OPEN_QUESTIONS.md
     and this is how it gets settled.
 
-**3. Does FedACO actually beat FedAvg, and is the fallback carrying it?**
+**3. Is the fitness optimum degenerate?**
+    Dispersion is `sum_k alpha_k ||delta_k - Delta(alpha)||^2`, a weighted variance about
+    the weighted mean -- and at `alpha = e_j` the mean *is* `delta_j`, so it is exactly
+    zero at every single-client vertex. The only thing standing against that is the
+    concentration penalty `gamma_3 * log K`, which weakens as the federation shrinks. When
+    it loses, the fitness ranks "discard every client but one" above the aggregation the
+    method exists to improve on, and a *correctly working* colony optimizes toward it. In
+    the logs that is indistinguishable from success: `fallback_used=0`, `best_fitness`
+    comfortably above `fedavg_fitness`, a confident alpha. `corner_margin` is the exact
+    O(K^2) test, logged per round.
+
+**4. Does FedACO actually beat FedAvg, and is the fallback carrying it?**
     `fallback_used=1` means the colony lost to the FedAvg point that round and FedACO
     silently *was* FedAvg. A high fallback rate with a good final score means the score
     belongs to FedAvg. Note the fallback compares both sides under the same fitness, so
@@ -256,6 +267,67 @@ def check_deposit_floor(result: dict) -> dict:
     }
 
 
+def check_degenerate_optimum(result: dict) -> dict:
+    """Does the fitness rank a single-client answer above the FedAvg point?
+
+    `corner_margin` is exact, not sampled: F at a vertex has a closed form
+    (`gamma_1 * cos(delta_j, robust_mean) - gamma_3 * log K`) because dispersion vanishes
+    there. Positive in most rounds means the colony's target is degenerate, whatever the
+    colony itself is doing.
+    """
+    margins = _round_metric(result, "corner_margin")
+    alpha_max = _round_metric(result, "alpha_max")
+    num_clients = result.get("config", {}).get("run_config", {}).get("num-clients", "?")
+
+    if not margins:
+        return {
+            "question": "Is the fitness optimum degenerate?",
+            "verdict": "NO DATA",
+            "detail": (
+                "no `corner_margin` in the result file -- it predates 2026-09-18. Re-run "
+                "to get it; it costs O(K^2) once per round."
+            ),
+        }
+
+    positive = sum(1 for m in margins if m > 0)
+    rate = positive / len(margins)
+    mean_margin = statistics.fmean(margins)
+    concentration = f" Observed alpha_max averaged {statistics.fmean(alpha_max):.3f}." if alpha_max else ""
+
+    if rate >= 0.5:
+        verdict = "DEGENERATE"
+        detail = (
+            f"the best single-client vertex outscored the FedAvg point in {positive}/"
+            f"{len(margins)} rounds (mean margin {mean_margin:+.4f}) at K={num_clients}. "
+            "The fitness is asking for 'use one client, discard the rest', so a colony "
+            "that finds it is working correctly toward a useless answer -- and nothing "
+            "else in this report can tell the two apart. Raise `aco-gamma-entropy` until "
+            "the margin is negative, or run at a larger K." + concentration
+        )
+    elif mean_margin > -0.02:
+        verdict = "MARGINAL"
+        detail = (
+            f"the corner lost, but only just (mean margin {mean_margin:+.4f} at "
+            f"K={num_clients}, positive in {positive}/{len(margins)} rounds). A different "
+            "partition or a noisier round could flip it, so this is not a comfortable "
+            "pass." + concentration
+        )
+    else:
+        verdict = "CLEAR"
+        detail = (
+            f"the FedAvg point outscores the best single-client vertex by {-mean_margin:.4f} "
+            f"on average at K={num_clients}; the concentration penalty is doing its job."
+            + concentration
+        )
+    return {
+        "question": "Is the fitness optimum degenerate?",
+        "verdict": verdict,
+        "detail": detail,
+        "mean_corner_margin": mean_margin,
+        "degenerate_round_fraction": rate,
+    }
+
+
 def check_beats_fedavg(fedaco: dict, fedavg: dict | None) -> dict:
     fallbacks = _round_metric(fedaco, "fallback_used")
     rate = statistics.fmean(fallbacks) if fallbacks else None
@@ -351,6 +423,7 @@ def main() -> int:
     checks = [
         check_colony_searching(fedaco, args.num_levels, args.flat),
         check_deposit_floor(fedaco),
+        check_degenerate_optimum(fedaco),
         check_beats_fedavg(fedaco, fedavg),
     ]
     for i, check in enumerate(checks, 1):
@@ -359,6 +432,14 @@ def main() -> int:
 
     verdict = checks[0]["verdict"]
     searching = verdict == "SEARCHING"
+    if checks[2]["verdict"] == "DEGENERATE":
+        print(
+            "Before anything else: the fitness optimum is degenerate at this K. A colony\n"
+            "that searches well will find 'use one client and discard the rest', and every\n"
+            "other signal in this report -- fallback rate, best vs FedAvg fitness, a\n"
+            "confident alpha -- will read as success while it does. Fix that first; the\n"
+            "other three questions are not meaningful until it is negative.\n"
+        )
     if verdict == "UNDERPOWERED":
         print(
             "This run cannot answer question 1 -- it is too short for tau to have left its\n"

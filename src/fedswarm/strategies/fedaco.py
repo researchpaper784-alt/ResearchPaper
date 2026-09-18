@@ -27,7 +27,12 @@ from flwr.serverapp.strategy import FedAvg
 from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig, run_colony
-from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, ServerValFitness
+from fedswarm.aco.fitness import (
+    DataFreeFitness,
+    DataFreeFitnessConfig,
+    ServerValFitness,
+    corner_margin,
+)
 from fedswarm.aco.gram import apply_delta, flatten_state_dicts, precompute_gram
 from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix, desirability_scores
 from fedswarm.aco.pheromone import Pheromone, PheromoneConfig
@@ -256,6 +261,19 @@ class FedACO(FedAvg):
                 # at log(num_levels) means tau stayed uniform and the colony degenerated
                 # to heuristic-greedy selection.
                 "delta_mean_sq_norm": gram.mean_sq_norm,
+                # F(best single-client vertex) - F(FedAvg point), exact and O(K^2).
+                # Positive means the fitness itself ranks "discard every client but one"
+                # above the aggregation this method exists to improve on -- a colony
+                # working correctly toward a degenerate answer, which is indistinguishable
+                # in every other logged field from a colony working well. Dispersion is a
+                # weighted variance and is exactly zero at a vertex, so only
+                # `gamma_entropy * log K` stands against it, and that guard weakens as K
+                # falls. Always computed against the data-free fitness, even under
+                # `fitness_mode="server_val"`, so the number means the same thing across
+                # rounds and modes.
+                "corner_margin": corner_margin(
+                    gram, base_weights, self.aco_config.fitness
+                ),
                 "realized_ants": colony_result.realized_ants,
                 "realized_iterations": colony_result.realized_iterations,
                 "alpha": alpha_final.tolist(),
