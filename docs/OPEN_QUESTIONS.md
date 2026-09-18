@@ -457,3 +457,24 @@ execute, same blocker as everything else in Phase 3 onward.
   real redesign (the construction graph would need K x num_layer_groups stations,
   not K), not a config toggle -- skipped deliberately, matching the plan's own
   framing of it as optional, not a gap to apologize for.
+
+## Phase 10 -- run_id churns whenever pyproject.toml's config table gains a key, even for unrelated strategies
+
+Discovered while testing `scripts/verify_repro.py`: `predict_run_id` against the
+*current* `pyproject.toml` no longer matches `results/fl/e35285b33a_0.json`'s own
+run_id (the teammate's real, verified Phase 3 result -- `docs/OPEN_QUESTIONS.md`'s
+earlier entry). Not a bug -- `make_run_id` hashes the *entire* resolved
+`run_config` dict, and Phase 5/7 added many new `fedaco-*`/`strategy-name`/etc.
+keys to `[tool.flwr.app.config]` since that run happened, so the hash legitimately
+changed. Real consequence, not just a curiosity: adding *any* new global default
+key churns every run_id, even for a plain FedAvg smoke run that never reads the new
+key at all -- so a "rerun the same smoke test" after any config-table change
+predicts a different run_id than last time, and old result files become orphaned
+(no longer the resume-skip target for a nominally identical rerun). Verified,
+not assumed: manually copying `e35285b33a_0.json` to today's predicted run_id
+(`44b2b05b39_0.json`) and re-running `verify_repro.py --skip-run` against it passes
+cleanly -- the checking logic itself is correct; only the run_id prediction moved
+out from under the old file. Not fixing this now (would mean hashing only the keys
+a given strategy actually reads, a real redesign of `make_run_id`'s contract);
+flagging it so a future "why did resume-skip re-run something identical" question
+has an answer on record.
