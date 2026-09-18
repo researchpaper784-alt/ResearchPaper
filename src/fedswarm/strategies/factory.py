@@ -131,6 +131,7 @@ def _build_fedaco(
         trim_fraction=float(run_config.get("fedaco-trim-fraction", 0.2)),
         safety_fallback=bool(run_config.get("fedaco-safety-fallback", True)),
         fitness_mode=str(run_config.get("fedaco-fitness-mode", "data_free")),  # type: ignore[arg-type]
+        search_method=str(run_config.get("fedaco-search-method", "aco")),  # type: ignore[arg-type]
         colony=ColonyConfig(
             pheromone_exp=float(run_config.get("fedaco-a-exponent", 1.0)),
             heuristic_exp=float(run_config.get("fedaco-b-exponent", 2.0)),

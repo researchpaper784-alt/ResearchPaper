@@ -27,13 +27,35 @@ from flwr.serverapp.strategy import FedAvg
 from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig, run_colony
-from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, Fitness, ServerValFitness
+from fedswarm.aco.controls import coordinate_grid_search, genetic_algorithm_search, pso_search, random_search
+from fedswarm.aco.fitness import (
+    BudgetedFitness,
+    DataFreeFitness,
+    DataFreeFitnessConfig,
+    Fitness,
+    ServerValFitness,
+)
 from fedswarm.aco.gram import apply_delta, flatten_state_dicts, precompute_gram
 from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix, desirability_scores
 from fedswarm.aco.pheromone import Pheromone, PheromoneConfig
 from fedswarm.aco.schedules import colony_budget, level_set
 
 FitnessMode = Literal["data_free", "server_val", "client_probe"]
+
+# Plan §7, ablation A1: "replace the colony with random search, coordinate grid
+# search, PSO, and a GA -- identical fitness function, identical number of
+# evaluations." "aco" is the real method; every other value routes through the
+# matching aco/controls.py function instead of run_colony, both driven by the exact
+# same BudgetedFitness-wrapped Fitness object and the exact same per-round budget
+# colony_budget() would have given the real colony this round.
+SearchMethod = Literal["aco", "random", "coordinate_grid", "pso", "ga"]
+
+_CONTROL_SEARCH_FNS = {
+    "random": random_search,
+    "coordinate_grid": coordinate_grid_search,
+    "pso": pso_search,
+    "ga": genetic_algorithm_search,
+}
 
 
 @dataclass
@@ -58,6 +80,8 @@ class FedACOConfig:
     # yet (docs/OPEN_QUESTIONS.md's Phase 4 entry) -- selecting it raises, not silently
     # falls back to data_free.
     fitness_mode: FitnessMode = "data_free"
+    # A1 ablation axis (plan §7) -- see SearchMethod/_CONTROL_SEARCH_FNS above.
+    search_method: SearchMethod = "aco"
     colony: ColonyConfig = field(default_factory=ColonyConfig)
     pheromone: PheromoneConfig = field(default_factory=PheromoneConfig)
     fitness: DataFreeFitnessConfig = field(default_factory=DataFreeFitnessConfig)
@@ -157,10 +181,6 @@ class FedACO(FedAvg):
         gram = precompute_gram(deltas, trim_fraction=self.aco_config.trim_fraction)
         gram_time_ms = (time.perf_counter() - gram_start) * 1000.0
 
-        d_k = desirability_scores(gram, num_examples, val_improvement, self.aco_config.heuristics)
-        eta = desirability_matrix(d_k, self.levels)
-
-        tau0 = self.pheromone.begin_round(client_ids)
         num_ants, num_iterations = colony_budget(
             self.round_count,
             self.aco_config.num_rounds,
@@ -172,29 +192,48 @@ class FedACO(FedAvg):
         base_weights = num_examples / num_examples.sum()
         fitness = self._build_fitness(gram, global_state, deltas, shapes)
 
-        colony_result = run_colony(
-            tau0,
-            eta,
-            self.levels,
-            base_weights,
-            fitness.evaluate,
-            num_ants,
-            num_iterations,
-            self.aco_config.colony,
-            target_sum=self.aco_config.target_sum,
-        )
+        pheromone_entropy: float | None = None
+        if self.aco_config.search_method == "aco":
+            d_k = desirability_scores(gram, num_examples, val_improvement, self.aco_config.heuristics)
+            eta = desirability_matrix(d_k, self.levels)
+            tau0 = self.pheromone.begin_round(client_ids)
+            colony_result = run_colony(
+                tau0,
+                eta,
+                self.levels,
+                base_weights,
+                fitness.evaluate,
+                num_ants,
+                num_iterations,
+                self.aco_config.colony,
+                target_sum=self.aco_config.target_sum,
+            )
+            search_alpha, search_fitness = colony_result.alpha_best, colony_result.best_fitness
+            self.pheromone.end_round(client_ids, colony_result.tau_final)
+            pheromone_entropy = self.pheromone.entropy(client_ids)
+            realized_ants, realized_iterations = colony_result.realized_ants, colony_result.realized_iterations
+        else:
+            # A1 (plan §7): identical fitness function, identical evaluation budget,
+            # no pheromone -- these controls have no notion of cross-round memory.
+            budget = num_ants * num_iterations
+            budgeted_fitness = BudgetedFitness(fitness, budget)
+            search_fn = _CONTROL_SEARCH_FNS[self.aco_config.search_method]
+            control_result = search_fn(
+                self.levels, base_weights, budgeted_fitness, budget, target_sum=self.aco_config.target_sum
+            )
+            search_alpha, search_fitness = control_result.alpha_best, control_result.best_fitness
+            realized_ants, realized_iterations = control_result.evaluations_used, 1
 
         fedavg_alpha = base_weights * self.aco_config.target_sum
         fedavg_fitness = fitness.evaluate(fedavg_alpha)
 
-        fallback_used = self.aco_config.safety_fallback and colony_result.best_fitness <= fedavg_fitness
+        fallback_used = self.aco_config.safety_fallback and search_fitness <= fedavg_fitness
         if fallback_used:
             self.fallback_count += 1
             alpha_final = fedavg_alpha
         else:
-            alpha_final = colony_result.alpha_best
+            alpha_final = search_alpha
 
-        self.pheromone.end_round(client_ids, colony_result.tau_final)
         self.round_count += 1
 
         combined_delta = alpha_final @ deltas
@@ -202,31 +241,30 @@ class FedACO(FedAvg):
         arrays_out = ArrayRecord(new_state)
 
         aco_time_ms = (time.perf_counter() - t_start) * 1000.0
-        metrics_out = MetricRecord(
-            {
-                "alpha_entropy": _entropy(alpha_final),
-                "alpha_max": float(alpha_final.max()),
-                # MetricRecord's real value type is int | float | list[int] | list[float]
-                # and explicitly rejects bool (verified: flwr/app/message/metricrecord.py's
-                # is_valid() checks `isinstance(v, bool)` even though bool subclasses int in
-                # Python) -- 0/1, not True/False.
-                "fallback_used": int(fallback_used),
-                "fallback_count": self.fallback_count,
-                "aco_time_ms": aco_time_ms,
-                "gram_time_ms": gram_time_ms,
-                "best_fitness": colony_result.best_fitness,
-                "fedavg_fitness": fedavg_fitness,
-                "pheromone_entropy": self.pheromone.entropy(client_ids),
-                "realized_ants": colony_result.realized_ants,
-                "realized_iterations": colony_result.realized_iterations,
-                "alpha": alpha_final.tolist(),
-                # MetricRecord list values are int | float only (verified: no list[str]
-                # support) -- client_ids are numeric partition ids under the hood, so
-                # int(...) round-trips exactly; the str keys stay internal to Pheromone.
-                "participating_client_ids": [int(c) for c in client_ids],
-            }
-        )
-        return arrays_out, metrics_out
+        metrics: dict[str, float | int | list[float] | list[int]] = {
+            "alpha_entropy": _entropy(alpha_final),
+            "alpha_max": float(alpha_final.max()),
+            # MetricRecord's real value type is int | float | list[int] | list[float]
+            # and explicitly rejects bool (verified: flwr/app/message/metricrecord.py's
+            # is_valid() checks `isinstance(v, bool)` even though bool subclasses int in
+            # Python) -- 0/1, not True/False.
+            "fallback_used": int(fallback_used),
+            "fallback_count": self.fallback_count,
+            "aco_time_ms": aco_time_ms,
+            "gram_time_ms": gram_time_ms,
+            "best_fitness": search_fitness,
+            "fedavg_fitness": fedavg_fitness,
+            "realized_ants": realized_ants,
+            "realized_iterations": realized_iterations,
+            "alpha": alpha_final.tolist(),
+            # MetricRecord list values are int | float only (verified: no list[str]
+            # support) -- client_ids are numeric partition ids under the hood, so
+            # int(...) round-trips exactly; the str keys stay internal to Pheromone.
+            "participating_client_ids": [int(c) for c in client_ids],
+        }
+        if pheromone_entropy is not None:
+            metrics["pheromone_entropy"] = pheromone_entropy
+        return arrays_out, MetricRecord(metrics)
 
 
 def _entropy(alpha: torch.Tensor, eps: float = 1e-12) -> float:

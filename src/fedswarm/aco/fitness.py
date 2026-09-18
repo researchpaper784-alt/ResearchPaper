@@ -22,6 +22,36 @@ class Fitness(Protocol):
     def evaluate(self, alpha: torch.Tensor) -> float: ...
 
 
+class EvaluationBudgetExceeded(RuntimeError):
+    pass
+
+
+class BudgetedFitness:
+    """Wraps any `Fitness`, hard-capping the number of `.evaluate()` calls it will
+    ever perform. Plan §7, A1: "implement the budget cap inside `Fitness` itself so
+    no control can cheat by accident" -- the real colony (`aco/colony.py`) and every
+    equal-budget control (`aco/controls.py`) share this wrapper for exactly that
+    reason. Raising past budget (rather than, say, silently returning the last
+    value) is the actual safety net; well-behaved callers should check `remaining()`
+    and stop cleanly before ever triggering it."""
+
+    def __init__(self, fitness: Fitness, budget: int) -> None:
+        self._fitness = fitness
+        self.budget = budget
+        self.calls_used = 0
+
+    def remaining(self) -> int:
+        return self.budget - self.calls_used
+
+    def evaluate(self, alpha: torch.Tensor) -> float:
+        if self.calls_used >= self.budget:
+            raise EvaluationBudgetExceeded(
+                f"budget of {self.budget} evaluations exhausted"
+            )
+        self.calls_used += 1
+        return self._fitness.evaluate(alpha)
+
+
 def _entropy(alpha: torch.Tensor, eps: float = 1e-12) -> float:
     total = alpha.sum().clamp_min(eps)
     probs = (alpha / total).clamp_min(eps)

@@ -229,3 +229,37 @@ def test_fedaco_server_val_fitness_mode_runs_end_to_end() -> None:
     arrays_out, metrics_out = strategy.aggregate_train(1, list(replies))
     assert arrays_out is not None and metrics_out is not None
     assert len(metrics_out["alpha"]) == 2
+
+
+@pytest.mark.parametrize("method", ["random", "coordinate_grid", "pso", "ga"])
+def test_fedaco_a1_control_methods_run_end_to_end(method: str) -> None:
+    """A1 ablation (plan §7): every control routes through FedACO's own
+    aggregate_train, using the identical BudgetedFitness-wrapped fitness and the
+    identical per-round evaluation budget the real colony would have used."""
+    torch.manual_seed(3)
+    global_state = _state(seed=0)
+    client_states = [_add(global_state, _state(seed=s)) for s in (1, 2, 3)]
+    num_examples = [100.0, 50.0, 200.0]
+    replies = [_make_reply(i, s, n) for i, (s, n) in enumerate(zip(client_states, num_examples))]
+
+    strategy = _new_strategy(
+        search_method=method, num_rounds=1, ants_start=4, ants_end=4, iters_start=3, iters_end=3
+    )
+    strategy._current_arrays = ArrayRecord(global_state)
+    arrays_out, metrics_out = strategy.aggregate_train(1, list(replies))
+
+    assert arrays_out is not None and metrics_out is not None
+    assert "pheromone_entropy" not in dict(metrics_out)  # controls have no pheromone
+    assert metrics_out["realized_ants"] <= 12  # <= the aco/colony budget (4 ants * 3 iters) for this round
+    assert len(metrics_out["alpha"]) == 3
+
+
+def test_fedaco_aco_method_still_reports_pheromone_entropy() -> None:
+    global_state = _state(seed=0)
+    client_states = [_add(global_state, _state(seed=s)) for s in (1, 2)]
+    replies = [_make_reply(i, s, 100.0) for i, s in enumerate(client_states)]
+
+    strategy = _new_strategy(search_method="aco", num_rounds=1)
+    strategy._current_arrays = ArrayRecord(global_state)
+    _, metrics_out = strategy.aggregate_train(1, list(replies))
+    assert "pheromone_entropy" in dict(metrics_out)

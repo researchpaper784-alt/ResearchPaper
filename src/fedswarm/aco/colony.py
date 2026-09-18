@@ -67,9 +67,13 @@ def _select_levels(
     return torch.where(use_greedy, greedy, explore)
 
 
-def _levels_to_alpha(
+def levels_to_alpha(
     level_idx: torch.Tensor, levels: torch.Tensor, base_weights: torch.Tensor, target_sum: float
 ) -> torch.Tensor:
+    """Public (not colony-internal) because `aco/controls.py`'s discrete A1 controls
+    (plan §7) reuse this exact construction -- reimplementing it there would risk
+    silent drift between what the colony and its equal-budget controls actually
+    search over, which would invalidate the comparison the ablation exists to make."""
     tilde = levels[level_idx] * base_weights
     total = tilde.sum()
     if total <= 1e-12:
@@ -118,7 +122,7 @@ def run_colony(
 
         for _ in range(num_ants):
             level_idx = _select_levels(tau, eta, config, generator)
-            candidate = _levels_to_alpha(level_idx, levels, base_weights, target_sum)
+            candidate = levels_to_alpha(level_idx, levels, base_weights, target_sum)
             fitness = fitness_fn(candidate)
             if fitness > iter_best_fitness:
                 iter_best_fitness, iter_best_alpha, iter_best_levels = fitness, candidate, level_idx
