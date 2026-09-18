@@ -25,11 +25,32 @@ from fedswarm.data.cache import build_and_save_cache  # noqa: E402
 
 
 def _tiny_dataset_rows(root: Path, n: int = 40) -> list[dict]:
+    """A three-way split, matching the real Phase 1.3 manifest.
+
+    The `val` rows are the point. This generator originally emitted train/test only,
+    while `fl/app.py` builds its server-held `global_val_loader` from `split == "val"`
+    unconditionally -- so the loader came back empty and the run died mid-simulation in
+    `eval/evaluator.py` with `need at least one array to concatenate`, reported by
+    `flwr run` as a bare "Exit Code: 700". That is the second of the two bugs that kept
+    this smoke job red; the first was `flower-superlink` not being on PATH, which
+    stopped the job before it ever got far enough to hit this one.
+
+    The same two-way/three-way mismatch already bit the unit-test fixtures once
+    (docs/PROGRESS_REVIEW.md, Phase 3 fix 3). Keeping CI's manifest three-way is what
+    stops it recurring a third time.
+    """
     (root / "Training" / "glioma").mkdir(parents=True)
     (root / "Testing" / "glioma").mkdir(parents=True)
     rows = []
     for i in range(n):
-        split_dir, split = ("Training", "train") if i < n - 8 else ("Testing", "test")
+        if i < n - 16:
+            split_dir, split = "Training", "train"
+        elif i < n - 8:
+            # Val lives under Training/ on disk: the real pipeline carves it out of the
+            # training images rather than from the held-out test set.
+            split_dir, split = "Training", "val"
+        else:
+            split_dir, split = "Testing", "test"
         rel = f"{split_dir}/glioma/img_{i}.jpg"
         Image.new("L", (32, 32), color=(i * 7) % 256).save(root / rel)
         rows.append(

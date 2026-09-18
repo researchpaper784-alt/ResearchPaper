@@ -27,7 +27,9 @@ from flwr.serverapp.strategy import FedAvg
 from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig, run_colony
+from fedswarm.aco.controls import SEARCH_METHODS, run_control
 from fedswarm.aco.fitness import (
+    BudgetedFitness,
     DataFreeFitness,
     DataFreeFitnessConfig,
     ServerValFitness,
@@ -69,6 +71,14 @@ class FedACOConfig:
     # not selectable here: `ClientProbeFitness` implements the aggregation side only,
     # and its broadcast/collect round-trip is Phase 7 work -- see docs/OPEN_QUESTIONS.md.
     fitness_mode: str = "data_free"
+    # Phase 7's A1 control, and the plan's "make-or-break experiment": which optimizer
+    # searches the alpha space. "aco" is the method; "random", "coordinate_grid", "pso"
+    # and "ga" are equal-budget controls from `aco/controls.py`, each searching the same
+    # space against the same `Fitness` under the same evaluation cap. If the colony ties
+    # random search at equal budget there is no ACO contribution to write about, so this
+    # switch has to select something real -- for three weeks it selected nothing at all,
+    # because `controls.py` existed with passing unit tests and no caller.
+    search_method: str = "aco"
     colony: ColonyConfig = field(default_factory=ColonyConfig)
     pheromone: PheromoneConfig = field(default_factory=PheromoneConfig)
     fitness: DataFreeFitnessConfig = field(default_factory=DataFreeFitnessConfig)
@@ -91,6 +101,14 @@ class FedACO(FedAvg):
         whole point of the method as proposed."""
         super().__init__(*args, **kwargs)
         self.aco_config = aco_config or FedACOConfig()
+        if self.aco_config.search_method not in SEARCH_METHODS:
+            # At construction, not at first use: an unknown value would otherwise surface
+            # from inside a round, where `flwr run` reports it as "Exit Code: 700" and
+            # still exits 0, so a sweep records the cell as simply having no result file.
+            raise ValueError(
+                f"Unknown search_method {self.aco_config.search_method!r} "
+                f"(expected one of {SEARCH_METHODS})"
+            )
         if self.aco_config.fitness_mode not in ("data_free", "server_val"):
             raise ValueError(
                 f"Unknown fitness_mode {self.aco_config.fitness_mode!r} "
@@ -169,7 +187,6 @@ class FedACO(FedAvg):
         d_k = desirability_scores(gram, num_examples, val_improvement, self.aco_config.heuristics)
         eta = desirability_matrix(d_k, self.levels)
 
-        tau0 = self.pheromone.begin_round(client_ids)
         num_ants, num_iterations = colony_budget(
             # True round, not a process-local counter: on a resumed run `round_count`
             # restarts at 0 while `num_rounds` is still the total, so the budget decay
@@ -199,30 +216,66 @@ class FedACO(FedAvg):
             (int(self.aco_config.seed) & 0xFFFF_FFFF) * 1_000_003 + true_round
         )
 
-        colony_result = run_colony(
-            tau0,
-            eta,
-            self.levels,
-            base_weights,
-            fitness.evaluate,
-            num_ants,
-            num_iterations,
-            self.aco_config.colony,
-            target_sum=self.aco_config.target_sum,
-            generator=generator,
-        )
+        # A1's equal-budget contract, enforced rather than trusted: every search method
+        # -- the colony included -- gets the same allowance and the same wrapper, so no
+        # control can outspend the method under test by accident. The cap is the colony's
+        # own schedule, `ants x iterations`, which is what the ACO would spend if it
+        # never stopped early.
+        evaluation_budget = int(num_ants) * int(num_iterations)
+        budgeted = BudgetedFitness(fitness, evaluation_budget)
 
+        colony_metrics: dict[str, float] = {}
+        if self.aco_config.search_method == "aco":
+            tau0 = self.pheromone.begin_round(client_ids)
+            colony_result = run_colony(
+                tau0,
+                eta,
+                self.levels,
+                base_weights,
+                budgeted.evaluate,
+                num_ants,
+                num_iterations,
+                self.aco_config.colony,
+                target_sum=self.aco_config.target_sum,
+                generator=generator,
+            )
+            self.pheromone.end_round(client_ids, colony_result.tau_final)
+            best_alpha = colony_result.alpha_best
+            best_fitness = colony_result.best_fitness
+            colony_metrics = {
+                "pheromone_entropy": self.pheromone.entropy(client_ids),
+                "realized_ants": colony_result.realized_ants,
+                "realized_iterations": colony_result.realized_iterations,
+            }
+        else:
+            # Controls carry no pheromone, so none of the colony metrics above apply and
+            # they are omitted rather than reported as zero -- a control run that logged
+            # `pheromone_entropy: 0` would read as a collapsed colony to every downstream
+            # check instead of as "not a colony".
+            control_result = run_control(
+                self.aco_config.search_method,
+                self.levels,
+                base_weights,
+                budgeted,
+                evaluation_budget,
+                target_sum=self.aco_config.target_sum,
+                generator=generator,
+            )
+            best_alpha = control_result.alpha_best
+            best_fitness = control_result.best_fitness
+
+        # Outside the budget on purpose, for every method equally: the FedAvg point is
+        # the reference the search is judged against, not a candidate it discovered.
         fedavg_alpha = base_weights * self.aco_config.target_sum
         fedavg_fitness = fitness.evaluate(fedavg_alpha)
 
-        fallback_used = self.aco_config.safety_fallback and colony_result.best_fitness <= fedavg_fitness
+        fallback_used = self.aco_config.safety_fallback and best_fitness <= fedavg_fitness
         if fallback_used:
             self.fallback_count += 1
             alpha_final = fedavg_alpha
         else:
-            alpha_final = colony_result.alpha_best
+            alpha_final = best_alpha
 
-        self.pheromone.end_round(client_ids, colony_result.tau_final)
         self.round_count += 1
 
         combined_delta = alpha_final @ deltas
@@ -250,9 +303,18 @@ class FedACO(FedAvg):
                 "fallback_count": self.fallback_count,
                 "aco_time_ms": aco_time_ms,
                 "gram_time_ms": gram_time_ms,
-                "best_fitness": colony_result.best_fitness,
+                "best_fitness": best_fitness,
                 "fedavg_fitness": fedavg_fitness,
-                "pheromone_entropy": self.pheromone.entropy(client_ids),
+                # A1's audit trail. The colony stops early on stagnation and the controls
+                # spend their allowance, so "equal budget" is an equal *cap*, not equal
+                # usage -- and the analysis has to be able to see which it was rather than
+                # take the claim on trust. Logged for every method, colony included.
+                "evaluations_used": budgeted.calls_used,
+                "evaluation_budget": evaluation_budget,
+                # Colony-only: pheromone entropy and the realized ant/iteration counts.
+                # Empty under an A1 control, which has no pheromone -- see the dispatch
+                # above for why they are omitted rather than zeroed.
+                **colony_metrics,
                 # trace(G)/K, the dispersion scale. Logged per round because a run whose
                 # client updates are far larger than the fitness terms assume is the
                 # failure mode the normalization in `DataFreeFitness` exists to prevent
@@ -274,8 +336,6 @@ class FedACO(FedAvg):
                 "corner_margin": corner_margin(
                     gram, base_weights, self.aco_config.fitness
                 ),
-                "realized_ants": colony_result.realized_ants,
-                "realized_iterations": colony_result.realized_iterations,
                 "alpha": alpha_final.tolist(),
                 # MetricRecord list values are int | float only (verified: no list[str]
                 # support) -- client_ids are numeric partition ids under the hood, so

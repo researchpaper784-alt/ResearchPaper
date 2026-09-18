@@ -51,6 +51,17 @@ jobs:
         run: |
           uv venv --python 3.12 .venv
           uv pip install -e ".[dev,simulation]" --python .venv/bin/python
+      # Not cosmetic, and not redundant with calling `.venv/bin/flwr` explicitly below.
+      # `flwr run` starts a local SuperLink by spawning `flower-superlink` as a *separate
+      # process*, resolved through PATH -- not relative to its own sys.executable. Invoked
+      # as `.venv/bin/flwr` with the venv's bin dir absent from PATH, it gets as far as
+      # "Starting local SuperLink..." and then dies with
+      #   Unable to launch `flower-superlink` for local simulation:
+      #   [Errno 2] No such file or directory: 'flower-superlink'
+      # which is exactly how this job failed on the merge push. Reproduced locally with
+      # `env PATH=/usr/bin:/bin .venv/bin/flwr run .`, and fixed by this step.
+      - name: Put the venv's bin dir on PATH (flwr spawns flower-superlink through it)
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Build a tiny synthetic dataset (no real MRI data / Kaggle creds in CI)
         run: .venv/bin/python scripts/ci_smoke_dataset.py --out-dir /tmp/fedswarm_ci_smoke
       - name: Run the FL smoke test against the synthetic dataset
