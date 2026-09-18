@@ -1,0 +1,47 @@
+# Phase 7, A7 -- shrinkage: sum(alpha) = 1 vs. sum(alpha) = s < 1. Connects to known
+# results on global weight shrinking as a generalization aid.
+#
+# ⚠️ Scope: this sweeps FIXED values of s, not the plan's "learned s <= 1" -- global
+# shrinkage as a per-round *learned* decision variable is a documented, deliberate
+# scope reduction (docs/OPEN_QUESTIONS.md's Phase 4 entry; FedACOConfig.target_sum
+# is a fixed config value, not searched). If this ablation shows shrinkage matters,
+# that's the trigger to actually build the learned version -- not something to fake
+# here by re-running at several fixed values and calling it "learned."
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a7.yaml
+
+base_overrides:
+  num-clients: 20
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 2
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  strategy-name: fedaco
+
+strategies:
+  - name: s=1.0_default
+    overrides: {fedaco-target-sum: 1.0}
+  - name: s=0.95
+    overrides: {fedaco-target-sum: 0.95}
+  - name: s=0.90
+    overrides: {fedaco-target-sum: 0.90}
+  - name: s=0.80
+    overrides: {fedaco-target-sum: 0.80}
+
+partitions:
+  - name: iid
+    file: configs/data/iid.yaml
+  - name: dirichlet_0.3
+    file: configs/data/dirichlet_0.3.yaml
+
+seeds: [0, 1, 2]

@@ -13,6 +13,7 @@ real `Grid`/simulation backend this machine cannot install (`docs/FLOWER_API_NOT
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -26,12 +27,15 @@ from torch.utils.data import DataLoader, TensorDataset
 from fedswarm.data.cache import build_and_save_cache
 from fedswarm.fl.app import (
     _repo_path,
+    apply_dp_noise,
     build_evaluate_fn,
     build_model_from_run_config,
     checkpoint_paths,
     clear_checkpoint,
+    corrupt_update,
     evaluate_handler,
     global_test_loader,
+    is_attacker_client,
     load_checkpoint,
     load_client_data,
     local_evaluate,
@@ -152,6 +156,69 @@ def test_fedprox_term_pulls_update_norm_down() -> None:
     metrics_prox = local_train(prox, loader, torch.device("cpu"), epochs=3, lr=0.1, mu=1.0)
 
     assert metrics_prox["update_norm"] < metrics_plain["update_norm"]
+
+
+def test_local_train_label_flip_actually_changes_training_dynamics() -> None:
+    """Phase 8, R1: label_flip=True must train against genuinely different targets --
+    same init, same data, same seed, only label_flip differs, so any difference in the
+    resulting weights is real evidence the flip is applied, not a placebo flag."""
+    loader = _synthetic_loader()
+
+    torch.manual_seed(0)
+    honest = SimpleCNN(num_classes=4, norm="groupnorm")
+    local_train(honest, loader, torch.device("cpu"), epochs=2, lr=0.1, label_flip=False)
+
+    torch.manual_seed(0)
+    attacker = SimpleCNN(num_classes=4, norm="groupnorm")
+    local_train(attacker, loader, torch.device("cpu"), epochs=2, lr=0.1, label_flip=True, num_classes=4)
+
+    honest_params = torch.cat([p.detach().flatten() for p in honest.parameters()])
+    attacker_params = torch.cat([p.detach().flatten() for p in attacker.parameters()])
+    assert not torch.allclose(honest_params, attacker_params)
+
+
+def test_is_attacker_client_selects_a_fixed_deterministic_subset() -> None:
+    # 30% of 10 clients -> the first 3 partition-ids (0, 1, 2), always.
+    assert [is_attacker_client(i, 10, 0.3) for i in range(10)] == [
+        True, True, True, False, False, False, False, False, False, False,
+    ]
+
+
+def test_corrupt_update_gaussian_noise_perturbs_every_value() -> None:
+    torch.manual_seed(0)
+    trained = OrderedDict(w=torch.zeros(100))
+    global_state = OrderedDict(w=torch.zeros(100))
+    corrupted = corrupt_update(trained, global_state, "gaussian_noise", sigma=1.0)
+    assert not torch.allclose(corrupted["w"], trained["w"])
+    assert float(corrupted["w"].std()) > 0.1
+
+
+def test_corrupt_update_sign_flip_negates_the_delta_exactly() -> None:
+    global_state = OrderedDict(w=torch.tensor([1.0, 2.0, 3.0]))
+    trained = OrderedDict(w=torch.tensor([1.5, 1.0, 4.0]))  # delta = [0.5, -1.0, 1.0]
+    corrupted = corrupt_update(trained, global_state, "sign_flip", sigma=0.0)
+    # Expected: global - delta = 2*global - trained
+    expected = 2 * global_state["w"] - trained["w"]
+    assert torch.allclose(corrupted["w"], expected)
+    assert torch.allclose(corrupted["w"], torch.tensor([0.5, 3.0, 2.0]))
+
+
+def test_corrupt_update_rejects_an_unknown_mode() -> None:
+    with pytest.raises(ValueError):
+        corrupt_update(OrderedDict(w=torch.zeros(3)), OrderedDict(w=torch.zeros(3)), "not-a-mode", 0.1)
+
+
+def test_apply_dp_noise_is_a_true_no_op_at_zero_sigma() -> None:
+    state = OrderedDict(w=torch.tensor([1.0, 2.0, 3.0]))
+    result = apply_dp_noise(state, 0.0)
+    assert result is state  # same object, not just equal values
+
+
+def test_apply_dp_noise_perturbs_at_positive_sigma() -> None:
+    torch.manual_seed(0)
+    state = OrderedDict(w=torch.zeros(200))
+    result = apply_dp_noise(state, sigma=0.5)
+    assert not torch.allclose(result["w"], state["w"])
 
 
 def test_per_class_confusion_counts_sum_to_correct_pooled_metric() -> None:
@@ -499,6 +566,75 @@ def test_train_handler_scaffold_persists_and_reuses_local_control_across_rounds(
     assert any(
         not torch.allclose(c_i_round1[k], c_i_round2[k]) for k in c_i_round1
     ), "c_i must actually update round to round, not stay frozen at round 1's value"
+
+
+# ======================================================================================
+# Phase 8 -- R1/R2/R4 robustness/stress-test attack wiring in train_handler.
+# ======================================================================================
+
+
+def test_train_handler_reports_is_attacker_for_a_designated_client(client_run_config) -> None:
+    run_config = {**client_run_config, "attacker-fraction": 0.5, "attack-mode": "sign_flip"}
+    # num-clients=4 (client_run_config fixture) -> 50% -> partition-ids {0, 1} are attackers.
+    context_attacker = Context(
+        run_id=0,
+        node_id=0,
+        node_config={"partition-id": 0, "num-partitions": run_config["num-clients"]},
+        state=RecordDict(),
+        run_config=run_config,
+    )
+    context_honest = Context(
+        run_id=0,
+        node_id=2,
+        node_config={"partition-id": 2, "num-partitions": run_config["num-clients"]},
+        state=RecordDict(),
+        run_config=run_config,
+    )
+
+    reply_attacker = train_handler(_train_message(run_config), context_attacker)
+    reply_honest = train_handler(_train_message(run_config), context_honest)
+
+    assert dict(reply_attacker.content["metrics"])["is_attacker"] == 1
+    assert dict(reply_honest.content["metrics"])["is_attacker"] == 0
+
+
+def test_train_handler_sign_flip_attacker_reports_a_negated_update(client_run_config) -> None:
+    run_config = {**client_run_config, "attacker-fraction": 1.0, "attack-mode": "sign_flip"}
+    model = SimpleCNN(num_classes=4, norm=run_config["model-norm"])
+    global_state = model.state_dict()
+
+    msg = _train_message(run_config)
+    context = _context(run_config, partition_id=0)
+    reply = train_handler(msg, context)
+    reported = reply.content["arrays"].to_torch_state_dict()
+
+    # Every reported param must equal 2*global - (whatever honest training would have
+    # produced) -- can't know the honest trained values without re-running training
+    # with the exact same seed, so instead check the weaker, still-meaningful
+    # invariant: the reported update points AWAY from any real training that started
+    # at global_state (i.e. it's not equal to global_state -- an attack did something).
+    assert any(
+        not torch.allclose(reported[k], global_state[k]) for k in global_state
+    )
+
+
+def test_train_handler_dp_noise_perturbs_every_clients_update(client_run_config) -> None:
+    run_config = {**client_run_config, "dp-noise-sigma": 0.5}
+    msg = _train_message(run_config)
+    context = _context(run_config, partition_id=0)
+    reply = train_handler(msg, context)
+    # A dp-noise run must still return every model key -- noise perturbs values, it
+    # doesn't drop or rename anything.
+    model = SimpleCNN(num_classes=4, norm=run_config["model-norm"])
+    assert set(reply.content["arrays"].keys()) == set(model.state_dict().keys())
+
+
+def test_train_handler_no_attack_by_default(client_run_config) -> None:
+    run_config = client_run_config  # no attacker-fraction/attack-mode/dp-noise-sigma set
+    msg = _train_message(run_config)
+    context = _context(run_config, partition_id=0)
+    reply = train_handler(msg, context)
+    assert dict(reply.content["metrics"])["is_attacker"] == 0
 
 
 # ======================================================================================

@@ -1,0 +1,5 @@
+# Attacks FedAvg's n_k weighting directly (data/partition.py's own module docstring)
+# -- exactly the axis the plan expects FedACO's weight-selection contribution to show
+# up on most clearly.
+regime: quantity_skew
+skew-sigma: 1.0

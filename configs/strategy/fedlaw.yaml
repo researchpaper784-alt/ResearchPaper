@@ -1,0 +1,8 @@
+# FedLAW-style learnable aggregation weights (Li et al., ICML 2023 -- reproduces the
+# *idea*, not the paper's exact formulation or numbers; see docs/OPEN_QUESTIONS.md).
+# Custom (strategies/fedlaw.py): weights learned by gradient descent against a
+# server-held val batch each round, via torch.func.functional_call. Needs
+# fl/app.py::global_val_loader, wired automatically by strategy-name=fedlaw.
+strategy-name: fedlaw
+fedlaw-steps: 20
+fedlaw-lr: 0.1

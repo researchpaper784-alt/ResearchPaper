@@ -1,0 +1,4 @@
+# Federated Averaging (McMahan et al., 2017) -- the baseline every other strategy is
+# compared against. Built-in flwr.serverapp.strategy.FedAvg, wired via
+# strategies/factory.py -- no other keys needed.
+strategy-name: fedavg

@@ -1,0 +1,42 @@
+# Phase 6, Step 6.3's secondary grid: "a reduced grid for K in {10, 50} and C=0.3."
+# The plan doesn't specify which strategies/partitions/seeds that reduced grid
+# should span -- filling that gap here, explicitly, rather than silently assuming a
+# scope (documented the same way in docs/OPEN_QUESTIONS.md): FedACO vs. plain FedAvg
+# only (the essential method-vs-standard-baseline pair), IID partition only (this
+# grid tests client-count scaling behavior, not heterogeneity -- that's what
+# main.yaml's 7 partitions already cover), 3 seeds instead of 5 (a reduced grid
+# calls for a reduced seed count too). Widen this (more strategies, more seeds) if
+# main.yaml's results make a broader K-scaling comparison worth the extra compute.
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/main_client_scale.yaml
+
+base_overrides:
+  min-client-size: 5
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 2
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  regime: iid
+  fraction-train: 0.3   # C = 0.3
+  min-train-nodes: 2
+
+strategies:
+  - name: fedavg
+    file: configs/strategy/fedavg.yaml
+  - name: fedaco
+    file: configs/strategy/fedaco.yaml
+
+partitions:
+  - name: k10
+    overrides: {num-clients: 10}
+  - name: k50
+    overrides: {num-clients: 50}
+
+seeds: [0, 1, 2]

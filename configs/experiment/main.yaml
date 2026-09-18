@@ -1,0 +1,80 @@
+# Phase 6, Step 6.3 -- the main experiment. Full factorial: 11 strategies x 7
+# partition regimes x 5 seeds = 385 runs at K=20, C=1.0 (primary metric: test
+# macro-F1, plan §6.3's own reasoning for why -- class imbalance + asymmetric
+# clinical cost of a missed tumor).
+#
+# Model config is SimpleCNN@112, NOT the plan's originally-suggested ResNet-18@224 --
+# a real, dated, justified decision already recorded in docs/EXPERIMENT_LOG.md
+# (2026-09-14): ResNet-18@224 costs an estimated ~800-1000 GPU-h for this sweep alone,
+# infeasible against a Kaggle free-tier quota; SimpleCNN@112 is the primary
+# configuration for the full main grid, ablations, AND robustness tests, with
+# ResNet-18@224 relegated to a reduced secondary table (~24 runs, not built here yet).
+# That same log estimated "~11 strategies x 6 partitions x 5 seeds" (330 runs); the
+# real, now-built partition list is 7 (dirichlet has 3 separate alpha values), hence
+# 385 here, not 330 -- an update to that estimate, not a deviation from the decision.
+#
+# num-rounds=100 matches the plan's own federated defaults (§14) -- this is the real,
+# full-scale sweep, meant to run across several resumed Kaggle/Colab sessions
+# (scripts/run_sweep.py's resume/lock machinery exists exactly for this). Use
+# configs/experiment/smoke.yaml first to sanity-check every strategy still runs.
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml
+
+base_overrides:
+  num-clients: 20
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 2
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+
+strategies:
+  - name: fedavg
+    file: configs/strategy/fedavg.yaml
+  - name: fedprox
+    file: configs/strategy/fedprox.yaml
+  - name: fedadam
+    file: configs/strategy/fedadam.yaml
+  - name: fedyogi
+    file: configs/strategy/fedyogi.yaml
+  - name: scaffold
+    file: configs/strategy/scaffold.yaml
+  - name: fednova
+    file: configs/strategy/fednova.yaml
+  - name: fedloss
+    file: configs/strategy/fedloss.yaml
+  - name: fedlaw
+    file: configs/strategy/fedlaw.yaml
+  - name: krum
+    file: configs/strategy/krum.yaml
+  - name: trimmed_mean
+    file: configs/strategy/trimmed_mean.yaml
+  - name: fedaco
+    file: configs/strategy/fedaco.yaml
+
+partitions:
+  - name: iid
+    file: configs/data/iid.yaml
+  - name: dirichlet_0.1
+    file: configs/data/dirichlet_0.1.yaml
+  - name: dirichlet_0.3
+    file: configs/data/dirichlet_0.3.yaml
+  - name: dirichlet_0.5
+    file: configs/data/dirichlet_0.5.yaml
+  - name: pathological_2
+    file: configs/data/pathological_2.yaml
+  - name: quantity_skew
+    file: configs/data/quantity_skew.yaml
+  - name: source_shift
+    file: configs/data/source_shift.yaml
+
+seeds: [0, 1, 2, 3, 4]

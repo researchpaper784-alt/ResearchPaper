@@ -1,0 +1,6 @@
+# Krum (Blanchard et al., 2017) -- robust aggregator, also a weight-selection
+# competitor and Phase 8's natural robustness comparison. Built-in
+# flwr.serverapp.strategy.Krum. num-malicious-nodes=0 here (main-sweep default, no
+# attackers); Phase 8's robustness configs override this per attacker fraction.
+strategy-name: krum
+num-malicious-nodes: 0

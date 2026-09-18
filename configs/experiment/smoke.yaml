@@ -1,0 +1,47 @@
+# Phase 6/10 smoke sweep: every strategy, tiny scale (2 clients, 2 rounds, SimpleCNN@112
+# -- the same smoke size as pyproject.toml's [tool.flwr.app.config] defaults), one
+# partition, one seed. Answers "does every strategy at least complete without crashing,"
+# not "which one is better" -- that's configs/experiment/main.yaml's job. Cheap enough to
+# run before every main sweep and after any change touching fl/app.py or strategies/.
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/smoke.yaml
+
+base_overrides:
+  num-clients: 2
+  min-client-size: 5
+  num-rounds: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 1
+
+strategies:
+  - name: fedavg
+    file: configs/strategy/fedavg.yaml
+  - name: fedprox
+    file: configs/strategy/fedprox.yaml
+  - name: fedadam
+    file: configs/strategy/fedadam.yaml
+  - name: fedyogi
+    file: configs/strategy/fedyogi.yaml
+  - name: scaffold
+    file: configs/strategy/scaffold.yaml
+  - name: fednova
+    file: configs/strategy/fednova.yaml
+  - name: fedloss
+    file: configs/strategy/fedloss.yaml
+  - name: fedlaw
+    file: configs/strategy/fedlaw.yaml
+  - name: krum
+    file: configs/strategy/krum.yaml
+  - name: trimmed_mean
+    file: configs/strategy/trimmed_mean.yaml
+  - name: fedaco
+    file: configs/strategy/fedaco.yaml
+
+partitions:
+  - name: iid
+    file: configs/data/iid.yaml
+
+seeds: [0]

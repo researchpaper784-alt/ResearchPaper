@@ -1,0 +1,42 @@
+# Phase 7, A9 -- normalization confound control: BatchNorm vs. GroupNorm. Shows
+# whether any FedACO gain is real aggregation behavior, not a BatchNorm artifact
+# (BatchNorm's running stats aggregate badly under non-IID federated data -- a known
+# FL pathology, unrelated to weight-selection method). Both FedACO and plain FedAvg
+# are included so the *interaction* (does the norm choice affect FedACO differently
+# than FedAvg?) is visible, not just each method's own norm sensitivity in isolation.
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a9.yaml
+
+base_overrides:
+  num-clients: 20
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  image-size: 112
+  local-epochs: 2
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+
+strategies:
+  - name: fedavg_groupnorm
+    overrides: {strategy-name: fedavg, model-norm: groupnorm}
+  - name: fedavg_batchnorm
+    overrides: {strategy-name: fedavg, model-norm: batchnorm}
+  - name: fedaco_groupnorm
+    overrides: {strategy-name: fedaco, model-norm: groupnorm}
+  - name: fedaco_batchnorm
+    overrides: {strategy-name: fedaco, model-norm: batchnorm}
+
+partitions:
+  - name: iid
+    file: configs/data/iid.yaml
+  - name: dirichlet_0.3
+    file: configs/data/dirichlet_0.3.yaml
+
+seeds: [0, 1, 2]

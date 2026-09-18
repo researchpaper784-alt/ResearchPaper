@@ -62,6 +62,7 @@ def main() -> None:
             seeds=experiment["seeds"],
             base_overrides=experiment.get("base_overrides", {}),
             group=Path(args.config).stem,
+            base_dir=REPO_ROOT,
         )
     )
 

@@ -1,0 +1,51 @@
+# Phase 7, A1 -- "the make-or-break experiment" (plan §7): replace FedACO's colony
+# with random search, coordinate grid search, PSO, and a GA, at the *identical*
+# evaluation budget (aco/controls.py, BudgetedFitness). Build this as soon as FedACO
+# runs live, *before* the full main sweep -- if "aco" doesn't beat all four controls
+# here, the paper does not have an ACO story (reframe around A2/R1-R2 instead).
+#
+# Two partitions (not all 7 of main.yaml's): iid (the easy case) and dirichlet_0.3
+# (a real heterogeneity regime) -- enough to see whether any edge holds up outside
+# the trivial case, without paying for the full partition grid on what's meant to be
+# a fast go/no-go check. Full 5 seeds: this gate is exactly where seed noise matters
+# most.
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a1.yaml
+
+base_overrides:
+  num-clients: 20
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 2
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  strategy-name: fedaco
+
+strategies:
+  - name: aco
+    overrides: {fedaco-search-method: aco}
+  - name: random
+    overrides: {fedaco-search-method: random}
+  - name: coordinate_grid
+    overrides: {fedaco-search-method: coordinate_grid}
+  - name: pso
+    overrides: {fedaco-search-method: pso}
+  - name: ga
+    overrides: {fedaco-search-method: ga}
+
+partitions:
+  - name: iid
+    file: configs/data/iid.yaml
+  - name: dirichlet_0.3
+    file: configs/data/dirichlet_0.3.yaml
+
+seeds: [0, 1, 2, 3, 4]

@@ -1,0 +1,34 @@
+# FedACO -- the contribution (aco/, strategies/fedaco.py). Values below match the
+# plan's own §14 default hyperparameter table ("starting point -- tune in A6") where
+# it specifies one, translated to this repo's flat fedaco-* run_config keys
+# (strategies/factory.py::_build_fedaco).
+#
+# One documented deviation from §14: this repo's colony budget decays *linearly*
+# between (ants-start, iters-start) and (ants-end, iters-end) (aco/schedules.py::
+# colony_budget, built and tested in Phase 4), not the plan's suggested "cosine"
+# schedule -- a minor implementation-shape difference, not a different starting
+# point (n_ants=30, n_iterations=10 match §14 exactly as the round-0 values).
+strategy-name: fedaco
+fedaco-num-levels: 11
+fedaco-level-low: 0.0
+fedaco-level-high: 2.5
+fedaco-a-exponent: 1.0       # alpha_exponent_a
+fedaco-b-exponent: 2.0       # beta_exponent_b
+fedaco-rho: 0.10             # rho_evaporation
+fedaco-q0: 0.70              # q0_exploitation
+fedaco-ants-start: 30        # n_ants
+fedaco-ants-end: 10
+fedaco-iters-start: 10       # n_iterations
+fedaco-iters-end: 4
+fedaco-tau0: 1.0             # tau_init
+fedaco-tau-min: 0.01
+fedaco-tau-max: 10.0
+fedaco-pheromone-persistence: decayed
+fedaco-rho-round: 0.30
+fedaco-fitness-mode: data_free
+fedaco-gamma-alignment: 1.0   # gamma1_alignment
+fedaco-gamma-dispersion: 0.50 # gamma2_dispersion
+fedaco-gamma-entropy: 0.10    # gamma3_entropy
+fedaco-target-sum: 1.0        # weight_sum
+fedaco-safety-fallback: true
+fedaco-search-method: aco     # A1 ablation axis -- "aco" is the real method

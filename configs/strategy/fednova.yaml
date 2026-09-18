@@ -1,0 +1,5 @@
+# FedNova (Wang et al., 2020) -- custom (strategies/fednova.py). Normalizes each
+# client's update by its own local-step count (num_batches, already reported by
+# every client) before averaging, removing FedAvg's objective-inconsistency bias
+# under heterogeneous local computation.
+strategy-name: fednova

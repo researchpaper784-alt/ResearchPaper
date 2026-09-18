@@ -206,6 +206,8 @@ def local_train(
     lr: float,
     mu: float = 0.0,
     correction: "dict[str, torch.Tensor] | None" = None,
+    label_flip: bool = False,
+    num_classes: int = 4,
 ) -> dict:
     """Runs `epochs` of local SGD. Returns every scalar the plan's Step 3.1 says the
     server might need to weight this client (`num-examples`, `train_loss_before/after`,
@@ -229,6 +231,11 @@ def local_train(
     parameter is exactly `correction[name]` itself -- the standard way to inject a
     constant additive term into a gradient via autograd rather than hand-editing
     `param.grad` after `loss.backward()`.
+
+    `label_flip` (Phase 8, R1) trains against `(label + 1) % num_classes` for every
+    batch -- a designated-attacker client's own local labels, permuted, not a random
+    per-round corruption, so the same clients are corrupted for the whole run
+    (`train_handler` decides which clients via `attacker-fraction`).
     """
     model.to(device)
     # Always snapshotted, not just when mu > 0: update_norm is a standard field every
@@ -246,6 +253,8 @@ def local_train(
         batch_losses = []
         for images, labels in loader:
             images, labels = images.to(device), labels.to(device)
+            if label_flip:
+                labels = (labels + 1) % num_classes
             optimizer.zero_grad()
             loss = F.cross_entropy(model(images), labels)
             if mu > 0:
@@ -275,6 +284,47 @@ def local_train(
         "train_loss_after": epoch_losses[-1] if epoch_losses else float("nan"),
         "update_norm": update_norm,
     }
+
+
+def is_attacker_client(partition_id: int, num_partitions: int, attacker_fraction: float) -> bool:
+    """Phase 8, R1/R2: a FIXED subset of clients is corrupted for the whole run, not
+    re-chosen each round -- the first `round(attacker_fraction * num_partitions)`
+    partition-ids, a deterministic function of identity alone, so this project's
+    attack-fraction sweeps (10%/20%/30%) are reproducible without any extra state."""
+    return partition_id < round(attacker_fraction * num_partitions)
+
+
+def corrupt_update(
+    trained_state: "OrderedDict[str, torch.Tensor]",
+    global_state: "OrderedDict[str, torch.Tensor]",
+    mode: str,
+    sigma: float,
+) -> "OrderedDict[str, torch.Tensor]":
+    """Phase 8, R1/R2 -- corrupts an attacker client's reported update *after*
+    training, simulating a Byzantine client rather than a training-time behavior.
+    `mode="gaussian_noise"`: adds N(0, sigma^2) to every trained parameter.
+    `mode="sign_flip"`: reports `2*global - trained`, i.e. the negated update
+    `global - (trained - global)` -- the classic sign-flipping attack."""
+    if mode == "gaussian_noise":
+        return OrderedDict(
+            (k, v + sigma * torch.randn_like(v)) for k, v in trained_state.items()
+        )
+    if mode == "sign_flip":
+        return OrderedDict((k, 2 * global_state[k] - v) for k, v in trained_state.items())
+    raise ValueError(f"Unknown attack mode: {mode!r}, expected 'gaussian_noise' or 'sign_flip'")
+
+
+def apply_dp_noise(
+    state: "OrderedDict[str, torch.Tensor]", sigma: float
+) -> "OrderedDict[str, torch.Tensor]":
+    """Phase 8, R4 -- Gaussian mechanism noise on EVERY client's update (an honest
+    privacy behavior every client applies, unlike `corrupt_update`'s attacker-only
+    corruption). `sigma=0.0` is a no-op returning `state` unchanged, not a copy --
+    callers relying on this being a fresh object when sigma>0 should not assume the
+    same when sigma==0."""
+    if sigma <= 0.0:
+        return state
+    return OrderedDict((k, v + sigma * torch.randn_like(v)) for k, v in state.items())
 
 
 def per_class_confusion_counts(labels: np.ndarray, predictions: np.ndarray) -> dict[str, dict[str, int]]:
@@ -436,9 +486,23 @@ def train_handler(msg: Message, context: Context) -> Message:
     full_state = msg.content["arrays"].to_torch_state_dict()
     model_keys = list(model.state_dict().keys())
     model.load_state_dict(OrderedDict((k, full_state[k]) for k in model_keys))
+    global_state_before_training = OrderedDict((k, model.state_dict()[k].clone()) for k in model_keys)
 
     train_loader, _ = load_client_data(_partition_id(context), context.run_config)
     config = msg.content["config"]
+
+    # Phase 8, R1/R2/R4 -- robustness/stress tests. A FIXED subset of clients (by
+    # partition-id, see is_attacker_client) simulates a Byzantine participant for
+    # the whole run; dp-noise-sigma, separately, applies to every client regardless
+    # of attacker status (an honest privacy mechanism, not an attack).
+    num_partitions = int(context.node_config.get("num-partitions", 1))
+    attacker_fraction = float(context.run_config.get("attacker-fraction", 0.0))
+    attack_mode = str(context.run_config.get("attack-mode", "none"))
+    attack_noise_sigma = float(context.run_config.get("attack-noise-sigma", 0.1))
+    dp_noise_sigma = float(context.run_config.get("dp-noise-sigma", 0.0))
+    is_attacker = attacker_fraction > 0.0 and is_attacker_client(
+        _partition_id(context), num_partitions, attacker_fraction
+    )
 
     # SCAFFOLD (strategies/scaffold.py): present only when that strategy is active.
     scaffold_keys = [k for k in full_state if k.startswith(_SCAFFOLD_CONTROL_PREFIX)]
@@ -474,11 +538,21 @@ def train_handler(msg: Message, context: Context) -> Message:
         # is set (plain FedAvg).
         mu=float(config.get("proximal-mu", config.get("mu", context.run_config.get("mu", 0.0)))),
         correction=correction,
+        label_flip=is_attacker and attack_mode == "label_flip",
+        num_classes=int(context.run_config.get("num-classes", 4)),
     )
     metrics["client_id"] = _partition_id(context)
     metrics["server_round"] = int(config.get("server_round", -1))
+    metrics["is_attacker"] = int(is_attacker)
 
-    arrays_out = ArrayRecord(model.state_dict())
+    trained_state = OrderedDict((k, model.state_dict()[k]) for k in model_keys)
+    if is_attacker and attack_mode in ("gaussian_noise", "sign_flip"):
+        trained_state = corrupt_update(
+            trained_state, global_state_before_training, attack_mode, attack_noise_sigma
+        )
+    trained_state = apply_dp_noise(trained_state, dp_noise_sigma)
+
+    arrays_out = ArrayRecord(trained_state)
     if global_c is not None and local_c is not None and params_before is not None:
         lr = float(config.get("lr", context.run_config.get("local-lr", 0.01)))
         tau = max(metrics["num_batches"], 1)
@@ -709,6 +783,9 @@ __all__ = [
     "local_train",
     "local_evaluate",
     "per_class_confusion_counts",
+    "is_attacker_client",
+    "corrupt_update",
+    "apply_dp_noise",
     "partition_spec_from_run_config",
     "checkpoint_paths",
     "save_checkpoint",

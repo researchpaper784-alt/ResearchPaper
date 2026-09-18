@@ -20,6 +20,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+import yaml
+
 from fedswarm.utils.results import make_run_id
 
 DEFAULT_LOCK_TIMEOUT_S = 3600.0
@@ -43,26 +45,46 @@ class RunSpec:
 # ======================================================================================
 
 
+def resolve_entry_overrides(entry: dict[str, Any], base_dir: str | Path | None = None) -> dict[str, Any]:
+    """An entry is either `{"name": ..., "overrides": {...}}` (inline) or
+    `{"name": ..., "file": "configs/strategy/fedaco.yaml"}` (a reference to one of
+    the standalone per-strategy/per-partition YAML files, resolved relative to
+    `base_dir` -- typically the experiment YAML's own directory). Reusing those
+    files here is what lets `configs/experiment/*.yaml` list strategies/partitions
+    by name without re-typing every override inline in every experiment config."""
+    if "overrides" in entry:
+        return dict(entry["overrides"])
+    path = Path(entry["file"])
+    if base_dir is not None and not path.is_absolute():
+        path = Path(base_dir) / path
+    with open(path) as f:
+        loaded = yaml.safe_load(f)
+    return loaded or {}
+
+
 def expand_grid(
     strategies: list[dict[str, Any]],
     partitions: list[dict[str, Any]],
     seeds: list[int],
     base_overrides: dict[str, Any] | None = None,
     group: str = "main",
+    base_dir: str | Path | None = None,
 ) -> list[RunSpec]:
     """Full factorial: strategies x partitions x seeds (plan §6.3's primary grid).
-    Each of `strategies`/`partitions` is `{"name": str, "overrides": dict}`. Seeds
-    vary slowest in the returned list's natural order (all strategies x partitions
-    for seed[0], then seed[1], ...) -- `order_seed_first` relies on this, but callers
-    that don't need seed-first ordering can just use this list directly."""
+    Each of `strategies`/`partitions` is `{"name": str, "overrides": dict}` or
+    `{"name": str, "file": "configs/.../x.yaml"}` (see `resolve_entry_overrides`).
+    Seeds vary slowest in the returned list's natural order (all strategies x
+    partitions for seed[0], then seed[1], ...) -- `order_seed_first` relies on this,
+    but callers that don't need seed-first ordering can just use this list directly.
+    """
     runs = []
     for seed in seeds:
         for partition in partitions:
             for strategy in strategies:
                 overrides = {
                     **(base_overrides or {}),
-                    **partition["overrides"],
-                    **strategy["overrides"],
+                    **resolve_entry_overrides(partition, base_dir),
+                    **resolve_entry_overrides(strategy, base_dir),
                     "seed": seed,
                 }
                 label = f"{strategy['name']}/{partition['name']}/seed={seed}"

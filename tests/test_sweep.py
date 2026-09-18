@@ -350,3 +350,40 @@ def test_append_manifest_writes_one_json_line(tmp_path: Path) -> None:
     append_manifest(manifest_path, {"run_id": "b"})
     lines = manifest_path.read_text().strip().splitlines()
     assert [json.loads(line)["run_id"] for line in lines] == ["a", "b"]
+
+
+# ======================================================================================
+# resolve_entry_overrides -- referencing standalone configs/strategy|data/*.yaml files
+# ======================================================================================
+
+
+def test_resolve_entry_overrides_inline() -> None:
+    from fedswarm.sweep import resolve_entry_overrides
+
+    entry = {"name": "fedavg", "overrides": {"strategy-name": "fedavg"}}
+    assert resolve_entry_overrides(entry) == {"strategy-name": "fedavg"}
+
+
+def test_resolve_entry_overrides_from_file(tmp_path: Path) -> None:
+    from fedswarm.sweep import resolve_entry_overrides
+
+    strategy_dir = tmp_path / "configs" / "strategy"
+    strategy_dir.mkdir(parents=True)
+    (strategy_dir / "fedaco.yaml").write_text("strategy-name: fedaco\nfedaco-target-sum: 0.9\n")
+
+    entry = {"name": "fedaco", "file": "configs/strategy/fedaco.yaml"}
+    overrides = resolve_entry_overrides(entry, base_dir=tmp_path)
+    assert overrides == {"strategy-name": "fedaco", "fedaco-target-sum": 0.9}
+
+
+def test_expand_grid_resolves_file_referenced_entries(tmp_path: Path) -> None:
+    strategy_dir = tmp_path / "configs" / "strategy"
+    strategy_dir.mkdir(parents=True)
+    (strategy_dir / "fedavg.yaml").write_text("strategy-name: fedavg\n")
+
+    strategies = [{"name": "fedavg", "file": "configs/strategy/fedavg.yaml"}]
+    partitions = [{"name": "iid", "overrides": {"regime": "iid"}}]
+
+    runs = expand_grid(strategies, partitions, [0], base_dir=tmp_path)
+    assert runs[0].overrides["strategy-name"] == "fedavg"
+    assert runs[0].overrides["regime"] == "iid"

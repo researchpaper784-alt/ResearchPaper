@@ -1,0 +1,8 @@
+# FedAdam (Reddi et al., 2020) -- server-side adaptive optimizer. Built-in
+# flwr.serverapp.strategy.FedAdam.
+strategy-name: fedadam
+fedopt-eta: 0.1
+fedopt-eta-l: 0.1
+fedopt-beta1: 0.9
+fedopt-beta2: 0.99
+fedopt-tau: 0.001

@@ -1,0 +1,45 @@
+# Phase 7, A8 -- adaptive vs. fixed colony budget. Supports the overhead claim (C3):
+# does decaying (ants, iterations) across rounds (aco/schedules.py::colony_budget,
+# "aggregation choice matters most early") actually help relative to spending the
+# same total budget at a constant rate?
+#
+# "Fixed" here is implemented by setting ants-start=ants-end and iters-start=iters-
+# end -- colony_budget's linear interpolation between two equal endpoints is, by
+# construction, non-decaying -- no new code needed, just equal start/end values.
+# The fixed arm's constant budget (20 ants x 7 iters = 140/round) is chosen close to
+# the adaptive default's time-averaged budget over 100 rounds, for a fair total-
+# evaluations comparison across the run, not just any arbitrary constant.
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a8.yaml
+
+base_overrides:
+  num-clients: 20
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 2
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  strategy-name: fedaco
+
+strategies:
+  - name: adaptive_default
+    overrides: {fedaco-ants-start: 30, fedaco-ants-end: 10, fedaco-iters-start: 10, fedaco-iters-end: 4}
+  - name: fixed
+    overrides: {fedaco-ants-start: 20, fedaco-ants-end: 20, fedaco-iters-start: 7, fedaco-iters-end: 7}
+
+partitions:
+  - name: iid
+    file: configs/data/iid.yaml
+  - name: dirichlet_0.3
+    file: configs/data/dirichlet_0.3.yaml
+
+seeds: [0, 1, 2]

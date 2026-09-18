@@ -1,0 +1,6 @@
+# FedProx (Li et al., 2018). Built-in flwr.serverapp.strategy.FedProx -- its real
+# config key is "proximal-mu" (verified against the installed package's source,
+# docs/FLOWER_API_NOTES.md), which this repo's train_handler reads directly; no
+# custom client code needed.
+strategy-name: fedprox
+fedprox-mu: 0.01

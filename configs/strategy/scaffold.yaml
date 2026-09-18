@@ -1,0 +1,5 @@
+# SCAFFOLD (Karimireddy et al., 2020) -- custom (strategies/scaffold.py), the one
+# baseline needing genuine client-side protocol support (a persistent per-client
+# control variate via Context.state; fl/app.py's train_handler is the client half).
+strategy-name: scaffold
+scaffold-server-lr: 1.0

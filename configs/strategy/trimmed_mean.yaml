@@ -1,0 +1,4 @@
+# Coordinate-wise trimmed mean -- robust aggregator, also a weight-selection
+# competitor. Built-in flwr.serverapp.strategy.FedTrimmedAvg.
+strategy-name: trimmed-mean
+trim-beta: 0.2

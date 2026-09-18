@@ -1,0 +1,6 @@
+# Loss-based weighting ("FedNolowe-style" per the plan -- no canonical paper of that
+# exact name was verified against a formula or numbers; this is a documented
+# interpretation, not a reproduction -- see docs/OPEN_QUESTIONS.md's Phase 5 entry).
+# Custom (strategies/lossbased.py): alpha_i ~ softmax(-loss_i / temperature).
+strategy-name: loss-based
+lossweight-temperature: 1.0
