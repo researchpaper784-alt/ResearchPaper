@@ -1,0 +1,42 @@
+# Phase 8, R3 -- stragglers & partial participation: C (fraction-train) in
+# {0.1, 0.3, 0.5}. Each round samples a genuinely different random subset of
+# clients (FedAvg.configure_train's own random.sample, verified real,
+# docs/FLOWER_API_NOTES.md) -- this already IS "random dropouts mid-round" in
+# effect, no extra code needed. Cross-round pheromone (plan §4.3) should shine
+# here: it remembers clients currently absent, unlike a memoryless method.
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness_r3_stragglers.yaml
+
+base_overrides:
+  num-clients: 20
+  min-client-size: 5
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 2
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  regime: dirichlet
+  alpha: 0.3
+
+strategies:
+  - name: fedavg
+    file: configs/strategy/fedavg.yaml
+  - name: fedaco
+    file: configs/strategy/fedaco.yaml
+
+partitions:
+  - name: c=0.1
+    overrides: {fraction-train: 0.1}
+  - name: c=0.3
+    overrides: {fraction-train: 0.3}
+  - name: c=0.5
+    overrides: {fraction-train: 0.5}
+
+seeds: [0, 1, 2]

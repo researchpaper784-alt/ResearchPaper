@@ -424,3 +424,36 @@ real source (`flwr/serverapp/strategy/fedprox.py`), not by guessing the key name
 every baseline an honest hyperparameter search on the val split with a budget matched
 to FedACO's") and the IID-narrow-band acceptance check -- both need a live FL run to
 execute, same blocker as everything else in Phase 3 onward.
+
+## Phase 6/7/8 -- config-layer scoping decisions, recorded rather than silently assumed
+
+- **§6.3's secondary client-scale grid** (K in {10, 50}, C=0.3) doesn't specify which
+  strategies/partitions/seeds it should span. `configs/experiment/main_client_scale.
+  yaml` scopes it to FedACO vs. plain FedAvg only, IID partition only, 3 seeds --
+  widen it later if the main sweep's results make a broader comparison worth the
+  extra compute. Same reasoning duplicated in that file's own header comment.
+- **Robustness configs R1/R2's Krum arm** (`robustness_r1_label_flip.yaml`,
+  `robustness_r2_update_attack.yaml`) fixes `num-malicious-nodes=4` (20% of 20
+  clients) across all three tested attacker fractions (10%/20%/30%), rather than
+  co-varying it with each cell -- a plain Cartesian-product sweep grid doesn't have
+  a clean way to express "this strategy-specific value should track that
+  partition-specific value." Krum is therefore mildly mis-configured (not fatally)
+  at the 10%/30% cells. Flag this if Krum's numbers from these two sweeps are
+  compared against a hypothetical "properly tuned per attacker fraction" version.
+- **R6 (cold start: clients joining after round 20) has no config file here at
+  all** -- a real gap, not an oversight. Which SuperNodes exist/connect at all is
+  controlled by Flower's own Simulation Runtime (Ray actor lifecycle), not by
+  anything `run_config` can express; there is no clean way from application code to
+  say "partition-id 15 must not participate before round 20." What IS built and
+  tested (Phase 4): `Pheromone.begin_round` correctly initializes a fresh row for
+  any client id it has never seen, whenever it first shows up
+  (`test_pheromone_persists`) -- so the *mechanism* R6 wants to stress-test is
+  already correct, but actually engineering controlled late-arrival timing to
+  exercise it on purpose is not implemented. Would need a custom Strategy-level
+  node-filtering wrapper (override `configure_train` to restrict `grid.
+  get_node_ids()`'s candidates by round number) if this becomes a priority.
+- **A10 (layer-wise alpha vs. model-wise), the plan's own explicitly optional,
+  "time-box it" ablation, is not implemented and has no config file.** It needs a
+  real redesign (the construction graph would need K x num_layer_groups stations,
+  not K), not a config toggle -- skipped deliberately, matching the plan's own
+  framing of it as optional, not a gap to apologize for.

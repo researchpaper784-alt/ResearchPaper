@@ -1,0 +1,54 @@
+# Phase 8, R1 -- label-flipping attackers at 10%/20%/30% of clients (fl/app.py's
+# is_attacker_client + local_train(label_flip=True), Phase 8). The dispersion term in
+# F(alpha) (plan §4.5) should down-weight flipped clients automatically -- compared
+# here against Krum / Trimmed-Mean / plain FedAvg, the standard robustness
+# reference set (plan §8's own framing).
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness_r1_label_flip.yaml
+
+base_overrides:
+  num-clients: 20
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 2
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  attack-mode: label_flip
+  regime: dirichlet
+  alpha: 0.3
+
+strategies:
+  - name: fedavg
+    file: configs/strategy/fedavg.yaml
+  # Krum's own num-malicious-nodes is a fixed assumption (4 = 20% of 20 clients, the
+  # middle test point below), not dynamically matched to each attacker-fraction cell
+  # -- a real, deliberate simplification: this grid's "partitions" axis carries the
+  # attacker fraction, and a strategy-specific value that should co-vary with a
+  # partition-specific one doesn't have a clean expression in a plain Cartesian
+  # product. Krum is therefore mildly under/over-configured at the 10%/30% cells,
+  # not misconfigured at 20%. Flag this in any table built from this sweep.
+  - name: krum
+    overrides: {strategy-name: krum, num-malicious-nodes: 4}
+  - name: trimmed_mean
+    file: configs/strategy/trimmed_mean.yaml
+  - name: fedaco
+    file: configs/strategy/fedaco.yaml
+
+partitions:
+  - name: attackers_10pct
+    overrides: {attacker-fraction: 0.10}
+  - name: attackers_20pct
+    overrides: {attacker-fraction: 0.20}
+  - name: attackers_30pct
+    overrides: {attacker-fraction: 0.30}
+
+seeds: [0, 1, 2]

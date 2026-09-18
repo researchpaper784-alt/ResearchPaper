@@ -1,0 +1,50 @@
+# Phase 6/9 -- aggregation overhead vs. K, purpose-built for fitting/plotting the
+# O(K^2) curve (plan §9.2, figure 5) against FedACO's own logged aco_time_ms/
+# gram_time_ms per round (strategies/fedaco.py's MetricRecord, merged into each
+# round via fl/app.py::merge_train_metrics). Denser K grid than
+# robustness_r5_client_scaling.yaml's plan-specified {10,20,50,100} -- more points
+# make a cleaner curve fit.
+#
+# Only 5 rounds needed: this measures per-round wall-clock overhead, not final
+# accuracy -- no reason to pay for a full 100-round run per K here.
+#
+# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/overhead.yaml
+
+base_overrides:
+  min-client-size: 5
+  fraction-train: 1.0
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 1
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 5
+  deterministic: true
+  regime: iid
+  strategy-name: fedaco
+
+strategies:
+  - name: k=5
+    overrides: {num-clients: 5, min-train-nodes: 2}
+  - name: k=10
+    overrides: {num-clients: 10, min-train-nodes: 2}
+  - name: k=20
+    overrides: {num-clients: 20, min-train-nodes: 2}
+  - name: k=50
+    overrides: {num-clients: 50, min-train-nodes: 2}
+  - name: k=100
+    overrides: {num-clients: 100, min-train-nodes: 2}
+  - name: k=150
+    overrides: {num-clients: 150, min-train-nodes: 2}
+  - name: k=200
+    overrides: {num-clients: 200, min-train-nodes: 2}
+
+partitions:
+  - name: iid
+    overrides: {}
+
+seeds: [0]
