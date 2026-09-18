@@ -36,6 +36,7 @@ from fedswarm.fl.app import (
     load_client_data,
     local_evaluate,
     local_train,
+    merge_train_metrics,
     partition_spec_from_run_config,
     per_class_confusion_counts,
     save_checkpoint,
@@ -597,3 +598,45 @@ def test_evaluate_fn_skips_logging_the_resumed_round_zero_reconfirmation(server_
 
     assert len(rounds_log) == 2
     assert rounds_log[1]["round"] == 6
+
+
+def test_merge_train_metrics_attaches_aggregate_train_diagnostics_by_true_round() -> None:
+    """Guards against the real bug this function was written to fix: `Strategy.
+    start()`'s per-round aggregate_train output (FedACO's alpha/fallback_used/etc.)
+    was previously discarded entirely -- `main()` never captured `strategy.start()`'s
+    return value at all."""
+    from flwr.app import MetricRecord
+
+    rounds_log = [{"round": 1, "test_macro_f1": 0.1}, {"round": 2, "test_macro_f1": 0.2}]
+    train_metrics_clientapp = {
+        1: MetricRecord({"alpha_entropy": 0.5, "fallback_used": 0}),
+        2: MetricRecord({"alpha_entropy": 0.3, "fallback_used": 1}),
+    }
+
+    merge_train_metrics(rounds_log, train_metrics_clientapp, round_offset=0)
+
+    assert rounds_log[0]["train_metrics"] == {"alpha_entropy": 0.5, "fallback_used": 0}
+    assert rounds_log[1]["train_metrics"] == {"alpha_entropy": 0.3, "fallback_used": 1}
+
+
+def test_merge_train_metrics_applies_round_offset_on_resume() -> None:
+    from flwr.app import MetricRecord
+
+    # Resumed run: 3 rounds already logged (true rounds 1-3), this invocation's fresh
+    # strategy.start() call renumbers from 1 again -- server_round=1 here means true
+    # round 4.
+    rounds_log = [{"round": r, "test_macro_f1": 0.0} for r in (1, 2, 3, 4)]
+    train_metrics_clientapp = {1: MetricRecord({"alpha_entropy": 0.9})}
+
+    merge_train_metrics(rounds_log, train_metrics_clientapp, round_offset=3)
+
+    assert "train_metrics" not in rounds_log[0]  # true round 1: untouched
+    assert rounds_log[3]["train_metrics"] == {"alpha_entropy": 0.9}  # true round 4
+
+
+def test_merge_train_metrics_skips_rounds_with_no_matching_log_entry() -> None:
+    from flwr.app import MetricRecord
+
+    rounds_log = [{"round": 1, "test_macro_f1": 0.1}]
+    merge_train_metrics(rounds_log, {5: MetricRecord({"alpha_entropy": 0.1})}, round_offset=0)
+    assert "train_metrics" not in rounds_log[0]

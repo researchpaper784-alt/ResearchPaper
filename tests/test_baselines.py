@@ -310,3 +310,70 @@ def test_scaffold_configure_train_merges_global_c_into_outgoing_arrays() -> None
     sent_keys = set(messages[0].content["arrays"].keys())
     assert "w" in sent_keys
     assert "scaffold_c/w" in sent_keys
+
+
+# ======================================================================================
+# strategies/factory.py -- FedACO's full ablation-axis config wiring (Phase 7)
+# ======================================================================================
+
+
+def test_factory_wires_every_fedaco_ablation_knob_from_run_config() -> None:
+    run_config = {
+        "strategy-name": "fedaco",
+        "num-rounds": 5,
+        "fedaco-num-levels": 7,
+        "fedaco-level-low": 0.1,
+        "fedaco-level-high": 2.0,
+        "fedaco-target-sum": 0.8,
+        "fedaco-ants-start": 20,
+        "fedaco-ants-end": 5,
+        "fedaco-iters-start": 8,
+        "fedaco-iters-end": 2,
+        "fedaco-trim-fraction": 0.3,
+        "fedaco-safety-fallback": False,
+        "fedaco-fitness-mode": "data_free",
+        "fedaco-a-exponent": 2.0,
+        "fedaco-b-exponent": 3.0,
+        "fedaco-q0": 0.5,
+        "fedaco-rho": 0.2,
+        "fedaco-tau-min": 0.05,
+        "fedaco-tau-max": 5.0,
+        "fedaco-tau0": 2.0,
+        "fedaco-rho-round": 0.4,
+        "fedaco-pheromone-persistence": "none",
+        "fedaco-gamma-alignment": 1.5,
+        "fedaco-gamma-dispersion": 0.7,
+        "fedaco-gamma-entropy": 0.2,
+        "fedaco-beta-alignment": 3.0,
+        "fedaco-beta-drift": 1.5,
+        "fedaco-beta-val-improvement": 0.5,
+        "fedaco-beta-data-size": 0.25,
+    }
+    strategy = strategy_from_run_config(run_config)
+    cfg = strategy.aco_config
+
+    assert cfg.num_levels == 7
+    assert cfg.level_low == 0.1 and cfg.level_high == 2.0
+    assert cfg.target_sum == 0.8
+    assert cfg.num_rounds == 5
+    assert (cfg.ants_start, cfg.ants_end, cfg.iters_start, cfg.iters_end) == (20, 5, 8, 2)
+    assert cfg.trim_fraction == 0.3
+    assert cfg.safety_fallback is False
+    assert cfg.fitness_mode == "data_free"
+    assert cfg.colony.pheromone_exp == 2.0 and cfg.colony.heuristic_exp == 3.0
+    assert cfg.colony.q0 == 0.5 and cfg.colony.rho == 0.2
+    assert cfg.colony.tau_min == 0.05 and cfg.colony.tau_max == 5.0
+    assert cfg.pheromone.tau0 == 2.0 and cfg.pheromone.rho_round == 0.4
+    assert cfg.pheromone.persistence == "none"
+    assert cfg.fitness.gamma_alignment == 1.5
+    assert cfg.fitness.gamma_dispersion == 0.7
+    assert cfg.fitness.gamma_entropy == 0.2
+    assert cfg.heuristics.beta_alignment == 3.0
+    assert cfg.heuristics.beta_drift == 1.5
+    assert cfg.heuristics.beta_val_improvement == 0.5
+    assert cfg.heuristics.beta_data_size == 0.25
+
+
+def test_factory_fedaco_server_val_mode_requires_model_val_loader_device() -> None:
+    with pytest.raises(ValueError):
+        strategy_from_run_config({"strategy-name": "fedaco", "fedaco-fitness-mode": "server_val"})

@@ -15,6 +15,10 @@ import torch
 from flwr.serverapp.strategy import FedAdam, FedAvg, FedMedian, FedProx, FedTrimmedAvg, FedYogi, Krum, Strategy
 from torch.utils.data import DataLoader
 
+from fedswarm.aco.colony import ColonyConfig
+from fedswarm.aco.fitness import DataFreeFitnessConfig
+from fedswarm.aco.heuristics import HeuristicWeights
+from fedswarm.aco.pheromone import PheromoneConfig
 from fedswarm.strategies.fedaco import FedACO, FedACOConfig
 from fedswarm.strategies.fedlaw import FedLAW
 from fedswarm.strategies.fednova import FedNova
@@ -95,9 +99,63 @@ def strategy_from_run_config(
         )
 
     if name == "fedaco":
-        return FedACO(
-            **common,
-            aco_config=FedACOConfig(num_rounds=int(run_config.get("num-rounds", 2))),
-        )
+        return _build_fedaco(run_config, common, model=model, val_loader=val_loader, device=device)
 
     raise ValueError(f"Unknown strategy-name: {name!r}")
+
+
+def _build_fedaco(
+    run_config: RunConfig,
+    common: dict,
+    *,
+    model: torch.nn.Module | None,
+    val_loader: DataLoader | None,
+    device: torch.device | None,
+) -> FedACO:
+    """Every field below is a Phase 7 ablation axis (plan §7): fedaco-fitness-mode is
+    A3, fedaco-pheromone-persistence/-rho-round are A2, fedaco-gamma-* are A4,
+    fedaco-beta-* are A5, fedaco-{a,b,q0,rho,ants,iters,levels} are A6,
+    fedaco-target-sum is A7. Defaults match the plan's §14 hyperparameter table where
+    that table specifies one; the rest (trim fraction, level bounds, tau bounds) are
+    this repo's own already-tested defaults."""
+    aco_config = FedACOConfig(
+        num_levels=int(run_config.get("fedaco-num-levels", 11)),
+        level_low=float(run_config.get("fedaco-level-low", 0.0)),
+        level_high=float(run_config.get("fedaco-level-high", 2.5)),
+        target_sum=float(run_config.get("fedaco-target-sum", 1.0)),
+        num_rounds=int(run_config.get("num-rounds", 2)),
+        ants_start=int(run_config.get("fedaco-ants-start", 30)),
+        ants_end=int(run_config.get("fedaco-ants-end", 10)),
+        iters_start=int(run_config.get("fedaco-iters-start", 10)),
+        iters_end=int(run_config.get("fedaco-iters-end", 4)),
+        trim_fraction=float(run_config.get("fedaco-trim-fraction", 0.2)),
+        safety_fallback=bool(run_config.get("fedaco-safety-fallback", True)),
+        fitness_mode=str(run_config.get("fedaco-fitness-mode", "data_free")),  # type: ignore[arg-type]
+        colony=ColonyConfig(
+            pheromone_exp=float(run_config.get("fedaco-a-exponent", 1.0)),
+            heuristic_exp=float(run_config.get("fedaco-b-exponent", 2.0)),
+            q0=float(run_config.get("fedaco-q0", 0.9)),
+            rho=float(run_config.get("fedaco-rho", 0.1)),
+            tau_min=float(run_config.get("fedaco-tau-min", 0.01)),
+            tau_max=float(run_config.get("fedaco-tau-max", 10.0)),
+        ),
+        pheromone=PheromoneConfig(
+            tau_min=float(run_config.get("fedaco-tau-min", 0.01)),
+            tau_max=float(run_config.get("fedaco-tau-max", 10.0)),
+            tau0=float(run_config.get("fedaco-tau0", 1.0)),
+            rho_round=float(run_config.get("fedaco-rho-round", 0.1)),
+            persistence=str(run_config.get("fedaco-pheromone-persistence", "decayed")),  # type: ignore[arg-type]
+        ),
+        fitness=DataFreeFitnessConfig(
+            gamma_alignment=float(run_config.get("fedaco-gamma-alignment", 1.0)),
+            gamma_dispersion=float(run_config.get("fedaco-gamma-dispersion", 0.5)),
+            gamma_entropy=float(run_config.get("fedaco-gamma-entropy", 0.1)),
+        ),
+        heuristics=HeuristicWeights(
+            beta_alignment=float(run_config.get("fedaco-beta-alignment", 2.0)),
+            beta_drift=float(run_config.get("fedaco-beta-drift", 1.0)),
+            beta_val_improvement=float(run_config.get("fedaco-beta-val-improvement", 1.0)),
+            beta_data_size=float(run_config.get("fedaco-beta-data-size", 0.5)),
+        ),
+    )
+    return FedACO(**common, aco_config=aco_config, model=model, val_loader=val_loader, device=device)

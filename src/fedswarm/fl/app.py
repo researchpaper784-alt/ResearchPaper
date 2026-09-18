@@ -595,6 +595,27 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
     return evaluate_fn
 
 
+def merge_train_metrics(
+    rounds_log: list[dict], train_metrics_clientapp: dict[int, MetricRecord], round_offset: int
+) -> None:
+    """`Strategy.start()` only returns its `Result` at the very end (verified,
+    `docs/FLOWER_API_NOTES.md`), so every round's own `aggregate_train` diagnostics --
+    FedACO's `alpha`/`alpha_entropy`/`fallback_used`/`aco_time_ms`/`pheromone_entropy`
+    (plan §6.1's schema), or whatever a simpler baseline's `train_metrics_aggr_fn`
+    returns -- can only be merged into `rounds_log` after the fact, not from inside
+    `build_evaluate_fn`'s closure (which never sees `Result` at all). Mutates
+    `rounds_log` in place. `result.train_metrics_clientapp` is keyed by `strategy.
+    start()`'s own internal round numbering (always renumbered from 1 on a fresh
+    call), remapped the same way `build_evaluate_fn` remaps `server_round` ->
+    `true_round`. A `server_round` with no matching `rounds_log` entry (shouldn't
+    happen; defensive only) is silently skipped rather than raising."""
+    rounds_by_number = {entry["round"]: entry for entry in rounds_log}
+    for server_round, metrics in train_metrics_clientapp.items():
+        entry = rounds_by_number.get(server_round + round_offset)
+        if entry is not None:
+            entry["train_metrics"] = dict(metrics)
+
+
 @server_app.main()
 def main(grid: Grid, context: Context) -> None:
     run_config = context.run_config
@@ -629,7 +650,10 @@ def main(grid: Grid, context: Context) -> None:
         return
 
     device = _device()
-    val_loader = global_val_loader(run_config) if strategy_name == "fedlaw" else None
+    needs_val_loader = strategy_name == "fedlaw" or (
+        strategy_name == "fedaco" and str(run_config.get("fedaco-fitness-mode", "data_free")) == "server_val"
+    )
+    val_loader = global_val_loader(run_config) if needs_val_loader else None
     strategy = strategy_from_run_config(run_config, model=model, val_loader=val_loader, device=device)
     train_config = ConfigRecord(
         {
@@ -644,7 +668,7 @@ def main(grid: Grid, context: Context) -> None:
     evaluate_fn = build_evaluate_fn(run_config, rounds_log, round_offset)
 
     t_start = time.time()
-    strategy.start(
+    result = strategy.start(
         grid=grid,
         initial_arrays=initial_arrays,
         num_rounds=remaining_rounds,
@@ -652,6 +676,8 @@ def main(grid: Grid, context: Context) -> None:
         evaluate_fn=evaluate_fn,
     )
     wall_clock_s = time.time() - t_start
+
+    merge_train_metrics(rounds_log, result.train_metrics_clientapp, round_offset)
 
     write_result(
         output_dir / f"{run_id}.json",
@@ -675,6 +701,7 @@ __all__ = [
     "train_handler",
     "evaluate_handler",
     "build_evaluate_fn",
+    "merge_train_metrics",
     "global_test_loader",
     "global_val_loader",
     "build_model_from_run_config",

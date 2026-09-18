@@ -180,3 +180,52 @@ def test_overhead() -> None:
     # full local epoch) doesn't depend on exactly where the line is drawn; a wall-clock
     # assertion in a shared CI/test-suite environment does need slack.
     assert aco_time_s < 0.15 * round_time_s, (aco_time_s, round_time_s)
+
+
+def test_fedaco_server_val_fitness_mode_requires_model_val_loader_device() -> None:
+    with pytest.raises(ValueError):
+        FedACO(aco_config=FedACOConfig(fitness_mode="server_val"))
+
+
+def test_fedaco_client_probe_fitness_mode_raises_not_implemented() -> None:
+    with pytest.raises(NotImplementedError):
+        FedACO(aco_config=FedACOConfig(fitness_mode="client_probe"))
+
+
+def test_fedaco_server_val_fitness_mode_runs_end_to_end() -> None:
+    """A3 ablation axis (plan §4.4): fitness_mode='server_val' materializes a real
+    candidate model each colony evaluation and scores it on a server val batch,
+    instead of the Gram-trick surrogate."""
+    torch.manual_seed(0)
+    model = SimpleCNN(num_classes=4, norm="groupnorm")
+    global_state = model.state_dict()
+
+    images = torch.randn(8, 3, 16, 16)
+    labels = torch.randint(0, 4, (8,))
+    val_loader = DataLoader(TensorDataset(images, labels), batch_size=8)
+
+    client_states = [
+        OrderedDict((k, v + 0.01 * torch.randn_like(v)) for k, v in global_state.items())
+        for _ in range(2)
+    ]
+    replies = [_make_reply(i, s, 100.0) for i, s in enumerate(client_states)]
+
+    strategy = FedACO(
+        min_train_nodes=2,
+        min_evaluate_nodes=2,
+        model=model,
+        val_loader=val_loader,
+        device=torch.device("cpu"),
+        aco_config=FedACOConfig(
+            fitness_mode="server_val",
+            num_rounds=1,
+            ants_start=3,
+            ants_end=3,
+            iters_start=2,
+            iters_end=2,
+        ),
+    )
+    strategy._current_arrays = ArrayRecord(global_state)
+    arrays_out, metrics_out = strategy.aggregate_train(1, list(replies))
+    assert arrays_out is not None and metrics_out is not None
+    assert len(metrics_out["alpha"]) == 2

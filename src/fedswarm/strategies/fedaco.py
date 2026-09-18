@@ -18,19 +18,22 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, Literal
 
 import torch
 from flwr.app import ArrayRecord, ConfigRecord, Message, MetricRecord
 from flwr.serverapp import Grid
 from flwr.serverapp.strategy import FedAvg
+from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig, run_colony
-from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig
+from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, Fitness, ServerValFitness
 from fedswarm.aco.gram import apply_delta, flatten_state_dicts, precompute_gram
 from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix, desirability_scores
 from fedswarm.aco.pheromone import Pheromone, PheromoneConfig
 from fedswarm.aco.schedules import colony_budget, level_set
+
+FitnessMode = Literal["data_free", "server_val", "client_probe"]
 
 
 @dataclass
@@ -41,8 +44,7 @@ class FedACOConfig:
     # Global shrinkage s (plan §4.1) is exposed as a fixed config value, not searched
     # per-ant as an extra decision variable -- a deliberate scope reduction to keep the
     # colony's construction graph exactly the K-station one §4.2 describes. Ablating it
-    # (sweeping this value, not searching it) is tracked as Phase 7 work; see
-    # docs/OPEN_QUESTIONS.md.
+    # (sweeping this value, not searching it) is Phase 7's A7; see docs/OPEN_QUESTIONS.md.
     target_sum: float = 1.0
     num_rounds: int = 1  # must match Strategy.start()'s num_rounds for the budget decay (§4.7) to track real progress
     ants_start: int = 30
@@ -51,6 +53,11 @@ class FedACOConfig:
     iters_end: int = 4
     trim_fraction: float = 0.2
     safety_fallback: bool = True
+    # A3 ablation axis (plan §4.4). "server_val" needs `model`/`val_loader`/`device`
+    # passed to FedACO's constructor; "client_probe" is not wired for live execution
+    # yet (docs/OPEN_QUESTIONS.md's Phase 4 entry) -- selecting it raises, not silently
+    # falls back to data_free.
+    fitness_mode: FitnessMode = "data_free"
     colony: ColonyConfig = field(default_factory=ColonyConfig)
     pheromone: PheromoneConfig = field(default_factory=PheromoneConfig)
     fitness: DataFreeFitnessConfig = field(default_factory=DataFreeFitnessConfig)
@@ -58,9 +65,33 @@ class FedACOConfig:
 
 
 class FedACO(FedAvg):
-    def __init__(self, *args, aco_config: FedACOConfig | None = None, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        aco_config: FedACOConfig | None = None,
+        model: torch.nn.Module | None = None,
+        val_loader: DataLoader | None = None,
+        device: torch.device | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.aco_config = aco_config or FedACOConfig()
+        if self.aco_config.fitness_mode == "server_val" and (
+            model is None or val_loader is None or device is None
+        ):
+            raise ValueError(
+                "fitness_mode='server_val' requires model, val_loader, and device"
+            )
+        if self.aco_config.fitness_mode == "client_probe":
+            raise NotImplementedError(
+                "fitness_mode='client_probe' needs the broadcast/collect round-trip "
+                "documented as not-yet-wired in docs/OPEN_QUESTIONS.md's Phase 4 "
+                "entry -- ClientProbeFitness only implements report-aggregation, "
+                "not live execution through this strategy."
+            )
+        self.model = model
+        self.val_loader = val_loader
+        self.device = device
         self.levels = level_set(
             self.aco_config.num_levels, self.aco_config.level_low, self.aco_config.level_high
         )
@@ -68,6 +99,18 @@ class FedACO(FedAvg):
         self._current_arrays: ArrayRecord | None = None
         self.fallback_count = 0
         self.round_count = 0
+
+    def _build_fitness(
+        self,
+        gram,
+        global_state: dict,
+        deltas: torch.Tensor,
+        shapes: list[tuple[str, torch.Size]],
+    ) -> Fitness:
+        if self.aco_config.fitness_mode == "server_val":
+            assert self.model is not None and self.val_loader is not None and self.device is not None
+            return ServerValFitness(self.model, global_state, deltas, shapes, self.val_loader, self.device)
+        return DataFreeFitness(gram, self.aco_config.fitness)
 
     def configure_train(
         self, server_round: int, arrays: ArrayRecord, config: ConfigRecord, grid: Grid
@@ -127,7 +170,7 @@ class FedACO(FedAvg):
             self.aco_config.iters_end,
         )
         base_weights = num_examples / num_examples.sum()
-        fitness = DataFreeFitness(gram, self.aco_config.fitness)
+        fitness = self._build_fitness(gram, global_state, deltas, shapes)
 
         colony_result = run_colony(
             tau0,
