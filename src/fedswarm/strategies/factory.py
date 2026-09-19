@@ -225,6 +225,9 @@ def _build_fedaco(
         num_levels=int(run_config.get("aco-num-levels", FedACOConfig.num_levels)),
         level_low=float(run_config.get("aco-level-low", FedACOConfig.level_low)),
         level_high=float(run_config.get("aco-level-high", FedACOConfig.level_high)),
+        level_spacing=str(
+            run_config.get("aco-level-spacing", FedACOConfig.level_spacing)
+        ),
         # Phase 7 sweeps fixed values of the global shrinkage s; it is never searched.
         target_sum=float(run_config.get("aco-target-sum", FedACOConfig.target_sum)),
         num_rounds=int(run_config.get("num-rounds", 2)),

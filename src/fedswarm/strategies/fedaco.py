@@ -46,6 +46,11 @@ class FedACOConfig:
     num_levels: int = 11
     level_low: float = 0.0
     level_high: float = 2.5
+    # "linear" (plan §14's explicit level set) or "log" (what shipped until 2026-09-19).
+    # Owned by A6, the hyperparameter-sensitivity ablation. See aco/schedules.level_set --
+    # the two differ by 100x in the alpha ratios a single ant can construct, which changes
+    # how reachable the degenerate single-client optimum is.
+    level_spacing: str = "linear"
     # Global shrinkage s (plan §4.1) is exposed as a fixed config value, not searched
     # per-ant as an extra decision variable -- a deliberate scope reduction to keep the
     # colony's construction graph exactly the K-station one §4.2 describes. Ablating it
@@ -125,7 +130,10 @@ class FedACO(FedAvg):
         self.val_loader = val_loader
         self.device = device
         self.levels = level_set(
-            self.aco_config.num_levels, self.aco_config.level_low, self.aco_config.level_high
+            self.aco_config.num_levels,
+            self.aco_config.level_low,
+            self.aco_config.level_high,
+            spacing=self.aco_config.level_spacing,
         )
         self.pheromone = Pheromone(self.aco_config.num_levels, self.aco_config.pheromone)
         self._current_arrays: ArrayRecord | None = None

@@ -32,6 +32,14 @@ base_overrides:
   strategy-name: fedaco
 
 strategies:
+  # The level grid's *shape*, not just its size. docs/IMPLEMENTATION_PLAN.md §14
+  # specifies the linear set; the codebase shipped log-spaced until 2026-09-19, which
+  # allows alpha ratios of 1143:1 against linear's 10:1 and therefore makes the
+  # degenerate single-client optimum far easier for an ant to construct
+  # (`fitness.corner_margin`). "linear" is now the default; this cell measures what the
+  # old behaviour was worth rather than assuming the switch was free.
+  - name: levels_log_spaced
+    overrides: {aco-level-spacing: log}
   - name: a=0.5
     overrides: {aco-pheromone-exp: 0.5}
   - name: a=1.0_default

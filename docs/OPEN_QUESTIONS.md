@@ -945,3 +945,41 @@ robustness configs. The granular configs turned out to be at **3** seeds, not 5:
    for the overlapping cells, or dropping the duplicates from whichever runs second, is a
    scope call for whoever owns the ablation runs -- and is worth more compute than any
    remaining seed decision.
+
+## Phase 4 -- the level set did not match the plan's own hyperparameter table
+
+**Status: fixed 2026-09-19. Prior results are affected.**
+
+docs/IMPLEMENTATION_PLAN.md §14 writes the level set out literally:
+
+    [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5]
+
+which is `linspace(0, 2.5, 11)`. `aco/schedules.level_set` was **log-spaced** until today.
+Nobody could have caught it: the plan was not in the repository until the same day.
+
+| | linear (plan) | log (what shipped) |
+|---|---|---|
+| max ratio between positive levels | 10x | **1143x** |
+| levels below 1.0 | 4 of 11 | **9 of 11** |
+
+**Why this is not cosmetic.** Log spacing puts nine of eleven levels below the FedAvg
+point and lets a single ant construct alpha ratios over 1000:1, so a near-vertex weighting
+like [0.99, 0.01] is one greedy draw away. Linear caps it at 10:1.
+
+That bears directly on the degenerate-optimum finding (2026-09-18). The observed
+alpha = [0.990, 0.010] was read as the colony finding the fitness's single-client optimum.
+It was -- but the *reachability* of that corner was inflated by a level set the plan never
+specified. `corner_margin` measures the fitness and is unaffected; how easily the colony
+gets there is not.
+
+**What was done.** `level_spacing` is now selectable, defaults to `"linear"` (the plan's
+spec), and is exposed as `aco-level-spacing`. `"log"` is kept rather than deleted: every
+result produced before today used it, and A6 -- the hyperparameter-sensitivity ablation
+that owns L -- now has a `levels_log_spaced` cell so the choice is measured rather than
+assumed.
+
+**What is still open.** Whether the corner margin stays positive on real deltas under
+*linear* spacing. The synthetic measurements in the 2026-09-18 entry and the K=10
+rehearsal both used the log grid, so neither transfers. The first real run under the new
+default is what settles it -- and until it does, "the fitness prefers one client" should
+be quoted as a lead, not a finding.

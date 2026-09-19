@@ -1564,3 +1564,35 @@ concatenated the whole notebook into one 3,000-character syntax error), and a mu
 cell.
 
 440 tests pass, ruff clean repo-wide.
+
+## 2026-09-19 (later) -- the plan is in the repository, and it immediately found a deviation
+
+`docs/IMPLEMENTATION_PLAN.md`. It existed from the start and was never committed, which
+had two concrete costs: Phase 7's A2 and A4-A8 were recorded as "not reconstructable from
+what the repo names" and left unbuilt for days, and the level set diverged from §14's
+explicit hyperparameter table with nothing to catch it.
+
+Reading §14 against `aco/schedules.level_set` took about a minute and found the second.
+The plan specifies `linspace(0, 2.5, 11)`; the code shipped log-spaced -- **1143x max ratio
+between positive levels against linear's 10x, and nine of eleven levels below the FedAvg
+point instead of four.**
+
+`level_spacing` is now selectable and defaults to "linear". "log" is kept, because every
+result before today used it and A6 owns L; A6 gains a `levels_log_spaced` cell so the
+switch is measured rather than assumed. All 440 tests passed unchanged under the new
+default, which says the suite never pinned the old grid -- the deviation was invisible to
+it as well.
+
+**This partially qualifies the 2026-09-18 degenerate-optimum entry.** The observed
+alpha = [0.990, 0.010] was the colony finding the fitness's single-client optimum, and
+`corner_margin` measures the fitness itself, so that part stands. But how *reachable* the
+corner was is a property of the level grid, and the grid was not the plan's. The synthetic
+sweeps and the K=10 rehearsal both ran on the log grid. Whether the margin stays positive
+under linear spacing on real deltas is now open, and recorded as such.
+
+Two amendments to the plan itself, recorded rather than silently followed: §9.1's Wilcoxon
++ Holm at the stated 5 seeds cannot return a significant result at any data (floor 0.0625),
+which is why main.yaml runs 8; and §0.3's naming collision was resolved by renaming to
+FedSwarm.
+
+440 tests pass, ruff clean.

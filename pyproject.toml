@@ -195,6 +195,9 @@ fedlaw-lr = 0.1
 aco-num-levels = 11
 aco-level-low = 0.0
 aco-level-high = 2.5
+# "linear" (plan §14's explicit level set) or "log" (pre-2026-09-19 behaviour, kept so those
+# results stay reproducible and so A6 can ablate the choice). See aco/schedules.level_set.
+aco-level-spacing = "linear"
 # The global shrinkage s. SWEPT as fixed values, never searched per-round -- the
 # deliberate Phase 4 scope reduction recorded in docs/OPEN_QUESTIONS.md.
 aco-target-sum = 1.0

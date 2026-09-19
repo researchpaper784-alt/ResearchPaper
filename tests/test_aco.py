@@ -338,3 +338,67 @@ def test_the_default_is_still_the_method_as_proposed() -> None:
     from fedswarm.aco.fitness import DataFreeFitnessConfig
 
     assert DataFreeFitnessConfig().concentration_penalty == "entropy"
+
+
+# ======================================================================================
+# The level set, against the plan's own hyperparameter table
+# ======================================================================================
+
+
+def test_the_default_level_set_is_exactly_the_one_the_plan_specifies() -> None:
+    """docs/IMPLEMENTATION_PLAN.md §14 writes the level set out literally. This function
+    was log-spaced until 2026-09-19 -- a deviation nobody could catch, because the plan
+    was not in the repository. Pinned here so the code and the paper describe the same
+    search space."""
+    expected = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5]
+
+    assert [round(float(x), 6) for x in level_set()] == expected
+
+
+def test_log_spacing_is_still_reachable_and_materially_different() -> None:
+    """Kept rather than deleted: it is what every result before 2026-09-19 used, and A6 --
+    the hyperparameter-sensitivity ablation that owns L -- is where the choice belongs.
+
+    The difference is not cosmetic. Log spacing lets one ant construct alpha ratios of
+    1000:1, putting a near-vertex weighting like [0.99, 0.01] one greedy draw away; linear
+    caps it at 10:1. That changes how reachable the degenerate single-client optimum is,
+    so a conclusion about the fitness drawn under one spacing does not transfer to the
+    other."""
+    linear = [float(x) for x in level_set(spacing="linear") if x > 0]
+    log = [float(x) for x in level_set(spacing="log") if x > 0]
+
+    assert max(linear) / min(linear) == pytest.approx(10.0, rel=1e-3)
+    assert max(log) / min(log) > 100
+    # And log pushes most of the grid below the FedAvg point.
+    assert sum(1 for x in level_set(spacing="log") if x < 1.0) > sum(
+        1 for x in level_set(spacing="linear") if x < 1.0
+    )
+
+
+@pytest.mark.parametrize("spacing", ["linear", "log"])
+def test_fedavg_stays_reachable_under_either_spacing(spacing: str) -> None:
+    """lambda=1 is the level that makes an ant's choice recover the FedAvg weight at every
+    station. Losing it would remove FedAvg from the search space entirely, which
+    `test_fedavg_recoverable` (plan §4.8 acceptance #2) depends on."""
+    levels = level_set(spacing=spacing)
+
+    assert torch.any(levels == 1.0)
+    assert torch.equal(levels, torch.sort(levels).values)
+
+
+def test_an_unknown_spacing_raises_rather_than_silently_picking_one() -> None:
+    with pytest.raises(ValueError, match="Unknown level spacing"):
+        level_set(spacing="geometric")
+
+
+def test_the_spacing_reaches_the_strategy_from_run_config() -> None:
+    """A6 varies this through `--run-config`, so an unwired key would run the default
+    under the ablation's label -- the same silent-substitution failure A1 had."""
+    from fedswarm.strategies.factory import strategy_from_run_config
+
+    strategy = strategy_from_run_config(
+        {"strategy-name": "fedaco", "aco-level-spacing": "log"}
+    )
+
+    assert strategy.aco_config.level_spacing == "log"
+    assert float(strategy.levels[1]) < 0.01  # the log grid's second level, not 0.25
