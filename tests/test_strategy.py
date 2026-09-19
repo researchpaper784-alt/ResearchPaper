@@ -417,4 +417,4 @@ def test_a1_config_key_is_declared_in_pyproject() -> None:
     from pathlib import Path
 
     declared = tomllib.load(open(Path(__file__).resolve().parents[1] / "pyproject.toml", "rb"))
-    assert "fedaco-search-method" in declared["tool"]["flwr"]["app"]["config"]
+    assert "aco-search-method" in declared["tool"]["flwr"]["app"]["config"]

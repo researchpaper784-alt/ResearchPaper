@@ -30,13 +30,13 @@ base_overrides:
 
 strategies:
   - name: s=1.0_default
-    overrides: {fedaco-target-sum: 1.0}
+    overrides: {aco-target-sum: 1.0}
   - name: s=0.95
-    overrides: {fedaco-target-sum: 0.95}
+    overrides: {aco-target-sum: 0.95}
   - name: s=0.90
-    overrides: {fedaco-target-sum: 0.90}
+    overrides: {aco-target-sum: 0.90}
   - name: s=0.80
-    overrides: {fedaco-target-sum: 0.80}
+    overrides: {aco-target-sum: 0.80}
 
 partitions:
   - name: iid

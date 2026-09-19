@@ -243,7 +243,7 @@ def _build_fedaco(
         # Phase 7 A1. FedACO validates the value at construction, so a typo fails
         # there rather than inside a round.
         search_method=str(
-            run_config.get("fedaco-search-method", FedACOConfig.search_method)
+            run_config.get("aco-search-method", FedACOConfig.search_method)
         ),
         colony=colony,
         pheromone=pheromone,

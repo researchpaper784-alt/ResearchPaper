@@ -91,6 +91,10 @@ from fedswarm.fl.attacks import (
     poison_labels,
     poison_update,
 )
+from fedswarm.fl.privacy import (
+    clip_and_noise,
+    dp_from_run_config,
+)
 from fedswarm.models.factory import build_model
 from fedswarm.strategies.factory import strategy_from_run_config
 from fedswarm.utils.results import make_run_id, write_result
@@ -562,6 +566,30 @@ def train_handler(msg: Message, context: Context) -> Message:
                 int(context.run_config.get("seed", 0)) * 7919 + _partition_id(context)
             ),
         )
+    # Phase 8, R4. After any attack, and applied to EVERY client regardless of attacker
+    # status -- it is a privacy mechanism, not an attack, and the two must stay separable
+    # or a robustness cell cannot say which of them it measured. Seeded per (seed,
+    # partition, round) so a resumed run reproduces the same noise draw.
+    dp_sigma, dp_clip = dp_from_run_config(context.run_config)
+    if dp_sigma > 0:
+        local_state = clip_and_noise(
+            OrderedDict((k, full_state[k]) for k in model_keys),
+            local_state,
+            dp_sigma,
+            dp_clip,
+            generator=torch.Generator().manual_seed(
+                int(context.run_config.get("seed", 0)) * 104_729
+                + _partition_id(context) * 1_000_003
+                # `server_round`, with an underscore -- the key the server actually sends
+                # (see `metrics["server_round"]` above). Spelled "server-round" this
+                # would silently default to 0 every round, so every round would draw the
+                # *same* noise: a fixed perturbation the model learns around, not DP
+                # noise, and R4 would report the method as far more noise-robust than it is.
+                + int(config.get("server_round", 0))
+            ),
+        )
+    metrics["dp_noise_sigma"] = dp_sigma
+
     arrays_out = ArrayRecord(local_state)
     if global_c is not None and local_c is not None and params_before is not None:
         lr = float(config.get("lr", context.run_config.get("local-lr", 0.01)))
