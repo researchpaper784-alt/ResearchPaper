@@ -1832,3 +1832,40 @@ matching was never broken, but the log could not establish that. The check now l
 strategy present in the results directory before running its four questions.
 
 491 tests pass, ruff clean.
+
+## 2026-09-19 (last) -- three ways the gate would have wasted the next GPU session
+
+Found while making the second gate attempt easy to run, not by testing the mechanism.
+
+**1. `--strict` blocked on UNDERPOWERED, which is not a failure.** It means *this run cannot
+tell* -- the gate is 15 rounds by design and tau has not had time to leave uniform by a
+margin the threshold can see. Since the notebook now gates A1 on this exit code, someone who
+had just fixed the corner would still be refused, with the only remedy being to lengthen a
+gate whose whole purpose is to be short. A1 itself runs at 100 rounds, where the question is
+answerable. UNDERPOWERED and NO DATA are now non-blocking and say so in the output; INERT
+and DEGRADING still block, because those are real negative verdicts about the mechanism.
+
+A gate that cannot tell inconclusive from failing is a gate nobody can pass.
+
+**2. The check could report the previous attempt.** Changing `aco-gamma-entropy` changes the
+config hash, so a re-run at a new value writes a *new* file beside the old one -- both
+completed, both 15 rounds. `max()` returns the first maximal element, so the check could
+read the stale attempt and report the old verdict against the new setting: you change the
+value, re-run, and the report says nothing changed. Now tiebroken on mtime, and the header
+prints the `aco-gamma-entropy` of the run it actually read.
+
+**3. The gate's gamma was buried in a run-config string.** It is the one number that changes
+between attempts, so it is now a named `GAMMA_ENTROPY` constant at the top of the notebook's
+gate cell, defaulting to 0.6 -- the measured 0.481 requirement with ~25% headroom.
+
+### A note on fixtures
+
+The three `--strict` tests needed runs that genuinely produce UNDERPOWERED, SEARCHING and
+INERT. Check 1's verdict is not a function of tau's entropy alone: it is tau's movement as a
+*fraction* of what that run's own deposit budget makes reachable, and the deposit is
+`rho * Q * max(F, 0)`. So a near-uniform tau reads INERT at a healthy fitness (budget there,
+unused) and UNDERPOWERED at a small one (budget never there). The fixtures were found by
+probing the real function; the first attempt assumed entropy alone decided it and wrote a
+test that asserted the opposite of what it set up.
+
+499 tests pass, ruff clean.

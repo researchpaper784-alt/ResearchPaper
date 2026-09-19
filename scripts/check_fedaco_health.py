@@ -446,12 +446,26 @@ def main() -> int:
         print("Run one first -- see `make validate-fedaco` or notebooks/colab_fl_smoke.ipynb.")
         return 2
 
-    fedaco = max(fedaco_runs, key=lambda r: r.get("final", {}).get("num_rounds_completed", 0))
-    fedavg = (
-        max(fedavg_runs, key=lambda r: r.get("final", {}).get("num_rounds_completed", 0))
-        if fedavg_runs
-        else None
-    )
+    def _most_relevant(runs: list[dict]) -> dict:
+        """Longest run, then most recent. The tiebreak is not cosmetic.
+
+        Changing `aco-gamma-entropy` changes the config hash, so a re-run at a new value
+        writes a NEW file beside the old one -- both completed, both 15 rounds. `max` returns
+        the first maximal element, so without a tiebreak this check could read the previous
+        attempt and report the old verdict against the new setting. That is the exact shape
+        of mistake that costs a GPU session: you change the value, re-run, and the report
+        tells you nothing changed.
+        """
+        return max(
+            runs,
+            key=lambda r: (
+                r.get("final", {}).get("num_rounds_completed", 0),
+                Path(r["_path"]).stat().st_mtime,
+            ),
+        )
+
+    fedaco = _most_relevant(fedaco_runs)
+    fedavg = _most_relevant(fedavg_runs) if fedavg_runs else None
 
     print(f"FedACO health check\n  run: {fedaco['_path']}")
     # Named explicitly because check 4's "NO BASELINE" is ambiguous on its own -- it cannot
@@ -462,6 +476,10 @@ def main() -> int:
     present = sorted({str(r["config"].get("strategy", "?")) for r in everything})
     print(f"  strategies present in {results_dir}: {', '.join(present) or 'none'}"
           f" ({len(everything)} result file(s) with per-round records)")
+    # Printed because this is the knob being tuned between attempts, and a report that does
+    # not name the value it was produced at cannot be told apart from a stale one.
+    reported_gamma = fedaco.get("config", {}).get("run_config", {}).get("aco-gamma-entropy")
+    print(f"  aco-gamma-entropy of the run above: {reported_gamma if reported_gamma is not None else 'unset (default 0.1)'}")
     if fedavg:
         print(f"  baseline: {fedavg['_path']}")
     print(f"  timing: {wall_clock_note(fedaco)}\n")
@@ -514,14 +532,32 @@ def main() -> int:
         out_path.write_text(json.dumps({"run": fedaco["_path"], "checks": checks}, indent=2))
         print(f"\nWrote {out_path}")
 
-    # DEGENERATE fails --strict as well, and that is the point of having the flag. A1 costs
-    # 80 cells to answer "does the colony beat random search at equal budget", and its four
-    # controls optimize the SAME fitness -- so on a degenerate landscape they all inherit the
-    # same useless optimum and a tie says nothing about ACO. The plan's week-5 go/no-go is
-    # only interpretable once check 3 is clear, so a caller spending that budget should be
-    # able to make it conditional on this exit code rather than on someone reading the text.
+    # What --strict blocks on, and what it deliberately does not.
+    #
+    # DEGENERATE blocks. A1 costs 80 cells to ask "does the colony beat random search at
+    # equal budget", and its four controls optimize the SAME fitness -- so on a degenerate
+    # landscape they inherit the same useless optimum and a tie says nothing about ACO.
+    #
+    # UNDERPOWERED does NOT block, and getting this wrong would be worse than not having the
+    # flag. It does not mean the colony failed; it means THIS RUN CANNOT TELL, because the
+    # gate is 15 rounds by design and tau has not had time to leave uniform by a margin the
+    # threshold can see. Blocking on it would leave a caller who has just fixed the corner
+    # still refused, with the only remedy being to lengthen a gate whose whole purpose is to
+    # be short -- and A1 itself runs at 100 rounds, where the question is answerable.
+    # Inconclusive is not failure, and a gate that cannot say so is a gate nobody can pass.
+    #
+    # INERT and DEGRADING do block: those are real negative verdicts about the mechanism.
+    inconclusive = {"UNDERPOWERED", "NO DATA"}
+    colony_verdict = checks[0]["verdict"]
+    colony_blocks = not searching and colony_verdict not in inconclusive
     degenerate = checks[2]["verdict"] == "DEGENERATE"
-    return 1 if (args.strict and (not searching or degenerate)) else 0
+    if args.strict and colony_verdict in inconclusive and not degenerate:
+        print(
+            f"\n--strict: check 1 is {colony_verdict}, which is inconclusive rather than a\n"
+            "failure -- this gate is too short to answer it, and A1 runs at 100 rounds where\n"
+            "it is answerable. Not treating it as a blocker. Check 3 is what --strict gates on."
+        )
+    return 1 if (args.strict and (colony_blocks or degenerate)) else 0
 
 
 if __name__ == "__main__":

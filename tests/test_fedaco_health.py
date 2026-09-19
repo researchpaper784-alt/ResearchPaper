@@ -410,3 +410,108 @@ def test_the_check_lists_which_strategies_it_actually_found(tmp_path: Path) -> N
 
     assert "strategies present" in completed.stdout
     assert "fedaco, fedavg" in completed.stdout
+
+
+def _strict_exit(tmp_path: Path, colony_entropy: float, fitness: float, margin: float) -> int:
+    """Both knobs matter for check 1's verdict, which is why they are both parameters.
+
+    The verdict is not a function of tau's entropy alone -- it is tau's movement as a
+    FRACTION of what this run's own deposit budget makes reachable, and the deposit is
+    `rho * Q * max(F, 0)`. So a near-uniform tau reads INERT at a healthy fitness (the
+    budget was there and went unused) and UNDERPOWERED at a small one (the budget was never
+    there). Verified by probing the real function rather than assumed.
+    """
+    import json
+    import subprocess
+    import sys
+
+    rounds = [
+        {"round": i + 1, "train_pheromone_entropy": colony_entropy, "train_best_fitness": fitness,
+         "train_corner_margin": margin, "train_alpha_max": 0.3,
+         "train_required_gamma_entropy": 0.48, "train_fallback_used": 0.0}
+        for i in range(15)
+    ]
+    (tmp_path / "r.json").write_text(json.dumps({
+        "status": "completed", "rounds": rounds,
+        "config": {"strategy": "fedaco", "seed": 0,
+                   "run_config": {"num-clients": 10, "aco-gamma-entropy": 0.6}},
+        "final": {"final_test_macro_f1": 0.2, "num_rounds_completed": 15, "wall_clock_s": 100.0},
+    }))
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_fedaco_health.py"),
+         "--results-dir", str(tmp_path), "--strict"],
+        capture_output=True, text=True,
+    ).returncode
+
+
+def test_an_inconclusive_colony_check_does_not_block_a_fixed_corner(tmp_path: Path) -> None:
+    """UNDERPOWERED means "this run cannot tell", not "the colony failed" -- the gate is 15
+    rounds by design and tau has not had time to leave uniform by a margin the threshold can
+    see. Blocking on it would leave someone who has just fixed the corner still refused, with
+    the only remedy being to lengthen a gate whose whole purpose is to be short. A1 itself
+    runs at 100 rounds, where the question is answerable.
+
+    A gate that cannot distinguish inconclusive from failing is a gate nobody can pass.
+    """
+    # tau moving but the deposit too small to settle it -- the shape of the real gate run,
+    # whose best_fitness averaged ~0.19. Corner comfortably lost.
+    assert _strict_exit(tmp_path, colony_entropy=2.0, fitness=0.2, margin=-0.35) == 0
+
+
+def test_a_degenerate_corner_blocks_even_when_the_colony_is_searching(tmp_path: Path) -> None:
+    """The case the flag exists for, and the one a human reading the report most easily
+    talks themselves past: every mechanism signal looks healthy, and the colony is healthily
+    searching for the wrong thing."""
+    assert _strict_exit(tmp_path, colony_entropy=1.5, fitness=0.8, margin=0.6) == 1
+
+
+def test_a_genuinely_inert_colony_still_blocks(tmp_path: Path) -> None:
+    """The other side of not blocking on UNDERPOWERED. INERT is a real negative verdict --
+    the deposit budget was there and tau did not move -- so it must still stop A1 even with
+    the corner fixed, or making UNDERPOWERED non-blocking would have quietly disabled the
+    colony half of the gate."""
+    assert _strict_exit(tmp_path, colony_entropy=math.log(11) - 0.001, fitness=0.8, margin=-0.35) == 1
+
+
+def test_the_freshest_run_is_reported_not_the_first_one_found(tmp_path: Path) -> None:
+    """Changing `aco-gamma-entropy` changes the config hash, so a re-run at a new value
+    writes a NEW file beside the old one -- both completed, both 15 rounds. `max` returns the
+    first maximal element, so without a tiebreak the check could read the previous attempt
+    and report the old verdict against the new setting: you change the value, re-run, and the
+    report tells you nothing changed."""
+    import json
+    import os
+    import subprocess
+    import sys
+    import time
+
+    def write(name: str, gamma: float, margin: float, mtime: float) -> None:
+        rounds = [
+            {"round": i + 1, "train_corner_margin": margin, "train_alpha_max": 0.3,
+             "train_required_gamma_entropy": 0.48, "train_pheromone_entropy": 0.4,
+             "train_best_fitness": 0.2, "train_fallback_used": 0.0}
+            for i in range(15)
+        ]
+        path = tmp_path / name
+        path.write_text(json.dumps({
+            "status": "completed", "rounds": rounds,
+            "config": {"strategy": "fedaco", "seed": 0,
+                       "run_config": {"num-clients": 10, "aco-gamma-entropy": gamma}},
+            "final": {"final_test_macro_f1": 0.13, "num_rounds_completed": 15,
+                      "wall_clock_s": 113.0},
+        }))
+        os.utime(path, (mtime, mtime))
+
+    now = time.time()
+    write("a_old.json", 0.1, 0.62, now - 3600)   # sorts first by name; the stale attempt
+    write("z_new.json", 0.6, -0.35, now)         # the fresh one
+
+    out = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_fedaco_health.py"),
+         "--results-dir", str(tmp_path)],
+        capture_output=True, text=True,
+    ).stdout
+
+    assert "z_new.json" in out
+    assert "aco-gamma-entropy of the run above: 0.6" in out
+    assert "CLEAR" in out
