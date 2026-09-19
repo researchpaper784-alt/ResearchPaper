@@ -28,6 +28,43 @@ from fedswarm.strategies.scaffold import Scaffold
 RunConfig = dict
 
 
+def _with_server_round(strategy: Strategy) -> Strategy:
+    """Make every strategy put the round number into the train config it sends clients.
+
+    Nothing did. `fl/app.py::train_handler` reads `config.get("server_round", ...)` and
+    the ServerApp builds `train_config` once, before round 1, with no round number in it
+    -- so the key was never present for any strategy. Scaffold wrote one, spelled
+    `server-round`, which no reader uses. Two consequences, found in the first real GPU
+    run's metrics:
+
+    1. Every train reply recorded `server_round = -1` (line 549's default), so the
+       per-client train metrics in every result file carry no usable round number.
+    2. Worse, and the reason this is a correctness fix rather than a cosmetic one: R4's
+       Gaussian mechanism seeds its noise with `seed*104729 + partition*1000003 +
+       server_round`. With the term pinned at 0, every round drew the **same** noise --
+       a fixed per-client perturbation the model trains around, not DP noise. R4 would
+       have reported FedACO as far more noise-robust than it is, and the result files
+       would carry nothing to reveal it.
+
+    Applied by wrapping rather than in each strategy: `fedavg`, `fedprox`, `fedadam`,
+    `fedyogi`, `fedmedian`, `fedtrimmedavg` and `krum` are Flower built-ins with no
+    subclass here to override, so a per-strategy fix would have covered only the five
+    custom ones -- and silently left the built-ins, which are every baseline the paper
+    compares against. `flwr==1.36.0` calls `configure_train(current_round, arrays,
+    train_config, grid)` positionally (verified in the installed
+    `serverapp/strategy/strategy.py`), and passes the same ConfigRecord object every
+    round, so assigning into it per round is both safe and sufficient.
+    """
+    original = strategy.configure_train
+
+    def configure_train(server_round, arrays, config, grid):  # type: ignore[no-untyped-def]
+        config["server_round"] = int(server_round)
+        return original(server_round, arrays, config, grid)
+
+    strategy.configure_train = configure_train  # type: ignore[method-assign]
+    return strategy
+
+
 def strategy_from_run_config(
     run_config: RunConfig,
     *,
@@ -35,12 +72,27 @@ def strategy_from_run_config(
     val_loader: DataLoader | None = None,
     device: torch.device | None = None,
 ) -> Strategy:
-    """`model`/`val_loader`/`device` are only required for `strategy-name="fedlaw"`
+    """Wraps `_build_strategy` so every strategy reports its round number to clients.
+
+    `model`/`val_loader`/`device` are only required for `strategy-name="fedlaw"`
     (needs a differentiable forward pass against a server val batch each round) and for
     `strategy-name="fedaco"` with `aco-fitness-mode="server_val"` (scores candidate
     alphas against the same server-held set). Every other strategy -- including FedACO
     in its default `data_free` mode, which is the whole point of the method -- ignores
     them, so callers not using those two can omit them."""
+    return _with_server_round(
+        _build_strategy(run_config, model=model, val_loader=val_loader, device=device)
+    )
+
+
+def _build_strategy(
+    run_config: RunConfig,
+    *,
+    model: torch.nn.Module | None = None,
+    val_loader: DataLoader | None = None,
+    device: torch.device | None = None,
+) -> Strategy:
+    """Selection only. `strategy_from_run_config` is the entry point callers use."""
     common = dict(
         fraction_train=float(run_config.get("fraction-train", 1.0)),
         fraction_evaluate=float(run_config.get("fraction-evaluate", 1.0)),

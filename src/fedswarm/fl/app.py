@@ -314,6 +314,11 @@ def local_evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -
     (Section 3's `evaluate_handler`), which is separate from the server's own
     centralized test-set evaluation (Section 4's `build_evaluate_fn`, which evaluates
     the pooled test set directly and needs none of this client-side bookkeeping)."""
+    # `evaluate_model` moves it too, and in-place, so the second loop below would inherit
+    # that. Stated here rather than depended on: this function has its own forward pass,
+    # and a reader checking whether *it* is device-correct should not have to trace a side
+    # effect of the call above to find out.
+    model.to(device)
     metrics = evaluate_model(model, loader, device)
 
     all_labels, all_preds = [], []
@@ -580,11 +585,15 @@ def train_handler(msg: Message, context: Context) -> Message:
             generator=torch.Generator().manual_seed(
                 int(context.run_config.get("seed", 0)) * 104_729
                 + _partition_id(context) * 1_000_003
-                # `server_round`, with an underscore -- the key the server actually sends
-                # (see `metrics["server_round"]` above). Spelled "server-round" this
-                # would silently default to 0 every round, so every round would draw the
-                # *same* noise: a fixed perturbation the model learns around, not DP
-                # noise, and R4 would report the method as far more noise-robust than it is.
+                # `server_round`, with an underscore. Getting this spelling right was
+                # necessary but not sufficient, and the comment that used to sit here
+                # claimed the server sent the key: it did not. `strategies/factory.py`'s
+                # `_with_server_round` is what actually puts it in the train config; until
+                # that existed this term was 0 in every round, so every round drew the
+                # *same* noise -- a fixed perturbation the model trains around, not DP
+                # noise, and R4 would have reported the method as far more noise-robust
+                # than it is. The first real GPU run exposed it: `server_round` came back
+                # as -1 in every train reply.
                 + int(config.get("server_round", 0))
             ),
         )

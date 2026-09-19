@@ -1685,3 +1685,84 @@ supernodes, then a two-cell sweep at K=2 and K=6 was run against the synthetic d
 the K=6 cell hangs at round 0 indefinitely.
 
 453 tests pass, ruff clean.
+
+## 2026-09-19 (later still) -- the first GPU run: two bugs only a GPU could show, and the gate's verdict
+
+Person B ran GATE 1 on a Kaggle T4. FedACO, K=10, 15 rounds, dirichlet alpha=0.3, seed 0.
+It completed and wrote `results/fl/f89d6200b0_0.json`. Three things came out of it.
+
+### Bug 1: evaluation ran the model on CPU while the batches were on the GPU
+
+`eval/evaluator.evaluate` took a `device`, moved the batches onto it, and left the weights
+wherever they were. Every other call site compensated -- `local_train`, `build_evaluate_fn`,
+`ServerValFitness`, `run_experiment` all call `.to(device)` themselves -- and
+`fl/app.py::evaluate_handler` did not. On CPU both halves are the same device, so 457 tests
+and every CPU run this project has ever done passed. On the T4:
+
+    RuntimeError: Input type (torch.cuda.FloatTensor) and weight type
+                  (torch.FloatTensor) should be the same
+
+**The run did not fail.** Only the client-side federated evaluation did, once per client
+per round, and the ServerApp's own centralized evaluation is a different code path that was
+already correct. So the result file was written, marked `completed`, with
+
+    Aggregated ClientApp-side Evaluate Metrics: {}
+
+A silently empty metric block, in a file that otherwise looks finished, across 678 cells.
+Fixed in `evaluate` itself rather than at the call site, so the contract is whole: a
+function handed a device now moves both halves onto it.
+
+### Bug 2: the server never told clients which round it was, so R4's DP noise never changed
+
+The first run's train metrics carried `server_round = -1` in every round -- line 549's
+default, meaning the key was absent. The ServerApp builds `train_config` once, before round
+1, and nothing put a round number in it. Scaffold wrote one, spelled `server-round`, which
+no reader uses.
+
+The cost is R4's. The Gaussian mechanism seeds its noise with
+`seed*104729 + partition*1000003 + server_round`. With that term pinned at 0, **every round
+drew the same noise** -- a fixed per-client perturbation the model trains around, not DP
+noise. R4 would have reported FedACO as far more noise-robust than it is, and no field in
+the result file would have shown why. A comment at that line asserted the server sent the
+key; it did not, and the comment is corrected rather than deleted.
+
+Fixed by wrapping `configure_train` in the factory. Seven of the twelve strategies are
+Flower built-ins with no subclass here, so a per-strategy fix would have covered the five
+custom ones and left every baseline the paper compares against broken.
+
+### The gate's verdict: question 3 is DEGENERATE, and that is the finding
+
+| | |
+|---|---|
+| 1. Is the colony searching? | **UNDERPOWERED** -- tau at 36% of best case; SEARCHING would need 253% |
+| 2. Deposit floor engaged? | **PARTIAL** -- best_fitness <= 0 in 1 of 15 rounds |
+| 3. Fitness optimum degenerate? | **DEGENERATE** -- single-client vertex beat FedAvg 15/15, mean +0.6252 |
+| 4. Beats FedAvg? | **NO BASELINE** -- the FedAvg run had not landed when the check ran |
+
+Question 3 closes the open question from this morning's level-set entry, and closes it the
+wrong way: the corner wins on the **linear** grid, on **real** deltas. The grid was never
+what made it attractive. Recorded in full in docs/OPEN_QUESTIONS.md, including why this is
+also A1's problem -- the controls optimize the same fitness, so "ACO ties random search"
+could be reported for a reason that has nothing to do with ACO.
+
+### The first honest compute number, and the first evidence for claim C3
+
+**7.5s per round** at K=10, 1 local epoch, image-size 112, on a T4. The estimates in this
+file's compute table are superseded by it. Extrapolated to the real sweeps -- and it is an
+extrapolation, since main.yaml runs K=20:
+
+| | at 7.5s/round (K absorbed) | at 15s/round (linear in K) |
+|---|---|---|
+| main.yaml (576 x 100) | 120 GPU-h | 240 GPU-h |
+| A1 (80 x 100) | 17 GPU-h | 33 GPU-h |
+| everything B owns | **139 GPU-h** | **279 GPU-h** |
+
+At Kaggle's ~30 GPU-hours per week that is 5-9 weeks of wall-clock for one person, which is
+a scoping fact the plan's week-7-8 slot does not currently reflect.
+
+**C3 ("negligible aggregation overhead") has its first real measurement and it holds:**
+`aco_time_ms` + `gram_time_ms` averaged 198 ms against 7,500 ms per round -- **2.6% of
+wall-clock** at K=10. The O(K^2) curve still needs `overhead.yaml` to make the claim over
+K, but the constant is small where it has been measured.
+
+471 tests pass, ruff clean.

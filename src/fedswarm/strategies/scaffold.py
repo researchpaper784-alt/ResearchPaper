@@ -69,7 +69,11 @@ class Scaffold(FedAvg):
         node_ids, all_nodes = sample_nodes(grid, self.min_available_nodes, sample_size)
         self._num_total_nodes = max(len(all_nodes), 1)
 
-        config["server-round"] = server_round
+        # Underscore. Spelled `server-round` this was a write nothing ever read --
+        # `train_handler` looks for `server_round`. Redundant now that the factory sets it
+        # for every strategy, and kept only so this class is correct when constructed
+        # directly (its own tests do).
+        config["server_round"] = server_round
         merged = ArrayRecord(arrays.to_torch_state_dict())
         for name, tensor in self._global_c.items():
             merged[f"{CONTROL_PREFIX}{name}"] = Array(tensor.numpy())

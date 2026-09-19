@@ -24,6 +24,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, TensorDataset
 
 from fedswarm.data.cache import build_and_save_cache
+from fedswarm.eval.evaluator import evaluate as evaluate_model
 from fedswarm.fl.app import (
     _repo_path,
     build_evaluate_fn,
@@ -762,3 +763,65 @@ def test_client_app_decorators_are_bound_to_the_real_handlers() -> None:
             f"{name} has signature {parameters} -- a decorator is bound to the wrong "
             "function, or the handler's arguments changed"
         )
+
+
+# ======================================================================================
+# Device placement -- found by the project's first GPU run (Kaggle T4)
+# ======================================================================================
+
+
+def test_evaluate_moves_the_model_onto_the_device_it_was_handed() -> None:
+    """`eval/evaluator.evaluate` moved the BATCHES to `device` and left the WEIGHTS alone.
+
+    On CPU both halves are the same device, so this was invisible to all 457 tests and to
+    every CPU run this project has ever done. On Kaggle's T4 it ended every round with
+    10 of 10 clients failing:
+
+        RuntimeError: Input type (torch.cuda.FloatTensor) and weight type
+                      (torch.FloatTensor) should be the same
+
+    and -- the part that makes it worse than a crash -- the run did not die. Only the
+    client-side federated evaluation did, so the result file was written, marked
+    completed, with `Aggregated ClientApp-side Evaluate Metrics: {}`. A silently empty
+    metric block in 678 cells is not something the analysis would have flagged.
+
+    Asserted white-box (did the call happen) rather than end-to-end, because reproducing
+    the mismatch needs two devices and there is no GPU on the dev box or in CI. That
+    limitation is the reason this bug reached a GPU in the first place, so the test says
+    what it can check instead of pretending to check more.
+    """
+    model = SimpleCNN(num_classes=4, norm="groupnorm")
+    loader = _synthetic_loader()
+    requested: list = []
+    original_to = model.to
+
+    def spy(*args, **kwargs):
+        requested.append(args[0] if args else kwargs.get("device"))
+        return original_to(*args, **kwargs)
+
+    model.to = spy  # type: ignore[method-assign]
+    evaluate_model(model, loader, torch.device("cpu"))
+
+    assert requested == [torch.device("cpu")], (
+        "evaluate() never moved the model; on a GPU the weights stay on CPU while the "
+        "batches do not"
+    )
+
+
+def test_local_evaluate_moves_the_model_itself_not_only_via_its_inner_call() -> None:
+    """`local_evaluate` runs a second forward pass of its own, after the `evaluate_model`
+    call. It would inherit the move as a side effect (`nn.Module.to` is in-place), but a
+    reader auditing this function for device-correctness should not have to know that."""
+    model = SimpleCNN(num_classes=4, norm="groupnorm")
+    loader = _synthetic_loader()
+    requested: list = []
+    original_to = model.to
+
+    def spy(*args, **kwargs):
+        requested.append(args[0] if args else kwargs.get("device"))
+        return original_to(*args, **kwargs)
+
+    model.to = spy  # type: ignore[method-assign]
+    local_evaluate(model, loader, torch.device("cpu"))
+
+    assert requested[0] == torch.device("cpu")

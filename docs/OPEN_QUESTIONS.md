@@ -1010,3 +1010,55 @@ curve over K = 5 -> 200, and a CPU-bound curve is still a curve, so it would be 
 the measured O(K^2) cost the sweep exists to establish. The first GPU session should print
 `torch.cuda.*` from inside a ClientApp, or compare one cell's wall-clock against the CPU
 rehearsal, before the overhead numbers are trusted.
+
+## Phase 6 -- RESOLVED, badly: the degenerate optimum reproduces on the plan's linear grid
+
+**Status: closed as confirmed, 2026-09-19, by the project's first real GPU run.**
+
+The previous entry left this open: the K=10 rehearsal and every synthetic measurement of
+`corner_margin` ran on the **log-spaced** level set, so none of them transferred to the
+plan's `linspace(0, 2.5, 11)` default. The first run on real MRI data on a Kaggle T4, at
+K=10 and the linear grid, answers it:
+
+> **DEGENERATE**: the best single-client vertex outscored the FedAvg point in **15/15
+> rounds** (mean margin **+0.6252**) at K=10.
+
+Per-round `corner_margin` ranged 0.457 to 0.805 and was positive in every round. So the
+level grid was never what made the corner attractive -- the **fitness function** prefers
+"use one client, discard the rest", and the linear grid only makes it harder to reach.
+
+**What makes this the dangerous shape rather than a bug.** The colony did *not* go to the
+corner in this run: `alpha_max` averaged 0.338 and `alpha_entropy` stayed near 1.9 against
+a 2.303 ceiling. The search is too short and too underpowered to find the optimum it is
+pointed at. So the run *looks* healthy -- no fallbacks fired, best_fitness beat the FedAvg
+point in 14 of 15 rounds -- and the failure arrives only as the colony gets *better*. Any
+change that strengthens the search (more rounds, larger budget, higher `aco-q-deposit`)
+moves FedACO toward a worse model while every diagnostic in the report improves.
+
+**This is a fitness-design problem, and it is A1's problem too.** At equal budget the
+controls (random, grid, PSO, GA) optimize the *same* fitness, so they inherit the same
+corner. A1 could come back "ACO ties random search" for a reason that has nothing to do
+with ACO: both are searching a landscape whose optimum is useless.
+
+**What has to happen before the 576-cell sweep.** Raise `aco-gamma-entropy` until the
+margin is negative at K=20, and confirm it with a gate re-run rather than by argument. The
+knob exists (`concentration_penalty`, `CONCENTRATION_PENALTIES`), A7 owns its shape, and
+`scripts/probe_*` can bracket a value on synthetic deltas -- but the number must be
+confirmed against real deltas, because that is exactly the transfer that failed last time.
+
+## Phase 4 -- the pheromone budget table assumes a fitness 4x the real one
+
+**Status: open. Affects how question 1's verdict should be read, not any result.**
+
+`aco/diagnostics.py` drives the real deposit rule with `MEASURED_FITNESS = 0.8`, and
+`scripts/analyze_pheromone_dynamics.py` reports "must realize 21%" at the plan's budget
+over 20 rounds on that basis. The first real run's `best_fitness` came in at 0.026-0.326,
+mean ~0.19 -- roughly a quarter of the assumed value. The deposit is `rho * Q * max(F, 0)`,
+so a 4x smaller F makes the best case ~4x smaller and the fraction a run must realize
+correspondingly larger. The live run reported needing **253%** of its own best case, i.e.
+question 1 was unanswerable at that budget, not merely tight.
+
+The consequence is only about interpretation: an `UNDERPOWERED` verdict at a budget the
+table calls comfortable is not a contradiction, it is the table's 0.8 being optimistic.
+`MEASURED_FITNESS` should be re-derived from real runs once a gate run exists at the
+corrected `aco-gamma-entropy`, since the fitness magnitude will move with it.
