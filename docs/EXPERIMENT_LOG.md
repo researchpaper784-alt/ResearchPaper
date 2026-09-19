@@ -1413,3 +1413,48 @@ The projected cost at 576 cells is ~770 hours on the only per-round measurement 
 project has -- 48.1 s/round at K=2 on CPU, which docs/EXPERIMENT_LOG.md's compute table
 says in bold not to cite. That number needs replacing with a real GPU measurement from the
 validation run before anyone plans around it.
+
+## 2026-09-19 (later) -- the ablation and robustness sweeps raised to 8 seeds
+
+Completing the change the previous entry left open. All 16 ablation and robustness configs
+now run 8 seeds.
+
+The granular configs were at **3**, not 5 -- a floor of **0.25**, four times worse than the
+main sweep's. A2-A9 and R1-R5 could not have distinguished anything from anything.
+
+| sweep family | cells before | cells at 8 seeds |
+|---|---:|---:|
+| `ablation_all` | 180 | 288 |
+| `robustness` | 225 | 360 |
+| granular `ablation_a1-a9` | 365 | 920 |
+| granular `robustness_r1-r5` | 162 | 432 |
+| **ablations + robustness** | **932** | **2000** |
+| `main` (raised earlier) | 360 | 576 |
+| **grand total** | **1508** | **2576** |
+
+A 71% increase in total sweep size.
+
+### ⚠️ The duplication is now the bigger cost, not the seeds
+
+The combined and granular families **overlap**. `ablation_all.yaml` covers A1/A3/A9, and
+`ablation_a1/a3/a9.yaml` cover the same ground individually; `robustness.yaml` is a
+combined adversarial + partial-participation sweep over the ground R1-R5 cover separately.
+Running both families runs those experiments twice, at 8 seeds each.
+
+Both families exist for a real reason -- they read different YAML shapes and the granular
+ones cover A2 and A4-A8 that `ablation_all.yaml` explicitly does not (the merge entry of
+2026-09-18 records why). But nothing says to run *both*, and the total above assumes you
+do. Picking one family for the overlapping ablations, or dropping the duplicated cells from
+whichever is run second, is worth more compute than any seed decision at this point.
+
+Not decided here: that is a scope call for whoever owns the ablation runs.
+
+### Still not covered
+
+A 66-comparison family (all 11 baselines x 6 regimes) needs **12** seeds, not 8. 8 clears
+alpha=0.05 for a six-comparison family -- FedACO against FedAvg in each regime. If the
+paper claims significance against every baseline, this is still short. `make tables` prints
+the requirement for whatever family the table actually contains, so it surfaces before the
+claim is written rather than after.
+
+440 tests pass, ruff clean; all 16 configs dry-run clean through their own runners.

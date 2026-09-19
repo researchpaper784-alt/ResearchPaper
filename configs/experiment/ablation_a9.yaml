@@ -39,4 +39,9 @@ partitions:
   - name: dirichlet_0.3
     file: configs/data/dirichlet_0.3.yaml
 
-seeds: [0, 1, 2]
+# 8 seeds, raised from 3. The signed-rank test's p-value floor is set by the pair
+# count alone: at 3 seeds the smallest two-sided p it can return is 0.2500, so this
+# sweep could not produce a significant result at alpha=0.05 under any data. 8 seeds moves
+# the floor to 0.0078. See docs/OPEN_QUESTIONS.md, "5 seeds cannot produce a significant
+# result", and `analysis.seeds_needed_for` for the family-size dependence.
+seeds: [0, 1, 2, 3, 4, 5, 6, 7]
