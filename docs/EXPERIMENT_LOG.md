@@ -1596,3 +1596,48 @@ which is why main.yaml runs 8; and §0.3's naming collision was resolved by rena
 FedSwarm.
 
 440 tests pass, ruff clean.
+
+## 2026-09-19 (later still) -- the LaTeX tables are wired
+
+Plan §9.3's deliverable: `paper/tables/*.tex`, booktabs, best-in-bold, significance
+markers. The capability already existed in `src/fedswarm/tables.py` and was reachable from
+nothing -- the Makefile's three table targets all call `scripts/make_tables.py`, which
+emitted `.md` and `.csv` only.
+
+`make_tables.py` now emits `.tex` alongside them, from the *same* rows, rendering through
+`fedswarm.tables.main_results_table` rather than a second LaTeX emitter. The plan's
+instruction is "never hand-type a number into the paper"; two formatters drifting apart is
+the same failure one step later. All three targets (`tables`, `tables-ablation`,
+`tables-robustness`) pick it up with no Makefile change.
+
+Ablation tables are labelled by *variant* rather than strategy -- every row of an ablation
+sweep is FedACO, so labelling by strategy prints a column of identical "fedaco" rows and
+loses the thing being ablated.
+
+One adapter detail worth not "fixing" later: `main_results_table`'s `method=` parameter is
+"the row that gets no marker". Its own convention marks the baselines ("fedaco vs. this
+baseline"); ours marks the method ("this row differs significantly from fedavg"), which is
+what our caption states and what `rows` carries. So the row left unmarked is the
+baseline's, and passing `baseline` into `method=` looks inverted and is not. Commented at
+the call site.
+
+### §9.3's acceptance criterion is now a test
+
+> *"Deleting `paper/figures/` and `paper/tables/` and re-running restores them
+> byte-for-byte identical."*
+
+`test_regenerating_the_table_is_byte_for_byte_identical` checks exactly that. A timestamp,
+a dict iteration order or a set ordering anywhere in the path would break it, and the
+breakage would surface only as noise in the paper's diff. Verified by hand too: identical
+md5 across a delete-and-regenerate.
+
+Also pinned: markers appear at 8 seeds (p=0.008 earns `**`) and are absent at 5 (floor
+0.0625 earns nothing). A table that marked both would assert significance the test never
+found.
+
+One of my own test expectations was wrong and is worth recording: I asserted the escaped
+string `no\_safety\_fallback` would appear, but `_variant_of` names that variant
+`no-fallback` with a hyphen, so there was no underscore to escape. The output was correct
+and the test was not. It now asserts escaping on `dirichlet_0.3`, which does carry one.
+
+446 tests pass, ruff clean.

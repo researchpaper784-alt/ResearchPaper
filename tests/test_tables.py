@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from make_tables import (  # noqa: E402
+    to_latex,
     add_significance,
     power_note,
     _variant_of,
@@ -277,3 +278,78 @@ def test_a_one_sided_test_is_available_but_not_the_default() -> None:
     p_two = next(r for r in two_sided if r["strategy"] == "fedaco")["p_value"]
     p_one = next(r for r in one_sided if r["strategy"] == "fedaco")["p_value"]
     assert p_one < p_two
+
+
+# ======================================================================================
+# Phase 9.3 -- LaTeX output
+# ======================================================================================
+
+
+def test_the_latex_table_is_booktabs_with_the_best_in_bold(tmp_path: Path) -> None:
+    """Plan §9.3's deliverable, and its instruction: "never hand-type a number into the
+    paper". The .tex comes from the same rows as the .md and .csv, so all three cannot
+    disagree."""
+    rows = _rows(_best_case(8), 8)
+    out = tmp_path / "main.tex"
+
+    to_latex(rows, "fedavg", out, "main")
+    tex = out.read_text()
+
+    for required in ("\\toprule", "\\midrule", "\\bottomrule", "\\begin{tabular}"):
+        assert required in tex, required
+    assert "\\textbf{" in tex, "the best cell per partition must be bold"
+    assert "\\label{tab:main}" in tex
+
+
+def test_significance_markers_appear_only_when_significant(tmp_path: Path) -> None:
+    """At 8 seeds the best case reaches p=0.008 and earns `**`; at 5 seeds the same data
+    floors at 0.0625 and must earn nothing. A table that marked both would be asserting
+    significance the test never found."""
+    eight = tmp_path / "eight.tex"
+    five = tmp_path / "five.tex"
+
+    to_latex(_rows(_best_case(8), 8), "fedavg", eight, "eight")
+    to_latex(_rows(_best_case(5), 5), "fedavg", five, "five")
+
+    assert "**" in eight.read_text()
+    assert "*" not in five.read_text().split("\\midrule")[1], "no marker is achievable at n=5"
+
+
+def test_regenerating_the_table_is_byte_for_byte_identical(tmp_path: Path) -> None:
+    """Plan §9.3's literal acceptance criterion: "Deleting paper/figures/ and
+    paper/tables/ and re-running restores them byte-for-byte identical." A timestamp, a
+    dict iteration order or a set ordering anywhere in the path would break it, and the
+    breakage would only show up as noise in the paper's diff."""
+    rows = _rows(_best_case(8), 8)
+    first, second = tmp_path / "a.tex", tmp_path / "b.tex"
+
+    to_latex(rows, "fedavg", first, "main")
+    to_latex(_rows(_best_case(8), 8), "fedavg", second, "main")
+
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_an_ablation_table_is_labelled_by_variant_not_strategy(tmp_path: Path) -> None:
+    """Every row of an ablation sweep is FedACO. Labelling by strategy would print a
+    column of identical "fedaco" rows and lose the thing being ablated."""
+    results = []
+    for fallback_off, score in ((False, 0.90), (True, 0.87)):
+        for seed in range(5):
+            # dirichlet_0.3 carries an underscore, which LaTeX needs escaped -- the
+            # variant labels this sweep produces happen to be hyphenated.
+            r = _result("fedaco", "dirichlet", seed, score + 0.001 * seed, alpha=0.3)
+            if fallback_off:
+                r["config"]["run_config"]["aco-safety-fallback"] = False
+            results.append(r)
+    rows = summarize(results, 5)
+    add_deltas(rows, "fedavg")
+    add_significance(rows, "fedavg")
+    out = tmp_path / "abl.tex"
+
+    to_latex(rows, "fedavg", out, "ablation")
+    tex = out.read_text()
+
+    assert {r["variant"] for r in rows} == {"default", "no-fallback"}
+    assert "default" in tex and "no-fallback" in tex
+    assert tex.count("fedaco") == 0, "ablation rows are the variants, not the strategy"
+    assert "dirichlet\\_0.3" in tex, "underscores must be escaped for LaTeX"

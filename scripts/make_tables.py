@@ -45,6 +45,7 @@ from fedswarm.analysis import (
     seeds_needed_for,
     wilcoxon_paired_test,
 )
+from fedswarm.tables import main_results_table
 from fedswarm.utils.runner import load_result_files
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -353,6 +354,77 @@ def to_markdown(rows: list[dict], baseline: str) -> str:
     return "\n".join(lines)
 
 
+def to_latex(rows: list[dict], baseline: str, path: Path, name: str) -> None:
+    """Plan §9.3's deliverable: booktabs, best-in-bold, significance markers.
+
+    Built from the *same* `rows` the markdown and CSV come from, and rendered by
+    `fedswarm.tables.main_results_table` rather than a second LaTeX emitter -- the plan's
+    instruction is "never hand-type a number into the paper", and two formatters drifting
+    apart is the same failure one step later. `tables.py` takes the
+    `fedswarm.analysis`-shaped frame, so this adapts rather than reimplements.
+
+    Rows are labelled by `variant` when a sweep has more than one (the ablation tables,
+    where every row is FedACO) and by `strategy` otherwise (the main table). Labelling an
+    ablation by strategy would print twelve identical "fedaco" rows.
+    """
+    import pandas as pd
+
+    variants = {r["variant"] for r in rows}
+    label_key = "variant" if len(variants) > 1 else "strategy"
+
+    summary = pd.DataFrame(
+        [
+            {
+                "strategy": r[label_key],
+                "partition": r["regime"],
+                "mean": r["mean"],
+                "std": r["std"],
+                "n": r["n"],
+            }
+            for r in rows
+        ]
+    )
+    # `main_results_table` reads markers off (partition, baseline) pairs, where `baseline`
+    # is the row being marked -- so the frame is keyed the same way the rows are labelled.
+    comparison = pd.DataFrame(
+        [
+            {
+                "partition": r["regime"],
+                "baseline": r[label_key],
+                "p_value_holm": r["p_value_holm"],
+            }
+            for r in rows
+            if r.get("p_value_holm") is not None
+        ]
+    )
+
+    # `main_results_table`'s `method=` parameter is "the row that gets no marker". Its own
+    # convention marks the baselines ("fedaco vs. this baseline"); ours marks the method
+    # ("this row differs significantly from fedavg"), which is what the caption states and
+    # what `rows` carries -- each row's p-value is its own comparison against the baseline.
+    # So the row to leave unmarked is the baseline's. Passing `baseline` here looks
+    # inverted and is not; do not "fix" it without changing the caption to match.
+    method = baseline if label_key == "strategy" else "default"
+    tex = main_results_table(
+        summary,
+        comparison if not comparison.empty else None,
+        method=method,
+        caption=(
+            f"{name}: test macro-F1 (mean $\\pm$ std over seeds). "
+            f"Significance vs.\\ {_escape(baseline)}, Wilcoxon signed-rank with "
+            "Holm--Bonferroni correction across the table "
+            "($^{*}p<0.05$, $^{**}p<0.01$, $^{***}p<0.001$)."
+        ),
+        label=f"tab:{name}",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tex + "\n")
+
+
+def _escape(text: str) -> str:
+    return str(text).replace("_", r"\_")
+
+
 def to_csv(rows: list[dict], path: Path) -> None:
     fields = [
         "strategy", "regime", "variant", "n", "expected_n", "incomplete",
@@ -427,9 +499,10 @@ def main() -> int:
     )
     (out_dir / f"{results_dir.name}.md").write_text(header + markdown + "\n")
     to_csv(rows, out_dir / f"{results_dir.name}.csv")
+    to_latex(rows, args.baseline, out_dir / f"{results_dir.name}.tex", results_dir.name)
 
     print(header + markdown)
-    print(f"\nWrote {out_dir / f'{results_dir.name}.md'} and .csv")
+    print(f"\nWrote {out_dir / f'{results_dir.name}.md'}, .csv and .tex")
 
     incomplete = sum(1 for r in rows if r["incomplete"])
     if incomplete:
