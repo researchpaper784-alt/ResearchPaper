@@ -983,3 +983,30 @@ assumed.
 rehearsal both used the log grid, so neither transfers. The first real run under the new
 default is what settles it -- and until it does, "the fitness prefers one client" should
 be quoted as a lead, not a finding.
+
+## Phase 6 -- the per-ClientApp GPU fraction is wired but unverified on a GPU
+
+**Status: open. Needs one GPU session to close, not analysis.**
+
+`flwr federation simulation-config` takes `--client-resources-num-gpus` (verified against
+the installed flwr 1.36.0: `FLOAT RANGE [x>=0.0]`, "Ratio of a GPU VRAM assigned to the
+execution of each ClientApp"). Neither runner could pass it until today, so a GPU sweep was
+not expressible from the CLI at all; both now accept `--gpus-per-client` and forward it
+through `sweep.configure_federation`, which re-issues it on every K change.
+
+**What is verified here.** The flag is accepted and the config write succeeds on this
+CPU-only box (exit 0, "Updated simulation configuration", no tracked file mutated), and the
+fraction is re-issued on each reconfiguration rather than set once and possibly dropped
+(`tests/test_sweep.py::test_the_gpu_fraction_is_reissued_on_every_reconfiguration`).
+
+**What is not, and cannot be from here.** Whether the fraction actually results in a GPU
+allocation to the ClientApp actors -- that is Ray's placement, and there is no GPU on this
+machine to observe it on. Nothing in this repo has ever run a ClientApp on a GPU.
+
+**Why it matters more than an ordinary perf setting.** A ClientApp that gets no GPU does not
+error; it trains on CPU. For the 576-cell main sweep that reads as "slower than the
+projection". For `overhead.yaml` it is worse: that sweep's deliverable *is* a wall-clock
+curve over K = 5 -> 200, and a CPU-bound curve is still a curve, so it would be reported as
+the measured O(K^2) cost the sweep exists to establish. The first GPU session should print
+`torch.cuda.*` from inside a ClientApp, or compare one cell's wall-clock against the CPU
+rehearsal, before the overhead numbers are trusted.

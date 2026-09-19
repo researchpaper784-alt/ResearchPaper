@@ -247,7 +247,9 @@ def _foreign_variant_values(
 # ======================================================================================
 
 
-def configure_federation(num_clients: int, cpus_per_client: int = 1) -> tuple[bool, str]:
+def configure_federation(
+    num_clients: int, cpus_per_client: int = 1, gpus_per_client: float = 0.0
+) -> tuple[bool, str]:
     """Set the Simulation Runtime's supernode count and per-client CPUs for this sweep.
 
     **This is not optional setup, it is a correctness requirement.** `num-clients` is this
@@ -273,6 +275,13 @@ def configure_federation(num_clients: int, cpus_per_client: int = 1) -> tuple[bo
         "--num-supernodes", str(num_clients),
         "--client-resources-num-cpus", str(cpus_per_client),
     ]
+    # A *fraction* of a GPU per ClientApp: 0.2 lets five share one card. Omitted rather
+    # than passed as 0, so a CPU-only box is unaffected. On a GPU box leaving it unset can
+    # mean the ClientApp actors get no GPU allocation and the sweep runs on CPU -- which
+    # for 576 cells x 100 rounds never finishes, and presents as "slower than projected"
+    # rather than as an error.
+    if gpus_per_client > 0:
+        cmd += ["--client-resources-num-gpus", str(gpus_per_client)]
     completed = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     if completed.returncode != 0:
         return False, (completed.stderr or completed.stdout or "").strip()[:400]
@@ -338,6 +347,15 @@ def main() -> int:
     parser.add_argument("--seeds", default=None, help="comma-separated seeds to run")
     parser.add_argument("--limit", type=int, default=None, help="stop after N cells (a pilot)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan and cost, run nothing")
+    parser.add_argument(
+        "--gpus-per-client",
+        type=float,
+        default=0.0,
+        help=(
+            "fraction of a GPU per ClientApp (0.2 = five share one card). Leave at 0 on "
+            "CPU; on a GPU box this is required or the sweep may run on CPU silently"
+        ),
+    )
     parser.add_argument("--stream", action="store_true", help="echo each run's output live")
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument(
@@ -443,7 +461,9 @@ def main() -> int:
 
     # Correctness, not convenience: without this the Simulation Runtime creates 2
     # ClientApps regardless of `num-clients`, and every result file is mislabelled.
-    ok, detail = configure_federation(num_clients, args.cpus_per_client)
+    ok, detail = configure_federation(
+        num_clients, args.cpus_per_client, args.gpus_per_client
+    )
     if not ok:
         print(f"\nCould not configure the federation ({detail}).")
         print("Every cell would silently run 2 clients regardless of num-clients. Refusing.")

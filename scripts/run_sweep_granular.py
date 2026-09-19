@@ -57,6 +57,17 @@ def main() -> None:
     parser.add_argument("--manifest-path", default="results/manifest.jsonl")
     parser.add_argument("--lock-dir", default="results/fl/_locks")
     parser.add_argument("--lock-timeout-s", type=float, default=3600.0)
+    parser.add_argument("--cpus-per-client", type=int, default=1)
+    parser.add_argument(
+        "--gpus-per-client",
+        type=float,
+        default=0.0,
+        help=(
+            "fraction of a GPU per ClientApp (0.2 = five share one card). Leave at 0 on "
+            "CPU. On a GPU box this is required: at 0 the ClientApp actors may get no "
+            "GPU allocation and the sweep silently runs on CPU"
+        ),
+    )
     parser.add_argument(
         "--pyproject-path", default=str(REPO_ROOT / "pyproject.toml"), help="For predicting run_ids"
     )
@@ -85,6 +96,8 @@ def main() -> None:
         lock_dir=args.lock_dir,
         lock_timeout_s=args.lock_timeout_s,
         dry_run=args.dry_run,
+        cpus_per_client=args.cpus_per_client,
+        gpus_per_client=args.gpus_per_client,
     )
 
     for entry, run in zip(entries, runs):

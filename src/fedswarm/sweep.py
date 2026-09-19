@@ -233,14 +233,28 @@ def required_supernodes(defaults: dict[str, Any], overrides: dict[str, Any]) -> 
 
 
 def configure_federation(
-    num_supernodes: int, cpus_per_client: int = 1, runner: Runner = _default_runner
+    num_supernodes: int,
+    cpus_per_client: int = 1,
+    gpus_per_client: float = 0.0,
+    runner: Runner = _default_runner,
 ) -> int:
-    """Set the Simulation Runtime's supernode count. Returns the process return code."""
+    """Set the Simulation Runtime's supernode count and per-ClientApp resources.
+
+    `gpus_per_client` is a *fraction* of a GPU's VRAM per ClientApp, so 0.2 lets five share
+    one card. It has to be passed here rather than left to a separate manual call, because
+    this function re-issues `simulation-config` whenever a cell's K changes and it is not
+    established that unspecified options survive that. Left at 0 on a GPU box, Ray may
+    allocate no GPU to the ClientApp actors and the whole sweep runs on CPU -- which for
+    576 cells x 100 rounds does not finish, and shows up only as "this is slower than the
+    projection" rather than as an error.
+    """
     cmd = [
         "flwr", "federation", "simulation-config",
         "--num-supernodes", str(num_supernodes),
         "--client-resources-num-cpus", str(cpus_per_client),
     ]
+    if gpus_per_client > 0:
+        cmd += ["--client-resources-num-gpus", str(gpus_per_client)]
     result = runner(cmd)
     return result if isinstance(result, int) else result.returncode
 
@@ -266,6 +280,8 @@ def run_sweep(
     lock_timeout_s: float = DEFAULT_LOCK_TIMEOUT_S,
     dry_run: bool = False,
     runner: Runner = _default_runner,
+    cpus_per_client: int = 1,
+    gpus_per_client: float = 0.0,
 ) -> list[dict[str, Any]]:
     """Runs `runs` in the given order (call `order_seed_first` beforehand if that
     ordering is wanted), skipping any whose predicted run_id already has a completed
@@ -305,7 +321,9 @@ def run_sweep(
 
         wanted = required_supernodes(defaults, run.overrides)
         if wanted != configured_supernodes:
-            code = configure_federation(wanted, runner=runner)
+            code = configure_federation(
+                wanted, cpus_per_client, gpus_per_client, runner=runner
+            )
             if code != 0:
                 # Refuse rather than run: a cell at the wrong supernode count either hangs
                 # at round 0 (min-train-nodes above the count) or silently mislabels its

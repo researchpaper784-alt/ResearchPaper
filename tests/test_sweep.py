@@ -458,3 +458,79 @@ def test_a_failed_federation_config_refuses_the_cell(tmp_path: Path) -> None:
     )
 
     assert entries[0]["status"] == "failed_federation_config"
+
+
+# ======================================================================================
+# Per-ClientApp GPU allocation
+# ======================================================================================
+
+
+def test_a_cpu_box_is_untouched_when_no_gpu_fraction_is_asked_for() -> None:
+    """Passing `--client-resources-num-gpus 0` explicitly is not the same as omitting it,
+    and the default has to be the omission: this repo's dev machine and its CI runner both
+    have no GPU, and pinning a resource they cannot supply is a way to make every local
+    sweep stop working in service of a cloud-only option."""
+    from fedswarm.sweep import configure_federation
+
+    calls: list[list[str]] = []
+    configure_federation(10, runner=lambda cmd: (calls.append(cmd), 0)[1])
+
+    assert "--client-resources-num-gpus" not in calls[0]
+
+
+def test_the_gpu_fraction_is_reissued_on_every_reconfiguration(tmp_path: Path) -> None:
+    """The reason the fraction belongs *inside* `configure_federation` rather than in one
+    manual `flwr federation simulation-config` call before the sweep.
+
+    `run_sweep` re-issues `simulation-config` whenever a cell's K changes, and it is not
+    established that options it does not name survive that. overhead.yaml sweeps
+    K = 5 -> 200, so a fraction set once up front could be dropped at the first K change
+    and every later cell would run on CPU -- which for the overhead sweep is the worst
+    possible failure, because a CPU-bound wall-clock curve is still *a curve*, and it
+    would be read as the measured O(K^2) cost the sweep exists to report.
+    """
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    calls: list[list[str]] = []
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[
+            {"name": "k5", "overrides": {"num-clients": 5}},
+            {"name": "k50", "overrides": {"num-clients": 50}},
+        ],
+        seeds=[0],
+        base_overrides={},
+        group="scale",
+        base_dir=REPO_ROOT,
+    )
+    run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: (calls.append(cmd), 0)[1],
+        gpus_per_client=0.2,
+    )
+
+    configured = [c for c in calls if "--num-supernodes" in c]
+    assert len(configured) == 2, "one config call per distinct K"
+    for cmd in configured:
+        assert cmd[cmd.index("--client-resources-num-gpus") + 1] == "0.2"
+
+
+@pytest.mark.parametrize("script", ["run_sweep", "run_sweep_granular"])
+def test_both_runners_expose_the_gpu_fraction(script: str) -> None:
+    """The recurring failure in this repo is a capability that exists and nothing calls:
+    A1's controls had 14 passing tests and no caller, R4's DP noise was in every config and
+    implemented nowhere. A GPU fraction reachable only from the library is the same shape --
+    the sweeps are launched from the two CLIs, so an option they cannot pass is an option
+    the experiments cannot use."""
+    import importlib
+    import inspect
+
+    source = inspect.getsource(importlib.import_module(script).main)
+
+    assert "--gpus-per-client" in source, "the flag must be declared on the CLI"
+    assert "gpus_per_client" in source, "and forwarded, not just parsed"
