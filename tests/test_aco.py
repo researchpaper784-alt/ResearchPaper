@@ -402,3 +402,90 @@ def test_the_spacing_reaches_the_strategy_from_run_config() -> None:
 
     assert strategy.aco_config.level_spacing == "log"
     assert float(strategy.levels[1]) < 0.01  # the log grid's second level, not 0.25
+
+
+# ======================================================================================
+# required_gamma_entropy -- the number the first GPU run's health check could not name
+# ======================================================================================
+
+
+@pytest.mark.parametrize("num_clients", [2, 4, 10, 20])
+@pytest.mark.parametrize("noise", [0.5, 1.5, 3.0])
+def test_the_returned_gamma_actually_zeroes_the_margin(num_clients: int, noise: float) -> None:
+    """The round trip, and the only guarantee worth having: feed the answer back in and the
+    corner stops winning.
+
+    Written this way on purpose rather than asserting the algebra. `required_gamma_entropy`
+    derives its closed form from the *claim* that the margin is linear in gamma_entropy --
+    true for today's fitness, and exactly the kind of assumption that rots when someone adds
+    a term. Checking the returned value against the real `corner_margin` catches that; a
+    test of the formula against itself would not.
+    """
+    from fedswarm.aco.fitness import DataFreeFitnessConfig, corner_margin, required_gamma_entropy
+
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=noise))
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    config = DataFreeFitnessConfig(gamma_entropy=0.1)
+
+    needed = required_gamma_entropy(gram, base, config)
+    at_crossing = corner_margin(gram, base, DataFreeFitnessConfig(gamma_entropy=needed))
+
+    assert at_crossing == pytest.approx(0.0, abs=1e-5), (
+        f"K={num_clients} noise={noise}: gamma_entropy={needed} left a margin of "
+        f"{at_crossing}, so the reported value does not fix what it claims to"
+    )
+
+
+def test_headroom_puts_the_margin_strictly_negative() -> None:
+    """Landing exactly on the crossing leaves the corner *tied* with FedAvg, not beaten --
+    and a tie is not a safe place to run 576 cells from, because any drift in the deltas
+    puts it back on the wrong side."""
+    from fedswarm.aco.fitness import DataFreeFitnessConfig, corner_margin, required_gamma_entropy
+
+    num_clients = 10
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    config = DataFreeFitnessConfig(gamma_entropy=0.1)
+
+    with_headroom = required_gamma_entropy(gram, base, config, headroom=0.2)
+    margin = corner_margin(gram, base, DataFreeFitnessConfig(gamma_entropy=with_headroom))
+
+    assert margin < 0.0
+    assert with_headroom > required_gamma_entropy(gram, base, config)
+
+
+def test_a_non_uniform_base_needs_more_than_the_uniform_estimate() -> None:
+    """Why the closed form subtracts `P(base_weights)` rather than using `log K` alone.
+
+    FedACO's reference point is the num-examples-weighted average, not the uniform one, and
+    under dirichlet(0.3) those are far apart. A non-uniform base is *already* concentrated,
+    so the penalty charges it too -- which shrinks the gap the penalty can open between the
+    corner and the reference, and raises the gamma_entropy needed to close it. Reading
+    `log K` as the denominator therefore under-reports the requirement, which is the
+    direction that matters: it would say the corner is fixed when it is not.
+    """
+    from fedswarm.aco.fitness import DataFreeFitnessConfig, required_gamma_entropy
+
+    num_clients = 10
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    config = DataFreeFitnessConfig(gamma_entropy=0.1)
+
+    uniform = torch.full((num_clients,), 1.0 / num_clients)
+    skewed = torch.tensor([0.55, 0.20, 0.10, 0.05, 0.04, 0.03, 0.01, 0.01, 0.005, 0.005])
+
+    assert required_gamma_entropy(gram, skewed, config) > required_gamma_entropy(
+        gram, uniform, config
+    )
+
+
+def test_a_degenerate_base_is_reported_as_impossible_not_as_a_big_number() -> None:
+    """If one client holds every example, the reference point *is* the corner. The penalty
+    charges both identically and no gamma_entropy separates them. Returning `inf` says that;
+    returning 1e9 would look like a value someone could set."""
+    from fedswarm.aco.fitness import DataFreeFitnessConfig, required_gamma_entropy
+
+    num_clients = 4
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    vertex = torch.tensor([1.0, 0.0, 0.0, 0.0])
+
+    assert required_gamma_entropy(gram, vertex, DataFreeFitnessConfig()) == float("inf")

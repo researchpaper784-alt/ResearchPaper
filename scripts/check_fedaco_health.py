@@ -279,6 +279,30 @@ def check_degenerate_optimum(result: dict) -> dict:
     alpha_max = _round_metric(result, "alpha_max")
     num_clients = result.get("config", {}).get("run_config", {}).get("num-clients", "?")
 
+    # The value that would have fixed it, taken from the run itself. The max across rounds,
+    # not the mean: gamma_entropy is set once for the whole run, so a value that clears the
+    # average round still leaves the worst rounds degenerate. Finite values only -- `inf`
+    # means a round whose base weights were a single client, which no real partition
+    # produces and which would otherwise swallow the max.
+    required = [g for g in _round_metric(result, "required_gamma_entropy") if g != float("inf")]
+    current = result.get("config", {}).get("run_config", {}).get("aco-gamma-entropy")
+    if required:
+        worst = max(required)
+        fix = (
+            f" **Set `aco-gamma-entropy` to at least {worst:.3f}** (currently "
+            f"{current if current is not None else 'default 0.1'}); that is the largest "
+            f"zero-crossing over {len(required)} rounds, computed in closed form from each "
+            f"round's own Gram matrix. Add headroom -- landing on the crossing leaves the "
+            f"corner tied, not beaten -- and re-run this gate to confirm, because the value "
+            f"moves with K and the partition."
+        )
+    else:
+        fix = (
+            " This result has no `required_gamma_entropy` (it predates 2026-09-19), so the "
+            "value needed is not recorded. Re-run one round to get it; it is a closed form "
+            "over the Gram matrix already computed, and costs nothing."
+        )
+
     if not margins:
         return {
             "question": "Is the fitness optimum degenerate?",
@@ -301,8 +325,7 @@ def check_degenerate_optimum(result: dict) -> dict:
             f"{len(margins)} rounds (mean margin {mean_margin:+.4f}) at K={num_clients}. "
             "The fitness is asking for 'use one client, discard the rest', so a colony "
             "that finds it is working correctly toward a useless answer -- and nothing "
-            "else in this report can tell the two apart. Raise `aco-gamma-entropy` until "
-            "the margin is negative, or run at a larger K." + concentration
+            "else in this report can tell the two apart." + fix + concentration
         )
     elif mean_margin > -0.02:
         verdict = "MARGINAL"
@@ -310,7 +333,7 @@ def check_degenerate_optimum(result: dict) -> dict:
             f"the corner lost, but only just (mean margin {mean_margin:+.4f} at "
             f"K={num_clients}, positive in {positive}/{len(margins)} rounds). A different "
             "partition or a noisier round could flip it, so this is not a comfortable "
-            "pass." + concentration
+            "pass." + fix + concentration
         )
     else:
         verdict = "CLEAR"
@@ -325,6 +348,7 @@ def check_degenerate_optimum(result: dict) -> dict:
         "detail": detail,
         "mean_corner_margin": mean_margin,
         "degenerate_round_fraction": rate,
+        "required_gamma_entropy": max(required) if required else None,
     }
 
 
@@ -334,7 +358,14 @@ def check_beats_fedavg(fedaco: dict, fedavg: dict | None) -> dict:
     aco_score = fedaco.get("final", {}).get("final_test_macro_f1")
 
     if fedavg is None:
-        detail = "no FedAvg run found to compare against -- run one with the same seed and partition."
+        detail = (
+            "no FedAvg run found to compare against -- run one with the same seed and "
+            "partition. If you believe you did run one, the listing under `strategies "
+            "present` above says what is actually on disk: the first GPU gate reported "
+            "this while a FedAvg run was visibly starting in the same cell, and the log "
+            "alone could not distinguish 'still running' from 'wrote a file this check "
+            "cannot match'."
+        )
         verdict = "NO BASELINE"
         margin = None
     else:
@@ -394,7 +425,14 @@ def main() -> int:
         help="fraction below max entropy that counts as uniform tau (default 0.02)",
     )
     parser.add_argument("--out", default=None, help="optional path to write the report JSON")
-    parser.add_argument("--strict", action="store_true", help="exit nonzero unless the colony is SEARCHING")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "exit nonzero unless the colony is SEARCHING and the fitness optimum is not "
+            "DEGENERATE -- for gating a later, expensive step on this check passing"
+        ),
+    )
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -416,6 +454,14 @@ def main() -> int:
     )
 
     print(f"FedACO health check\n  run: {fedaco['_path']}")
+    # Named explicitly because check 4's "NO BASELINE" is ambiguous on its own -- it cannot
+    # tell a FedAvg run that has not finished from one whose result file this check failed to
+    # match. Reading the directory once here settles it in the output instead of in the next
+    # GPU session.
+    everything = load_results(results_dir)
+    present = sorted({str(r["config"].get("strategy", "?")) for r in everything})
+    print(f"  strategies present in {results_dir}: {', '.join(present) or 'none'}"
+          f" ({len(everything)} result file(s) with per-round records)")
     if fedavg:
         print(f"  baseline: {fedavg['_path']}")
     print(f"  timing: {wall_clock_note(fedaco)}\n")
@@ -438,7 +484,8 @@ def main() -> int:
             "that searches well will find 'use one client and discard the rest', and every\n"
             "other signal in this report -- fallback rate, best vs FedAvg fitness, a\n"
             "confident alpha -- will read as success while it does. Fix that first; the\n"
-            "other three questions are not meaningful until it is negative.\n"
+            "other three questions are not meaningful until it is negative. Check 3 above "
+            "names the gamma_entropy that closes it.\n"
         )
     if verdict == "UNDERPOWERED":
         print(
@@ -467,7 +514,14 @@ def main() -> int:
         out_path.write_text(json.dumps({"run": fedaco["_path"], "checks": checks}, indent=2))
         print(f"\nWrote {out_path}")
 
-    return 1 if (args.strict and not searching) else 0
+    # DEGENERATE fails --strict as well, and that is the point of having the flag. A1 costs
+    # 80 cells to answer "does the colony beat random search at equal budget", and its four
+    # controls optimize the SAME fitness -- so on a degenerate landscape they all inherit the
+    # same useless optimum and a tie says nothing about ACO. The plan's week-5 go/no-go is
+    # only interpretable once check 3 is clear, so a caller spending that budget should be
+    # able to make it conditional on this exit code rather than on someone reading the text.
+    degenerate = checks[2]["verdict"] == "DEGENERATE"
+    return 1 if (args.strict and (not searching or degenerate)) else 0
 
 
 if __name__ == "__main__":

@@ -1766,3 +1766,69 @@ wall-clock** at K=10. The O(K^2) curve still needs `overhead.yaml` to make the c
 K, but the constant is small where it has been measured.
 
 471 tests pass, ruff clean.
+
+## 2026-09-19 (later still) -- the gate now names the number instead of giving advice
+
+The first GPU gate's most useful output was also its least actionable: "raise
+`aco-gamma-entropy` until the margin is negative". Closing that would have cost another GPU
+session to measure a quantity the round had already built the inputs for.
+
+**It needs no search.** The margin is *linear* in gamma_entropy:
+
+    margin(g3) = [g1*max_cos - g3*P_max] - [g1*align(base) - g2*disp(base) - g3*P(base)]
+               = A - g3 * (P_max - P(base))
+
+with `A` free of g3. One evaluation at the current value fixes the whole line, so the zero
+crossing is `g3* = g3 + margin(g3) / (P_max - P(base))`. `aco/fitness.required_gamma_entropy`
+computes it in closed form over the same Gram matrix, `strategies/fedaco.py` logs it every
+round, and `check_fedaco_health.py` reports the **max across rounds** -- gamma_entropy is set
+once per run, so the value that clears the average round leaves the worst rounds degenerate.
+
+Against a replica of B's real per-round margins, the check now prints:
+
+    **Set `aco-gamma-entropy` to at least 0.450** (currently 0.1); that is the largest
+    zero-crossing over 15 rounds, computed in closed form from each round's own Gram matrix.
+
+0.450 is a **lower bound** for that run, because the replica assumes uniform base weights
+(`P(base) = 0`). FedACO's reference point is the num-examples-weighted average, which under
+dirichlet(0.3) is already concentrated, so the real `P(base) > 0`, the real denominator is
+smaller, and the real requirement is higher. The live run computes it exactly.
+
+Twelve round-trip tests (K in {2,4,10,20} x three noise levels) feed the returned value back
+into the real `corner_margin` and assert it lands on zero -- deliberately not a test of the
+algebra against itself, which would survive someone adding a term to the fitness.
+
+### --strict now fails on DEGENERATE, and the notebook gates A1 on it
+
+A1 costs 80 cells and 17-33 GPU-hours to ask "does the colony beat equal-budget random
+search". Its four controls optimize the *same* fitness, so on a degenerate landscape they
+inherit the same useless optimum and a tie says nothing about ACO -- while the plan reframes
+the paper on exactly that result. `--strict` previously passed whenever the colony was
+SEARCHING, which is the one case where a degenerate optimum hides best: the colony is
+working, and working toward the corner.
+
+The notebook's gate cell now runs the check through `subprocess.run` rather than `!`, because
+a failing `!` line prints its error and the notebook carries straight on -- which is how the
+first gate run left A1 one Run-All away from spending that budget.
+
+### A6 was sweeping seven hyperparameters and not the one that matters
+
+`aco-gamma-entropy` is the only term standing against the corner, and A6 did not touch it.
+Now three cells: 0.1 (default), 0.5 (brackets the K=10 requirement with headroom), 1.0
+(deliberately past where the penalty should start costing accuracy, so the sweep shows the
+cost and not only the fix). A6 goes 220 -> 250 cells.
+
+**The default stays 0.1.** Raising it repairs the corner but charges *any* concentration,
+including the genuine down-weighting of a straggler or an adversary that R1-R3 need FedACO to
+perform. That is a measured trade-off, not a bug fix, and changing the default silently would
+make every future result incomparable with the plan's stated configuration.
+
+### Check 4's ambiguity, closed in the output rather than in the next session
+
+"NO BASELINE" could not distinguish a FedAvg run that had not finished from one whose result
+file the check failed to match -- and the first gate printed it while a FedAvg run was
+visibly starting in the same cell. `config["strategy"]` is populated correctly, so the
+matching was never broken, but the log could not establish that. The check now lists every
+strategy present in the results directory before running its four questions.
+
+491 tests pass, ruff clean.

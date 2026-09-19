@@ -34,6 +34,7 @@ from fedswarm.aco.fitness import (
     DataFreeFitnessConfig,
     ServerValFitness,
     corner_margin,
+    required_gamma_entropy,
 )
 from fedswarm.aco.gram import apply_delta, flatten_state_dicts, precompute_gram
 from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix, desirability_scores
@@ -342,6 +343,18 @@ class FedACO(FedAvg):
                 # `fitness_mode="server_val"`, so the number means the same thing across
                 # rounds and modes.
                 "corner_margin": corner_margin(
+                    gram, base_weights, self.aco_config.fitness
+                ),
+                # The fix for a positive `corner_margin`, in the same record as the
+                # diagnosis. The first real GPU run reported the margin at +0.6252 in 15 of
+                # 15 rounds and left "raise `aco-gamma-entropy`" as the only guidance, with
+                # no value attached -- so closing it meant another GPU session just to
+                # measure what this line computes for free. The margin is linear in
+                # gamma_entropy, so this is a closed form over the same Gram matrix, not a
+                # search. Logged per round because it moves with the deltas: the value that
+                # clears round 1 is not the value that clears round 15, and the one worth
+                # setting is the largest across the run.
+                "required_gamma_entropy": required_gamma_entropy(
                     gram, base_weights, self.aco_config.fitness
                 ),
                 "alpha": alpha_final.tolist(),

@@ -206,6 +206,68 @@ def corner_margin(
     return best_vertex - fedavg
 
 
+def required_gamma_entropy(
+    gram: GramPrecompute,
+    base_weights: torch.Tensor,
+    config: DataFreeFitnessConfig | None = None,
+    headroom: float = 0.0,
+) -> float:
+    """The smallest `gamma_entropy` at which the corner stops outscoring FedAvg. Exact.
+
+    This exists because "raise `aco-gamma-entropy` until the margin is negative" is advice,
+    and the first real GPU run showed advice is not enough: the margin came back at +0.6252
+    in 15 of 15 rounds and nothing in the report said what value would have fixed it. The
+    answer needs no search, because the margin is *linear* in gamma_entropy:
+
+        margin(g3) = [g1*max_cos - g3*P_max] - [g1*align(base) - g2*disp(base) - g3*P(base)]
+                   = A - g3 * (P_max - P(base))
+
+    where `A` collects every term that does not involve g3. So one evaluation at the current
+    value fixes the whole line, and the zero crossing is
+
+        g3* = g3 + margin(g3) / (P_max - P(base)).
+
+    `P_max - P(base) > 0` for any `base_weights` that is not itself a vertex, so the
+    crossing always exists and is unique -- there is no regime where the penalty cannot win,
+    only one where the value it needs is impractically large.
+
+    **This is a diagnostic, not a recommendation to apply blindly.** gamma_entropy is a
+    hyperparameter A7 owns, and raising it trades the degenerate corner for a fitness that
+    charges more for *any* concentration -- including the mild, genuine down-weighting of a
+    straggler or an adversary that R1/R2 need FedACO to perform. A value that just clears
+    the corner at K=10 may over-penalize at K=20, where `P_max` is larger. Read it as "the
+    current setting is short of the corner by this much", and confirm any change with a gate
+    re-run rather than by argument -- the log-spaced-grid episode is what happens otherwise.
+
+    `headroom` returns a value that clears the crossing by that fraction (0.1 = 10% past
+    it), because landing exactly on a zero margin leaves the corner tied rather than beaten.
+    """
+    config = config or DataFreeFitnessConfig()
+    num_clients = int(base_weights.numel())
+    p_max = _max_concentration_penalty(num_clients, config.concentration_penalty)
+    p_base = concentration_penalty(base_weights, config.concentration_penalty)
+    span = p_max - p_base
+    # Relative, and not 1e-12: at an exact vertex the span is algebraically zero but comes
+    # out at ~8e-11, because `_entropy` clamps its probabilities off zero before taking the
+    # log. An absolute tolerance tight enough to look rigorous therefore misses the very
+    # case it exists to catch and returns a crossing around 1e10 instead -- a number a
+    # reader could mistake for a setting. Any real partition's span is O(0.1) or larger.
+    if span <= 1e-9 * max(p_max, 1.0):
+        # `base_weights` is itself a vertex: one client holds every example. The penalty
+        # then charges the corner and the reference identically and cannot separate them at
+        # any gamma_entropy. Not reachable from a real partition (every regime in
+        # configs/partition/ gives every client data), so it is reported rather than
+        # papered over with a large finite number.
+        return float("inf")
+    margin = corner_margin(gram, base_weights, config)
+    crossing = config.gamma_entropy + margin / span
+    if crossing <= 0:
+        # Already negative by more than the penalty contributes: the corner loses on the
+        # alignment and dispersion terms alone and needs no penalty at all.
+        return 0.0
+    return crossing * (1.0 + headroom)
+
+
 class ServerValFitness:
     """Macro-F1 of w(alpha) on a small server-held val set (plan §4.4) -- an
     upper-bound reference that assumes the server holds data, unlike `data_free`.
