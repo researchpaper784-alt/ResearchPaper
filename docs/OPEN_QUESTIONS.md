@@ -869,7 +869,7 @@ note that the ETA is optimistic (Ray queues them), not a refusal.
 
 ## Phase 9 -- 5 seeds cannot produce a significant result, and that is arithmetic
 
-**Status: open. A decision for the team, before the main sweep runs, not after.**
+**Status: acted on 2026-09-19 -- every sweep raised to 8 seeds. Two things remain open; see the end of this section.**
 
 Found 2026-09-19 while folding `analysis.py`'s statistics into `make_tables.py`. The
 signed-rank statistic is discrete, so its p-value has a floor set entirely by the pair
@@ -919,3 +919,29 @@ silent as soon as the test can actually fire, so it is a safeguard rather than n
 Doing none of these is also a choice: report effect sizes and paired deltas, and state
 plainly that the seed count does not support significance testing. That is defensible if
 said out loud and indefensible if the p-values are printed without the caveat.
+
+### What was done, 2026-09-19
+
+Option 1. **Every sweep now runs 8 seeds** -- `main.yaml` first, then all 16 ablation and
+robustness configs. The granular configs turned out to be at **3** seeds, not 5: a floor of
+0.25, four times worse than the main sweep's. Total sweep size 1508 -> 2576 cells.
+
+### Still open
+
+1. **A 66-comparison family needs 12 seeds, not 8.** 8 clears alpha=0.05 for a
+   six-comparison family -- FedACO against FedAvg in each regime. If the paper claims
+   significance against all 11 baselines in all 6 regimes, 8 is short and `main.yaml` needs
+   864 cells rather than 576. `make tables` prints the requirement for whatever family the
+   table actually contains, so this surfaces before the claim is written.
+
+2. **The combined and granular sweep families overlap, and that now costs more than the
+   seeds did.** `ablation_all.yaml` covers A1/A3/A9 while `ablation_a1/a3/a9.yaml` cover the
+   same ground individually; `robustness.yaml` covers R1-R5's territory in combined form.
+   Running both families runs those experiments twice at 8 seeds each.
+
+   Both families exist for a real reason -- they read different YAML shapes, and the
+   granular ones cover A2 and A4-A8 that `ablation_all.yaml` explicitly does not. But
+   nothing says to run *both*, and the 2576-cell total assumes you do. Picking one family
+   for the overlapping cells, or dropping the duplicates from whichever runs second, is a
+   scope call for whoever owns the ablation runs -- and is worth more compute than any
+   remaining seed decision.
