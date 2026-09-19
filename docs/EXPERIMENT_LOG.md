@@ -1531,3 +1531,36 @@ Down from 2,576 with both families at 8 seeds. Run both targets in each family -
 longer overlap.
 
 440 tests pass, ruff clean.
+
+## 2026-09-19 (later) -- the Kaggle sweep notebook, and 33 Makefile paths that never worked there
+
+Built `notebooks/kaggle_main_sweep.ipynb` for person B's workstream, and found while testing
+its commands that **every `make` target was unusable on Kaggle or Colab.** The Makefile
+hardcoded `.venv/bin/python` in 29 places and `.venv/bin/flwr` in 4; notebook runtimes install
+into the system Python and have no `.venv` at all, so `make validate-fedaco` would have failed
+instantly with "No such file or directory" -- on the exact machine the gate has to run on.
+
+Now `PY ?= .venv/bin/python` / `FLWR ?= .venv/bin/flwr`, overridable:
+`make validate-fedaco PY=python FLWR=flwr`. Default behaviour locally is unchanged (verified).
+
+### The notebook runs the plan's gates before the sweep, deliberately
+
+Plan §11 puts A1 at week 5 as a go/no-go on claim C2, before the main sweep in weeks 7-8, and
+the risk register rates "ACO ties equal-budget random search" Medium-High / fatal. The
+notebook therefore runs, in order: the 20-minute mechanism check (`validate-fedaco` + `health`),
+then A1's 80 cells, and only then the 576-cell sweep -- with both gates marked as stop points.
+Ordering them the other way would spend the larger budget on a question the paper might no
+longer be able to ask.
+
+It is also built for a multi-session run, because 57,600 rounds does not fit Kaggle's ~9h GPU
+cap: results are restored from the previous version's output at the top, the sweep skips
+completed cells, and the last section says what to save and how to resume. No Kaggle API
+credentials are needed -- the dataset mounts from the sidebar.
+
+Two build errors of my own worth recording, both caught by `ruff` rather than by reading:
+nbformat needs each `source` line to keep its trailing newline (splitting without them
+concatenated the whole notebook into one 3,000-character syntax error), and a multi-line
+`!python -c "..."` cell does not parse as either shell or Python -- it is now a plain Python
+cell.
+
+440 tests pass, ruff clean repo-wide.

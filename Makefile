@@ -1,17 +1,28 @@
 .PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro clean
 
+# Interpreter paths, overridable. The default is the local `uv` venv from `make setup`
+# (CLAUDE.md), but Colab and Kaggle install into the system Python and have no .venv at
+# all -- every target here was unusable there until these became variables. On a notebook
+# runtime:
+#
+#     make validate-fedaco PY=python FLWR=flwr
+#
+PY ?= .venv/bin/python
+FLWR ?= .venv/bin/flwr
+
+
 setup:
 	uv venv --python 3.12 .venv
-	uv pip install -e ".[dev]" --python .venv/bin/python
+	uv pip install -e ".[dev]" --python $(PY)
 
 data:
-	.venv/bin/python -m fedswarm.data.download --verify
+	$(PY) -m fedswarm.data.download --verify
 
 test:
-	.venv/bin/python -m pytest -q
+	$(PY) -m pytest -q
 
 lint:
-	.venv/bin/python -m ruff check src tests scripts
+	$(PY) -m ruff check src tests scripts
 
 # Phase 3 FL smoke run (2 clients, 2 rounds -- the plan's Step 3.1 acceptance size,
 # set as the [tool.flwr.app.config] defaults in pyproject.toml). Needs the `simulation`
@@ -19,20 +30,20 @@ lint:
 # so this only actually runs there, not on this machine. Real Colab CPU-runtime recipe:
 # notebooks/colab_fl_smoke.ipynb.
 smoke:
-	.venv/bin/flwr run . --stream
+	$(FLWR) run . --stream
 
 # Every strategy, tiny scale, one partition -- "does everything still run" (Phase 6/10).
 smoke-all:
-	.venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/smoke.yaml
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/smoke.yaml
 
 # Phase 5 -- give every baseline an honest hyperparameter search on the val split, with
 # a budget matched to FedACO's. Selection reads best_val_macro_f1 only; it never touches
 # the test metric. --dry-run prints the trial plan without spending any compute.
 hparam-search:
-	.venv/bin/python scripts/run_hparam_search.py --strategy all --budget 8
+	$(PY) scripts/run_hparam_search.py --strategy all --budget 8
 
 hparam-search-plan:
-	.venv/bin/python scripts/run_hparam_search.py --strategy all --budget 8 --dry-run
+	$(PY) scripts/run_hparam_search.py --strategy all --budget 8 --dry-run
 
 # The real-data validation run: the first federated training this project will have done
 # on actual images rather than a synthetic cache. Two runs (FedACO and FedAvg, same seed
@@ -62,43 +73,43 @@ validate-fedaco:
 	# recording K, and a min-train-nodes above the supernode count hangs at round 0 with
 	# idle actors and no error -- which this project previously misdiagnosed as CPU
 	# oversubscription (docs/OPEN_QUESTIONS.md). Both are set here.
-	.venv/bin/flwr federation simulation-config --num-supernodes $(K) --client-resources-num-cpus 1
-	FEDSWARM_REPO_ROOT=$(PWD) .venv/bin/flwr run . --stream --run-config \
+	$(FLWR) federation simulation-config --num-supernodes $(K) --client-resources-num-cpus 1
+	FEDSWARM_REPO_ROOT=$(PWD) $(FLWR) run . --stream --run-config \
 	  "strategy-name='fedaco' num-clients=$(K) min-train-nodes=$(K) min-evaluate-nodes=$(K) \
 	   min-available-nodes=$(K) num-rounds=$(ROUNDS) local-epochs=1 regime='dirichlet' alpha=0.3 seed=0"
-	FEDSWARM_REPO_ROOT=$(PWD) .venv/bin/flwr run . --stream --run-config \
+	FEDSWARM_REPO_ROOT=$(PWD) $(FLWR) run . --stream --run-config \
 	  "strategy-name='fedavg' num-clients=$(K) min-train-nodes=$(K) min-evaluate-nodes=$(K) \
 	   min-available-nodes=$(K) num-rounds=$(ROUNDS) local-epochs=1 regime='dirichlet' alpha=0.3 seed=0"
-	.venv/bin/python scripts/check_fedaco_health.py --results-dir results/fl
+	$(PY) scripts/check_fedaco_health.py --results-dir results/fl
 
 health:
-	.venv/bin/python scripts/check_fedaco_health.py --results-dir results/fl
+	$(PY) scripts/check_fedaco_health.py --results-dir results/fl
 
 # What a given colony budget makes *reachable* on question 1, before spending a run on it.
 pheromone-budget:
-	.venv/bin/python scripts/analyze_pheromone_dynamics.py
+	$(PY) scripts/analyze_pheromone_dynamics.py
 
 # Where (K, gamma_entropy, heterogeneity) makes the fitness prefer a single-client answer.
 fitness-landscape:
-	.venv/bin/python scripts/analyze_fitness_landscape.py
+	$(PY) scripts/analyze_fitness_landscape.py
 
 # Phase 5 -- the IID acceptance gate. Under IID there is little heterogeneity for an
 # aggregation rule to exploit, so a large spread means something other than the method is
 # driving the number. Exits nonzero on FAIL.
 iid-band:
-	.venv/bin/python scripts/check_iid_band.py --results-dir results/fl
+	$(PY) scripts/check_iid_band.py --results-dir results/fl
 
 # Always run `make main-plan` first: it prints the cell count and a cost projection, and
 # refuses nothing, so it is the cheapest way to find out that 576 cells x 100 rounds is
 # more compute than you have before committing to it.
 main-plan:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml --dry-run
+	$(PY) scripts/run_sweep.py --config configs/experiment/main.yaml --dry-run
 
 main:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml
+	$(PY) scripts/run_sweep.py --config configs/experiment/main.yaml
 
 main-client-scale:
-	.venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/main_client_scale.yaml
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/main_client_scale.yaml
 
 # Phase 7. The two families are now disjoint (2026-09-19). A1-A9 live in their own
 # per-ablation configs and are driven by `ablations-granular`; `ablation_all.yaml` keeps
@@ -108,14 +119,14 @@ main-client-scale:
 # persistence "A1" while ablation_a1.yaml is the ACO-vs-random-search control, both
 # writing to results/fl/ablation. Run BOTH targets; they no longer overlap.
 ablations-plan:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml --dry-run
+	$(PY) scripts/run_sweep.py --config configs/experiment/ablation_all.yaml --dry-run
 
 ablations:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml
+	$(PY) scripts/run_sweep.py --config configs/experiment/ablation_all.yaml
 
 ablations-granular:
 	for f in configs/experiment/ablation_a[0-9].yaml; do \
-		.venv/bin/python scripts/run_sweep_granular.py --config "$$f" || exit 1; \
+		$(PY) scripts/run_sweep_granular.py --config "$$f" || exit 1; \
 	done
 
 # Phase 8. Same split. R1-R5 live in their own configs (`robustness-granular`);
@@ -125,47 +136,47 @@ ablations-granular:
 # The granular configs sweep three attacker fractions where the combined file sampled
 # one or two, so the finer grid strictly contains the coarser one. Run both.
 robustness-plan:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness.yaml --dry-run
+	$(PY) scripts/run_sweep.py --config configs/experiment/robustness.yaml --dry-run
 
 robustness:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness.yaml
+	$(PY) scripts/run_sweep.py --config configs/experiment/robustness.yaml
 
 robustness-granular:
 	for f in configs/experiment/robustness_r*.yaml; do \
-		.venv/bin/python scripts/run_sweep_granular.py --config "$$f" || exit 1; \
+		$(PY) scripts/run_sweep_granular.py --config "$$f" || exit 1; \
 	done
 
 # The dedicated, denser K sweep for the O(K^2) overhead curve (plan Sec 9.2, figure 5).
 overhead:
-	.venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/overhead.yaml
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/overhead.yaml
 
 tables-robustness:
-	.venv/bin/python scripts/make_tables.py --results-dir results/fl/robustness
+	$(PY) scripts/make_tables.py --results-dir results/fl/robustness
 
 figures-data:
-	.venv/bin/python scripts/make_partition_figures.py
+	$(PY) scripts/make_partition_figures.py
 
 # Phase 9. Four figures to paper/figures/. Each is skipped (and named as skipped) when
 # the sweep feeding it has not run, rather than rendered blank.
 figures:
-	.venv/bin/python scripts/make_figures.py --results-dir results/fl/main
+	$(PY) scripts/make_figures.py --results-dir results/fl/main
 
 figures-ablation:
-	.venv/bin/python scripts/make_figures.py --results-dir results/fl/ablation --only ablation
+	$(PY) scripts/make_figures.py --results-dir results/fl/ablation --only ablation
 
 # Phase 9. Aggregates over seeds and writes Markdown + CSV to paper/tables/. Exits
 # nonzero when any cell has fewer seeds than expected, so an incomplete sweep cannot be
 # quoted from by accident.
 tables:
-	.venv/bin/python scripts/make_tables.py --results-dir results/fl/main
+	$(PY) scripts/make_tables.py --results-dir results/fl/main
 
 tables-ablation:
-	.venv/bin/python scripts/make_tables.py --results-dir results/fl/ablation
+	$(PY) scripts/make_tables.py --results-dir results/fl/ablation
 
 # Phase 10 -- runs the smoke config and checks final metrics against a recorded
 # tolerance band (scripts/verify_repro.py).
 verify-repro:
-	.venv/bin/python scripts/verify_repro.py
+	$(PY) scripts/verify_repro.py
 
 clean:
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} +

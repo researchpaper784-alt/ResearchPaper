@@ -71,6 +71,11 @@ what is missing.
 
 ### Before the sweep
 
+**On Colab or Kaggle**, pass `PY=python FLWR=flwr` to any `make` target — those runtimes
+install into the system Python and have no `.venv`. `notebooks/kaggle_main_sweep.ipynb` is
+the ready-to-run Kaggle notebook for the main sweep; it does this for you, restores results
+from a previous session, and runs the plan's two gates before the 576-cell sweep.
+
 ```bash
 make pheromone-budget       # can a run of this length answer question 1 at all?
 make fitness-landscape      # is the fitness optimum degenerate at this K?
