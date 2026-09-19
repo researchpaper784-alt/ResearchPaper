@@ -1346,3 +1346,41 @@ resolves to its own result. The by-value discriminator handles it, which is what
 rewritten for.
 
 324 tests pass, `ruff check .` clean.
+
+## 2026-09-19 -- the analysis stack, and a seed count that cannot reach significance
+
+Person A's third item: `analysis.py` (Wilcoxon, Holm-Bonferroni, Cohen's d, bootstrap CI)
+existed but the Makefile wired `make_tables.py`, which did mean/std/n and no test. Folded
+the statistics in -- `add_significance` pairs by seed (reusing the pairing `add_deltas`
+already did), tests each row against the baseline, and applies Holm once across the whole
+table rather than per regime.
+
+**Then the integration turned up something worse than a missing feature.** The
+signed-rank p-value has a floor set by the pair count alone. At `main.yaml`'s 5 seeds the
+smallest possible two-sided p is **0.0625** -- so the planned analysis could not have
+produced a significant result at alpha=0.05 under any data whatsoever. On synthetic
+best-case input (FedACO ahead on every seed, Cohen's d = 7.91) the table reports:
+
+| strategy | macro-F1 | Delta vs fedavg | p (Holm) | d |
+|---|---|---:|---:|---:|
+| fedaco | 0.9090 +/- 0.0032 | +0.0250 | 0.250 | +7.91 |
+
+A d of 7.9 reported as p = 0.25. Without an explanation, that row reads as "no effect" --
+the single most misleading number the paper could contain, and it would have been
+discovered while writing the discussion section.
+
+`make_tables.py` now prints the reason: the floor, the family size, the best achievable
+adjusted p, and the seed count that would clear alpha. At 8 seeds the same data gives
+p = 0.008 and the warning goes silent, so it is falsifiable rather than always-on.
+
+The seed-count decision is recorded as open in docs/OPEN_QUESTIONS.md, because it is a
+compute-budget question for whoever runs the main sweep and not a code fix: 5 -> 8 seeds
+is 360 -> 576 cells, and clearing alpha over the full 66-comparison family needs 12.
+
+Two of my own errors, for the record. I asserted "8 seeds" in a test where the correct
+answer for a single-comparison family was 6, then "12 seeds" where a 6-regime table is a
+6-comparison family needing 8. The test now asserts the *relationship* -- a larger family
+needs more seeds -- because the count depends on how many claims the table makes and is
+precisely the thing that is easy to miscount by hand.
+
+440 tests pass, ruff clean.
