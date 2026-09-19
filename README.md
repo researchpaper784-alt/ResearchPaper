@@ -81,7 +81,7 @@ make health                 # does FedACO's mechanism actually do anything?
 `make health` answers four questions the accuracy columns cannot: whether the colony is
 searching at all (pheromone entropy against its `log(L)` ceiling), whether the deposit
 floor has engaged, whether the fitness optimum is degenerate, and whether the safety
-fallback — not the colony — is carrying any margin over FedAvg. A sweep run before that check can produce 360 cells of numbers about
+fallback — not the colony — is carrying any margin over FedAvg. A sweep run before that check can produce 576 cells of numbers about
 a mechanism that was never running. It costs about twenty minutes against the sweep's
 several hundred hours.
 

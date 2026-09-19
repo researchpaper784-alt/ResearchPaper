@@ -388,7 +388,7 @@ def main() -> int:
     parser.add_argument(
         "--expected-seeds",
         type=int,
-        default=5,
+        default=8,
         help="seeds each cell should have; cells with fewer are marked incomplete",
     )
     args = parser.parse_args()
