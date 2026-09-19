@@ -166,6 +166,31 @@ class FedACO(FedAvg):
         client_arrays = [next(iter(rc.array_records.values())) for rc in reply_contents]
         client_metrics = [next(iter(rc.metric_records.values())) for rc in reply_contents]
 
+        # Canonical order by client id, because reply order is Ray's and Ray does not fix
+        # it. Everything downstream is built positionally from these lists -- `deltas`, the
+        # Gram matrix, the desirability, and the colony's stations -- so a permuted arrival
+        # order hands the same pseudo-random draws to different clients and the search takes
+        # a different path. The first two Kaggle gate runs, identical config and seed,
+        # disagreed on every metric; `participating_client_ids` shows the order changing
+        # even between rounds of a single run (['1','3','4',...] then ['3','1','4',...]).
+        #
+        # It also moves the trimmed set: `precompute_gram(trim_fraction=...)` drops the
+        # extremes, and near-ties break by position. The aggregate itself was never wrong --
+        # alpha is matched to clients by id throughout, and the pheromone is keyed by id --
+        # but "correct" and "reproducible" are different properties and only the first held.
+        try:
+            order = sorted(range(len(client_metrics)), key=lambda i: int(client_metrics[i]["client_id"]))
+        except KeyError as exc:
+            raise KeyError(
+                "FedACO requires every client reply's MetricRecord to include "
+                "'client_id' -- pheromone persistence (plan §4.3) is keyed by client "
+                "identity, and there is no safe fallback (e.g. reply position) that "
+                "wouldn't silently break persistence across rounds with a changing "
+                "participation set."
+            ) from exc
+        client_arrays = [client_arrays[i] for i in order]
+        client_metrics = [client_metrics[i] for i in order]
+
         try:
             client_ids = [str(int(m["client_id"])) for m in client_metrics]
         except KeyError as exc:

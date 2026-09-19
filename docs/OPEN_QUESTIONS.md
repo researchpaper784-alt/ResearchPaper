@@ -1062,3 +1062,50 @@ The consequence is only about interpretation: an `UNDERPOWERED` verdict at a bud
 table calls comfortable is not a contradiction, it is the table's 0.8 being optimistic.
 `MEASURED_FITNESS` should be re-derived from real runs once a gate run exists at the
 corrected `aco-gamma-entropy`, since the fitness magnitude will move with it.
+
+## Phase 3 -- RESOLVED: no FL run was reproducible, and the seed said otherwise
+
+**Status: fixed 2026-09-19. Every FL result produced before this commit is affected.**
+
+Two Kaggle gate runs at **identical config and identical seed** disagreed on every metric:
+
+| | run 1 | run 2 |
+|---|---|---|
+| mean corner margin | +0.6252 | +0.6184 |
+| rounds hitting the deposit floor | 1 (round 12) | 4 (rounds 1, 6, 8, 12) |
+| tau, as a fraction of best case | 36% | 79% |
+| final test macro-F1 | 0.1185 | 0.1381 |
+
+Two independent causes, neither able to show up before this project ran a real federation.
+
+**1. The ClientApp was never seeded.** `seed_everything` is called in `server_app.main()`
+and nowhere else. In the Simulation Runtime a ClientApp is a separate **Ray actor process**,
+so the server's seeding never reached it, and the train loader --
+`DataLoader(..., shuffle=True)` with no `generator` -- drew its batch order from each
+actor's own OS-seeded RNG. The `seed` recorded in every result file governed the server's
+model initialization and nothing on the client. Fixed: both handlers seed themselves from
+f(run seed, partition id, server_round), and the train loader takes an explicit generator.
+
+Folding the **round** in matters as much as the client. Re-seeding to f(seed, partition)
+alone would have made the runs reproduce perfectly while training all 100 rounds on one
+fixed permutation -- a quieter bug that passes exactly the test written to catch this one.
+
+**2. FedACO consumed replies in arrival order.** `deltas`, the Gram matrix, the
+desirability and the colony's stations are all built positionally from the reply list, and
+Ray does not fix its order -- `participating_client_ids` shows it changing between rounds
+of a single run. A permutation hands the same pseudo-random draws to different clients, and
+moves which clients `precompute_gram(trim_fraction=...)` trims when scores are close. The
+aggregate was never *wrong* (alpha is matched to clients by id, the pheromone is keyed by
+id); it was not reproducible. Fixed by sorting on client id before anything positional.
+
+**What this invalidates.** Every FL result in `results/` predating this fix, as a
+*reproducible* artifact. The numbers are not wrong -- they are draws from the right
+distribution with an unrecorded seed. Seed-to-seed variance in the main sweep was still
+real variance, so the 8-seed statistics plan is unaffected in kind. What breaks is
+`verify_repro.py`, `docs/repro_reference.json`'s tolerance band, and the sweep's resume
+logic, all of which assume a run can be repeated. The reference band has to be rebuilt from
+a post-fix run before it means anything.
+
+**Why 491 tests missed it.** Every one of them calls the handlers directly, in one process,
+where the server's `seed_everything` had already run and there is no Ray actor boundary to
+cross. The failure needs a real federation, which this project first had today.

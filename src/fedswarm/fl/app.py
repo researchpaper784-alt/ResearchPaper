@@ -173,11 +173,21 @@ def build_model_from_run_config(run_config: RunConfig) -> nn.Module:
     )
 
 
-def load_client_data(partition_id: int, run_config: RunConfig) -> tuple[DataLoader, DataLoader]:
+def load_client_data(
+    partition_id: int, run_config: RunConfig, shuffle_seed: int | None = None
+) -> tuple[DataLoader, DataLoader]:
     """This client's local-train / local-val loaders, per the plan's Step 1.4 design:
     each client's data is a fixed subset of the cached, de-duplicated manifest, split
     90/10 into local-train and local-val (the fraction is itself part of the partition
-    spec, cached alongside the assignment)."""
+    spec, cached alongside the assignment).
+
+    `shuffle_seed` pins the train loader's batch order. Without it the loader shuffles from
+    the **global** torch RNG of whatever Ray actor happens to be running this ClientApp, and
+    `seed_everything` is called in `server_app.main()` only -- a different process. So the
+    `seed` recorded in every result file governed the server and nothing else, and two runs
+    of the same config produced different numbers. Caller-supplied rather than read from
+    `run_config` here, because it has to fold in the round: re-seeding to f(seed, partition)
+    alone would make every round of a run train on the identical batch order."""
     size = int(run_config.get("image-size", 112))
     cache_dir = _repo_path(str(run_config.get("cache-dir", "data/processed/cache")))
     manifest_path = str(_repo_path(str(run_config.get("manifest-path", str(MANIFEST_CSV)))))
@@ -203,7 +213,17 @@ def load_client_data(partition_id: int, run_config: RunConfig) -> tuple[DataLoad
     train_ds = ManifestDataset(manifest, images, np.array(partition.client_train[partition_id]), train_transform)
     val_ds = ManifestDataset(manifest, images, np.array(partition.client_val[partition_id]), eval_transform)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    shuffle_generator = None
+    if shuffle_seed is not None:
+        shuffle_generator = torch.Generator()
+        shuffle_generator.manual_seed(int(shuffle_seed))
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        generator=shuffle_generator,
+    )
     val_loader = DataLoader(val_ds, batch_size=min(128, max(1, len(val_ds))), shuffle=False, num_workers=0)
     return train_loader, val_loader
 
@@ -486,15 +506,51 @@ def _poisoned_loader(loader: DataLoader, num_classes: int) -> DataLoader:
     )
 
 
+def _client_seed(context: Context, config, partition_id: int) -> int:
+    """A per-(run seed, client, round) seed for a ClientApp process.
+
+    `seed_everything` runs in `server_app.main()`, and in the Simulation Runtime a ClientApp
+    is a **separate Ray actor process** -- so it never reached the client, and every client's
+    torch RNG started from OS entropy. The visible consequence: two runs of the identical
+    config and seed produced different results (the first two Kaggle gate runs disagreed on
+    every metric, including 1 vs 4 rounds hitting the deposit floor). The `seed` in every
+    result file was honest about being recorded and wrong about what it controlled.
+
+    Folding in the round matters as much as folding in the client: re-seeding to
+    f(seed, partition) alone would hand every round the same batch order, which is not
+    determinism but a much subtler bug -- 100 rounds of training on one fixed permutation.
+
+    The multipliers are distinct large primes so (seed, partition, round) triples do not
+    collide; the same pattern `train_handler` already uses for its attack and DP generators.
+    """
+    return (
+        int(context.run_config.get("seed", 0)) * 2_654_435_761
+        + partition_id * 40_503
+        + int(config.get("server_round", 0)) * 97
+    ) % (2**31 - 1)
+
+
 @client_app.train()
 def train_handler(msg: Message, context: Context) -> Message:
+    config = msg.content["config"]
+    partition_id = _partition_id(context)
+    # Before anything that draws from an RNG: model init is overwritten by the server's
+    # arrays below, but dropout masks, augmentation and batch order are not.
+    seed_everything(
+        _client_seed(context, config, partition_id),
+        deterministic=bool(context.run_config.get("deterministic", True)),
+    )
+
     model = build_model_from_run_config(context.run_config)
     full_state = msg.content["arrays"].to_torch_state_dict()
     model_keys = list(model.state_dict().keys())
     model.load_state_dict(OrderedDict((k, full_state[k]) for k in model_keys))
 
-    train_loader, _ = load_client_data(_partition_id(context), context.run_config)
-    config = msg.content["config"]
+    train_loader, _ = load_client_data(
+        partition_id,
+        context.run_config,
+        shuffle_seed=_client_seed(context, config, partition_id),
+    )
 
     # Phase 8. `attack="none"` (the default) leaves every path below untouched, so a
     # non-robustness run behaves exactly as it did before this existed.
@@ -628,6 +684,22 @@ def train_handler(msg: Message, context: Context) -> Message:
 
 @client_app.evaluate()
 def evaluate_handler(msg: Message, context: Context) -> Message:
+    # Seeded for the same reason `train_handler` is -- the ClientApp actor's RNG is not the
+    # one `server_app.main()` seeded. Evaluation is `model.eval()` under `no_grad` with an
+    # unshuffled loader, so nothing here consumes RNG today; it is seeded anyway because
+    # "this path happens not to draw" is a property of the current transforms, not a
+    # guarantee, and the failure it would cause is silent non-reproducibility, not an error.
+    #
+    # The evaluate message carries no ConfigRecord at all -- Flower's own round summary
+    # prints "ConfigRecord (evaluate): (empty!)" -- so unlike the train path there is no
+    # `server_round` here and this seed is per (run seed, client), constant across rounds.
+    # Correct while the path draws nothing; if an RNG-consuming eval transform is ever
+    # added, the round has to be threaded in through `configure_evaluate` first.
+    eval_config = msg.content.config_records.get("config", ConfigRecord({}))
+    seed_everything(
+        _client_seed(context, eval_config, _partition_id(context)),
+        deterministic=bool(context.run_config.get("deterministic", True)),
+    )
     model = build_model_from_run_config(context.run_config)
     model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
 
