@@ -1641,3 +1641,47 @@ string `no\_safety\_fallback` would appear, but `_variant_of` names that variant
 and the test was not. It now asserts escaping on `dirichlet_0.3`, which does carry one.
 
 446 tests pass, ruff clean.
+
+## 2026-09-19 (later still) -- the num_supernodes bug, a third time, in B's scaling sweeps
+
+Found while rehearsing person B's remaining commands rather than by reading code.
+`scripts/run_sweep_granular.py` never set `num_supernodes` at all -- and unlike `main.yaml`,
+the configs it drives **vary `num-clients` across cells**: `overhead.yaml` sweeps K = 5, 10,
+20, 50, 100, 150, 200; `main_client_scale.yaml` 10 -> 50; `robustness_r5` likewise.
+
+`num_supernodes` is a *federation* setting. No `--run-config` key can carry it, and it
+defaults to 2. So every cell above K=2 would have either hung at round 0 forever
+(`min-train-nodes` above the supernode count) or silently trained 2 clients while recording
+100.
+
+**The second failure mode is the dangerous one here, and it is specific to which sweeps
+these are.** `overhead.yaml` and `main_client_scale.yaml` exist to produce the measured
+ACO-time-vs-K curve that plan §1.3's claim C3 rests on -- "a measured curve matching K^2 is
+far more convincing than a complexity assertion" (§8, R5). Measured at a fixed 2 supernodes
+while labelling cells K=5..200, that curve comes out **flat**. A flat curve reads as
+evidence *for* the overhead being negligible. The bug would have manufactured support for
+the claim it was meant to test.
+
+This is the third time this project has been bitten by `num_supernodes`: once in the
+strategy path (2026-09-17, retracting a CPU-oversubscription diagnosis), once in the Colab
+notebook (2026-09-18, still live after the first fix was called propagated), and now in the
+granular runner.
+
+### The fix, and the proof
+
+`fedswarm.sweep.run_sweep` now resolves each cell's `num-clients` against pyproject's
+defaults and reconfigures the federation when the value changes -- only when it changes, so
+`main.yaml`'s 576 constant-K cells cost one subprocess call, not 576. A failed
+reconfiguration refuses the cell (`status: failed_federation_config`) rather than running
+it, because both failure modes are worse than stopping.
+
+Verified live, not just by unit test: the federation was deliberately pre-set to 2
+supernodes, then a two-cell sweep at K=2 and K=6 was run against the synthetic dataset.
+
+    num-clients=2   completed   clients that actually trained: 2  ids=[1, 0]
+    num-clients=6   completed   clients that actually trained: 6  ids=[1, 2, 3, 0, 4, 5]
+
+`train_participating_client_ids` matches the recorded `num-clients` in both. Before the fix
+the K=6 cell hangs at round 0 indefinitely.
+
+453 tests pass, ruff clean.

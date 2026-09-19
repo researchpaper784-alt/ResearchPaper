@@ -221,6 +221,30 @@ def execute_run(
     return result if isinstance(result, int) else result.returncode
 
 
+def required_supernodes(defaults: dict[str, Any], overrides: dict[str, Any]) -> int:
+    """This run's `num-clients`, resolved against pyproject's defaults.
+
+    `num-clients` is this project's own key for how the *data* is partitioned. How many
+    ClientApps the Simulation Runtime actually creates is Flower's `num_supernodes`, which
+    defaults to 2 and is a property of the *federation*, not of a run config -- so it has
+    to be set out-of-band, per cell, before `flwr run`.
+    """
+    return int({**defaults, **overrides}.get("num-clients", 2))
+
+
+def configure_federation(
+    num_supernodes: int, cpus_per_client: int = 1, runner: Runner = _default_runner
+) -> int:
+    """Set the Simulation Runtime's supernode count. Returns the process return code."""
+    cmd = [
+        "flwr", "federation", "simulation-config",
+        "--num-supernodes", str(num_supernodes),
+        "--client-resources-num-cpus", str(cpus_per_client),
+    ]
+    result = runner(cmd)
+    return result if isinstance(result, int) else result.returncode
+
+
 def append_manifest(manifest_path: str | Path, entry: dict[str, Any]) -> None:
     path = Path(manifest_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -250,6 +274,14 @@ def run_sweep(
     write, without touching locks, `flwr run`, or the manifest file)."""
     defaults = pyproject_flat_defaults(pyproject_path)
     entries: list[dict[str, Any]] = []
+    # Reconfigured per cell, but only when the value actually changes -- these configs
+    # VARY num-clients across cells (overhead.yaml sweeps 5 -> 150, main_client_scale
+    # 10 -> 50, robustness_r5 likewise), and `num_supernodes` is a federation-level
+    # setting that no --run-config key can carry. Left unset it defaults to 2: a cell
+    # labelled K=100 would train on 2 clients while recording 100, and an overhead curve
+    # measured that way comes out FLAT -- which reads as evidence for the O(K^2) cost
+    # being negligible, the very claim (C3) these sweeps exist to test.
+    configured_supernodes: int | None = None
 
     for run in runs:
         run_id = predict_run_id(defaults, run.overrides)
@@ -270,6 +302,23 @@ def run_sweep(
             entries.append(entry)
             append_manifest(manifest_path, entry)
             continue
+
+        wanted = required_supernodes(defaults, run.overrides)
+        if wanted != configured_supernodes:
+            code = configure_federation(wanted, runner=runner)
+            if code != 0:
+                # Refuse rather than run: a cell at the wrong supernode count either hangs
+                # at round 0 (min-train-nodes above the count) or silently mislabels its
+                # client count. Both are worse than stopping.
+                entry = {
+                    "run_id": run_id, "label": run.label, "group": run.group,
+                    "status": "failed_federation_config", "return_code": code,
+                }
+                entries.append(entry)
+                append_manifest(manifest_path, entry)
+                release_lock(run_id, lock_dir)
+                continue
+            configured_supernodes = wanted
 
         try:
             return_code = execute_run(run, runner=runner)

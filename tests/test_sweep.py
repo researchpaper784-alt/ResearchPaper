@@ -347,3 +347,114 @@ def test_two_variants_sharing_a_key_value_are_still_told_apart(tmp_path: Path) -
     for name, cell in cells.items():
         found = find_result(tmp_path, cell, common, variants)
         assert found is not None and found.name == f"{name}.json", name
+
+
+# ======================================================================================
+# Per-cell federation configuration (fedswarm.sweep)
+# ======================================================================================
+
+
+def test_the_granular_runner_sets_supernodes_per_cell(tmp_path: Path) -> None:
+    """`overhead.yaml` sweeps num-clients from 5 to 150 and `main_client_scale` from 10 to
+    50, but `num_supernodes` is a *federation* setting -- no `--run-config` key can carry
+    it, and it defaults to 2.
+
+    Left unset, a cell labelled K=150 trains on 2 clients while recording 150, and the
+    overhead curve those sweeps exist to produce comes out **flat** -- which reads as
+    evidence that the O(K^2) server cost is negligible, the exact claim (C3) they are meant
+    to test. The runner never set it until 2026-09-19.
+    """
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    calls: list[list[str]] = []
+
+    def recording_runner(cmd: list[str]) -> int:
+        calls.append(cmd)
+        return 0
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[
+            {"name": "k5", "overrides": {"num-clients": 5}},
+            {"name": "k50", "overrides": {"num-clients": 50}},
+        ],
+        seeds=[0],
+        base_overrides={},
+        group="scale",
+        base_dir=REPO_ROOT,
+    )
+    run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=recording_runner,
+    )
+
+    supernode_args = [
+        cmd[cmd.index("--num-supernodes") + 1]
+        for cmd in calls
+        if "--num-supernodes" in cmd
+    ]
+    assert supernode_args == ["5", "50"], f"got {supernode_args}"
+
+
+def test_the_federation_is_not_reconfigured_when_the_count_is_unchanged(tmp_path: Path) -> None:
+    """main.yaml holds num-clients constant across all 576 cells. Shelling out to
+    `flwr federation simulation-config` before each one would add 576 subprocess launches
+    for no change."""
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    calls: list[list[str]] = []
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[
+            {"name": "iid", "overrides": {"regime": "iid"}},
+            {"name": "dir", "overrides": {"regime": "dirichlet"}},
+        ],
+        seeds=[0, 1],
+        base_overrides={"num-clients": 20},
+        group="main",
+        base_dir=REPO_ROOT,
+    )
+    run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: (calls.append(cmd), 0)[1],
+    )
+
+    configured = [c for c in calls if "--num-supernodes" in c]
+    assert len(configured) == 1, "one config call for four cells at a constant K"
+
+
+def test_a_failed_federation_config_refuses_the_cell(tmp_path: Path) -> None:
+    """Running anyway is worse than stopping: the cell either hangs at round 0 forever
+    (min-train-nodes above the supernode count) or silently mislabels its client count."""
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    def failing_runner(cmd: list[str]) -> int:
+        return 1 if "--num-supernodes" in cmd else 0
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[{"name": "k5", "overrides": {"num-clients": 5}}],
+        seeds=[0],
+        base_overrides={},
+        group="scale",
+        base_dir=REPO_ROOT,
+    )
+    entries = run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=failing_runner,
+    )
+
+    assert entries[0]["status"] == "failed_federation_config"
