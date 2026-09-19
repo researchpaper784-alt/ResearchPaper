@@ -22,7 +22,7 @@ base_overrides:
   local-batch-size: 32
   num-rounds: 100
   deterministic: true
-  attack-mode: label_flip
+  attack: label_flip
   regime: dirichlet
   alpha: 0.3
 
@@ -30,7 +30,7 @@ strategies:
   - name: fedavg
     file: configs/strategy/fedavg.yaml
   # Krum's own num-malicious-nodes is a fixed assumption (4 = 20% of 20 clients, the
-  # middle test point below), not dynamically matched to each attacker-fraction cell
+  # middle test point below), not dynamically matched to each attack-fraction cell
   # -- a real, deliberate simplification: this grid's "partitions" axis carries the
   # attacker fraction, and a strategy-specific value that should co-vary with a
   # partition-specific one doesn't have a clean expression in a plain Cartesian
@@ -45,10 +45,10 @@ strategies:
 
 partitions:
   - name: attackers_10pct
-    overrides: {attacker-fraction: 0.10}
+    overrides: {attack-fraction: 0.10}
   - name: attackers_20pct
-    overrides: {attacker-fraction: 0.20}
+    overrides: {attack-fraction: 0.20}
   - name: attackers_30pct
-    overrides: {attacker-fraction: 0.30}
+    overrides: {attack-fraction: 0.30}
 
 seeds: [0, 1, 2]

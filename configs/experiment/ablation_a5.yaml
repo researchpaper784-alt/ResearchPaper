@@ -25,15 +25,15 @@ base_overrides:
 
 strategies:
   - name: full
-    overrides: {fedaco-beta-alignment: 2.0, fedaco-beta-drift: 1.0, fedaco-beta-val-improvement: 1.0, fedaco-beta-data-size: 0.5}
+    overrides: {aco-beta-alignment: 2.0, aco-beta-drift: 1.0, aco-beta-val-improvement: 1.0, aco-beta-data-size: 0.5}
   - name: no_alignment
-    overrides: {fedaco-beta-alignment: 0.0, fedaco-beta-drift: 1.0, fedaco-beta-val-improvement: 1.0, fedaco-beta-data-size: 0.5}
+    overrides: {aco-beta-alignment: 0.0, aco-beta-drift: 1.0, aco-beta-val-improvement: 1.0, aco-beta-data-size: 0.5}
   - name: no_drift
-    overrides: {fedaco-beta-alignment: 2.0, fedaco-beta-drift: 0.0, fedaco-beta-val-improvement: 1.0, fedaco-beta-data-size: 0.5}
+    overrides: {aco-beta-alignment: 2.0, aco-beta-drift: 0.0, aco-beta-val-improvement: 1.0, aco-beta-data-size: 0.5}
   - name: no_val_improvement
-    overrides: {fedaco-beta-alignment: 2.0, fedaco-beta-drift: 1.0, fedaco-beta-val-improvement: 0.0, fedaco-beta-data-size: 0.5}
+    overrides: {aco-beta-alignment: 2.0, aco-beta-drift: 1.0, aco-beta-val-improvement: 0.0, aco-beta-data-size: 0.5}
   - name: no_data_size
-    overrides: {fedaco-beta-alignment: 2.0, fedaco-beta-drift: 1.0, fedaco-beta-val-improvement: 1.0, fedaco-beta-data-size: 0.0}
+    overrides: {aco-beta-alignment: 2.0, aco-beta-drift: 1.0, aco-beta-val-improvement: 1.0, aco-beta-data-size: 0.0}
 
 partitions:
   - name: iid

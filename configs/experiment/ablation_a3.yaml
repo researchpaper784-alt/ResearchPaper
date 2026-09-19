@@ -33,14 +33,14 @@ base_overrides:
 
 strategies:
   - name: data_free
-    overrides: {fedaco-fitness-mode: data_free}
+    overrides: {aco-fitness-mode: data_free}
   - name: server_val
     overrides:
-      fedaco-fitness-mode: server_val
-      fedaco-ants-start: 8
-      fedaco-ants-end: 8
-      fedaco-iters-start: 3
-      fedaco-iters-end: 3
+      aco-fitness-mode: server_val
+      aco-ants-start: 8
+      aco-ants-end: 8
+      aco-iters-start: 3
+      aco-iters-end: 3
 
 partitions:
   - name: iid

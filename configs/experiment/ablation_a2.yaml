@@ -25,11 +25,11 @@ base_overrides:
 
 strategies:
   - name: none
-    overrides: {fedaco-pheromone-persistence: none}
+    overrides: {aco-persistence: none}
   - name: decayed
-    overrides: {fedaco-pheromone-persistence: decayed}
+    overrides: {aco-persistence: decayed}
   - name: full
-    overrides: {fedaco-pheromone-persistence: full}
+    overrides: {aco-persistence: full}
 
 partitions:
   - name: iid

@@ -58,7 +58,22 @@ regimes:
   - name: source_shift
     regime: source_shift
 
-seeds: [0, 1, 2, 3, 4]
+# 8 seeds, not 5, and this is a statistical-power requirement rather than a preference.
+# The signed-rank test's p-value floor is set by the pair count alone: at 5 seeds the
+# smallest two-sided p it can return is 0.0625, so this sweep could not have produced a
+# significant result at alpha=0.05 *under any data* -- not even with every seed favouring
+# FedACO (measured: Cohen's d = 7.9 reported as p = 0.25). 8 seeds moves the floor to
+# 0.0078, which clears 0.05 after Holm-Bonferroni across a family of six comparisons
+# (FedACO vs FedAvg in each regime).
+#
+# Cost: 12 strategies x 6 regimes x 8 seeds = 576 cells, up from 360.
+#
+# ⚠️ If the paper claims significance against ALL 11 baselines in all 6 regimes, that is a
+# 66-comparison family and needs 12 seeds (864 cells). Raise this with that in mind --
+# `make tables` prints the requirement for whatever family the table actually contains,
+# and `analysis.seeds_needed_for` answers it directly. See docs/OPEN_QUESTIONS.md,
+# "5 seeds cannot produce a significant result".
+seeds: [0, 1, 2, 3, 4, 5, 6, 7]
 
 # Shared run settings. Anything here can be overridden per-regime above, and anything
 # declared in pyproject.toml's [tool.flwr.app.config] can be added -- but only what is

@@ -229,6 +229,13 @@ aco-gamma-dispersion = 1.0
 aco-gamma-entropy = 0.1
 aco-normalize-dispersion = true
 aco-fitness-mode = "data_free"
+# Phase 7's A1 control: which optimizer searches the alpha space -- "aco" (the method)
+# or one of the equal-budget controls in aco/controls.py ("random", "coordinate_grid",
+# "pso", "ga"). Declared here because `flwr run` rejects any undeclared --run-config key
+# with a bare "[code: 15]" naming nothing, and exits 0 while doing it: for three weeks
+# every A1 cell would have failed that way, with the runner recording only "no result
+# file". Named `fedaco-` rather than `aco-` to match configs/experiment/ablation_a1.yaml.
+aco-search-method = "aco"
 # The concentration penalty's shape: "entropy" (log K - H(alpha), the method as proposed)
 # or "gini" (sum_k p_k^2 - 1/K). Only the vertex value differs in practice -- log K vs
 # 1 - 1/K -- and that is what decides whether one `aco-gamma-entropy` can hold across K.
@@ -267,6 +274,12 @@ min-available-nodes = 2
 attack = "none"
 attack-fraction = 0.0
 attack-scale = 1.0
+# Phase 8, R4 -- the Gaussian mechanism on every client's update (fl/privacy.py). Not an
+# attack: attacks hit a subset, this hits everyone, and R4 asks whether the method
+# survives noise added for privacy rather than noise added by an adversary.
+# `dp-noise-sigma = 0` turns the whole mechanism off, clipping included.
+dp-noise-sigma = 0.0
+dp-clip-norm = 1.0
 
 # Run-level.
 num-rounds = 2

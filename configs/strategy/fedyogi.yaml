@@ -2,8 +2,8 @@
 # second-moment update instead of FedAdam's Adam-style one. Built-in
 # flwr.serverapp.strategy.FedYogi.
 strategy-name: fedyogi
-fedopt-eta: 0.01
-fedopt-eta-l: 0.0316
+fedyogi-eta: 0.01
+fedyogi-eta-l: 0.0316
 fedopt-beta1: 0.9
 fedopt-beta2: 0.99
 fedopt-tau: 0.001

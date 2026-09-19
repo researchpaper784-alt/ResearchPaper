@@ -32,15 +32,15 @@ base_overrides:
 
 strategies:
   - name: aco
-    overrides: {fedaco-search-method: aco}
+    overrides: {aco-search-method: aco}
   - name: random
-    overrides: {fedaco-search-method: random}
+    overrides: {aco-search-method: random}
   - name: coordinate_grid
-    overrides: {fedaco-search-method: coordinate_grid}
+    overrides: {aco-search-method: coordinate_grid}
   - name: pso
-    overrides: {fedaco-search-method: pso}
+    overrides: {aco-search-method: pso}
   - name: ga
-    overrides: {fedaco-search-method: ga}
+    overrides: {aco-search-method: ga}
 
 partitions:
   - name: iid

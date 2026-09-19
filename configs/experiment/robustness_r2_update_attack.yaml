@@ -22,7 +22,7 @@ base_overrides:
   local-batch-size: 32
   num-rounds: 100
   deterministic: true
-  attack-noise-sigma: 0.5
+  attack-scale: 0.5
   regime: dirichlet
   alpha: 0.3
 
@@ -38,16 +38,16 @@ strategies:
 
 partitions:
   - name: gaussian_10pct
-    overrides: {attack-mode: gaussian_noise, attacker-fraction: 0.10}
+    overrides: {attack: gaussian, attack-fraction: 0.10}
   - name: gaussian_20pct
-    overrides: {attack-mode: gaussian_noise, attacker-fraction: 0.20}
+    overrides: {attack: gaussian, attack-fraction: 0.20}
   - name: gaussian_30pct
-    overrides: {attack-mode: gaussian_noise, attacker-fraction: 0.30}
+    overrides: {attack: gaussian, attack-fraction: 0.30}
   - name: sign_flip_10pct
-    overrides: {attack-mode: sign_flip, attacker-fraction: 0.10}
+    overrides: {attack: sign_flip, attack-fraction: 0.10}
   - name: sign_flip_20pct
-    overrides: {attack-mode: sign_flip, attacker-fraction: 0.20}
+    overrides: {attack: sign_flip, attack-fraction: 0.20}
   - name: sign_flip_30pct
-    overrides: {attack-mode: sign_flip, attacker-fraction: 0.30}
+    overrides: {attack: sign_flip, attack-fraction: 0.30}
 
 seeds: [0, 1, 2]

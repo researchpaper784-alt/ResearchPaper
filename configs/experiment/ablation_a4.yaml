@@ -25,13 +25,13 @@ base_overrides:
 
 strategies:
   - name: full
-    overrides: {fedaco-gamma-alignment: 1.0, fedaco-gamma-dispersion: 0.50, fedaco-gamma-entropy: 0.10}
+    overrides: {aco-gamma-alignment: 1.0, aco-gamma-dispersion: 0.50, aco-gamma-entropy: 0.10}
   - name: no_alignment
-    overrides: {fedaco-gamma-alignment: 0.0, fedaco-gamma-dispersion: 0.50, fedaco-gamma-entropy: 0.10}
+    overrides: {aco-gamma-alignment: 0.0, aco-gamma-dispersion: 0.50, aco-gamma-entropy: 0.10}
   - name: no_dispersion
-    overrides: {fedaco-gamma-alignment: 1.0, fedaco-gamma-dispersion: 0.0, fedaco-gamma-entropy: 0.10}
+    overrides: {aco-gamma-alignment: 1.0, aco-gamma-dispersion: 0.0, aco-gamma-entropy: 0.10}
   - name: no_entropy
-    overrides: {fedaco-gamma-alignment: 1.0, fedaco-gamma-dispersion: 0.50, fedaco-gamma-entropy: 0.0}
+    overrides: {aco-gamma-alignment: 1.0, aco-gamma-dispersion: 0.50, aco-gamma-entropy: 0.0}
 
 partitions:
   - name: iid

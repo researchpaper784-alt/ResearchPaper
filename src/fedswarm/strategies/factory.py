@@ -240,6 +240,11 @@ def _build_fedaco(
         # Shares the run-level seed so the colony is reproducible with everything else.
         seed=int(run_config.get("seed", 0)),
         fitness_mode=str(run_config.get("aco-fitness-mode", FedACOConfig.fitness_mode)),
+        # Phase 7 A1. FedACO validates the value at construction, so a typo fails
+        # there rather than inside a round.
+        search_method=str(
+            run_config.get("aco-search-method", FedACOConfig.search_method)
+        ),
         colony=colony,
         pheromone=pheromone,
         fitness=fitness,

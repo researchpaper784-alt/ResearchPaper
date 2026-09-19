@@ -98,3 +98,60 @@ def test_every_data_config_file_sets_regime() -> None:
         with open(path) as f:
             overrides = yaml.safe_load(f)
         assert "regime" in overrides, f"{path.name} never sets regime"
+
+
+def test_every_config_key_is_declared_in_pyproject() -> None:
+    """The check that was missing, and the reason every granular ablation and three of
+    the robustness sweeps would have failed on contact.
+
+    `flwr run` rejects any `--run-config` key absent from `[tool.flwr.app.config]` with a
+    bare `[code: 15] Invalid run configuration` that names no key -- **and exits 0 while
+    doing it**, so a sweep runner sees a successful subprocess and simply records "no
+    result file". Verified live against `fedaco-search-method`.
+
+    This project has now been bitten by that four separate times: the partition keys, the
+    FedACO knobs, every baseline hyperparameter, and then the whole `fedaco-*` family
+    that the granular configs used while pyproject declared only `aco-*`. The other
+    checks in this file parse the configs and resolve their file references, which all
+    passed throughout -- nothing compared the keys against what flwr would accept.
+    """
+    import tomllib
+
+    declared = set(
+        tomllib.load((REPO_ROOT / "pyproject.toml").open("rb"))["tool"]["flwr"]["app"]["config"]
+    )
+    # Sweep-runner bookkeeping, not run config: these never reach `flwr run --run-config`.
+    runner_only = {"output-dir", "name", "file", "overrides"}
+
+    offenders: dict[str, list[str]] = {}
+    for path in sorted((REPO_ROOT / "configs").rglob("*.yaml")):
+        used: set[str] = set()
+
+        def collect(node) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key in ("overrides", "base_overrides") and isinstance(value, dict):
+                        used.update(value)
+                    collect(value)
+            elif isinstance(node, list):
+                for value in node:
+                    collect(value)
+
+        spec = yaml.safe_load(path.read_text())
+        collect(spec)
+        if isinstance(spec, dict):
+            used.update(spec.get("common") or {})
+            for section in ("variants", "regimes"):
+                for entry in spec.get(section) or []:
+                    used.update(k for k in entry if k != "name")
+            # configs/strategy/*.yaml and configs/data/*.yaml are flat run_config maps.
+            if path.parent.name in ("strategy", "data"):
+                used.update(spec)
+
+        missing = sorted(used - declared - runner_only)
+        if missing:
+            offenders[str(path.relative_to(REPO_ROOT))] = missing
+
+    assert not offenders, "configs use keys `flwr run` will reject:\n" + "\n".join(
+        f"  {name}: {', '.join(keys)}" for name, keys in offenders.items()
+    )

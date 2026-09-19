@@ -89,7 +89,7 @@ iid-band:
 	.venv/bin/python scripts/check_iid_band.py --results-dir results/fl
 
 # Always run `make main-plan` first: it prints the cell count and a cost projection, and
-# refuses nothing, so it is the cheapest way to find out that 360 cells x 100 rounds is
+# refuses nothing, so it is the cheapest way to find out that 576 cells x 100 rounds is
 # more compute than you have before committing to it.
 main-plan:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml --dry-run

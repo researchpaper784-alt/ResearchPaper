@@ -32,9 +32,9 @@ base_overrides:
 
 strategies:
   - name: adaptive_default
-    overrides: {fedaco-ants-start: 30, fedaco-ants-end: 10, fedaco-iters-start: 10, fedaco-iters-end: 4}
+    overrides: {aco-ants-start: 30, aco-ants-end: 10, aco-iters-start: 10, aco-iters-end: 4}
   - name: fixed
-    overrides: {fedaco-ants-start: 20, fedaco-ants-end: 20, fedaco-iters-start: 7, fedaco-iters-end: 7}
+    overrides: {aco-ants-start: 20, aco-ants-end: 20, aco-iters-start: 7, aco-iters-end: 7}
 
 partitions:
   - name: iid

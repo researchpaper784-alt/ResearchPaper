@@ -14,6 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from make_tables import (  # noqa: E402
+    add_significance,
+    power_note,
     _variant_of,
     add_deltas,
     cell_key,
@@ -175,3 +177,103 @@ def test_rows_without_health_metrics_render_as_dashes_not_zeros() -> None:
 
     assert rows[0]["pheromone_entropy"] is None
     assert "| — | — |" in to_markdown(rows, "fedavg")
+
+
+# ======================================================================================
+# Significance, and whether the table can support the claim at all
+# ======================================================================================
+
+
+def _best_case(n_seeds: int, regimes=("iid",)):
+    """FedACO ahead of FedAvg on every seed in every regime -- the most favourable data
+    that can exist. Any "not significant" here is about the sample size."""
+    results = []
+    for regime in regimes:
+        for seed in range(n_seeds):
+            results.append(_result("fedavg", regime, seed, 0.880 + 0.002 * seed))
+            results.append(_result("fedaco", regime, seed, 0.905 + 0.002 * seed))
+    return results
+
+
+def _rows(results, expected_seeds, alternative="two-sided"):
+    rows = summarize(results, expected_seeds)
+    add_deltas(rows, "fedavg")
+    add_significance(rows, "fedavg", alternative)
+    return rows
+
+
+def test_the_table_reports_a_test_not_just_a_margin() -> None:
+    """Mean +/- std invites a reader to eyeball two overlapping error bars and conclude
+    whatever they arrived believing. At n=5 the seed spread is comparable to the margins
+    these methods differ by, which is exactly when that goes wrong."""
+    rows = _rows(_best_case(5), 5)
+    aco = next(r for r in rows if r["strategy"] == "fedaco")
+
+    assert aco["p_value"] is not None
+    assert aco["p_value_holm"] is not None
+    assert aco["cohens_d"] > 0
+
+
+def test_the_baseline_is_not_tested_against_itself() -> None:
+    rows = _rows(_best_case(5), 5)
+    fedavg = next(r for r in rows if r["strategy"] == "fedavg")
+
+    assert fedavg["p_value"] is None and fedavg["cohens_d"] is None
+
+
+def test_holm_corrects_across_the_whole_table_not_per_regime() -> None:
+    """Correcting inside each regime and then reporting six regimes under-corrects by
+    exactly the factor the correction exists to supply."""
+    one_regime = _rows(_best_case(8, ("iid",)), 8)
+    six_regimes = _rows(_best_case(8, tuple(f"r{i}" for i in range(6))), 8)
+
+    single = next(r for r in one_regime if r["strategy"] == "fedaco")["p_value_holm"]
+    family = next(r for r in six_regimes if r["strategy"] == "fedaco")["p_value_holm"]
+
+    assert family > single, "a larger family must not get the same adjusted p"
+
+
+def test_a_table_that_cannot_reach_alpha_says_so() -> None:
+    """The check that makes the statistics honest rather than decorative.
+
+    At 5 seeds the signed-rank test's smallest possible two-sided p is 0.0625, so the
+    main sweep's planned seed count cannot produce a significant result at alpha=0.05 --
+    with Cohen's d near 8 and every seed favouring the method. Reporting "not
+    significant" there without saying why would be the single most misleading number the
+    paper could contain.
+    """
+    rows = _rows(_best_case(5), 5)
+    note = power_note(rows, alpha=0.05, alternative="two-sided")
+
+    assert note is not None
+    assert "cannot reach" in note
+    assert "6 seeds" in note, "it has to say what would be enough for this family"
+
+    # And the requirement scales with the family -- asserted as the relationship rather
+    # than a hard-coded count, because the count depends on how many claims the table
+    # makes and is exactly the thing that is easy to miscount by hand.
+    from fedswarm.analysis import seeds_needed_for
+
+    assert seeds_needed_for(0.05, 6) > seeds_needed_for(0.05, 1)
+    assert seeds_needed_for(0.05, 66) > seeds_needed_for(0.05, 6)
+    # And the effect it is failing to detect is enormous, which is the point.
+    assert next(r for r in rows if r["strategy"] == "fedaco")["cohens_d"] > 3
+
+
+def test_the_warning_is_silent_when_the_test_can_actually_fire() -> None:
+    """The other half: a check that always warns is noise, not a safeguard."""
+    rows = _rows(_best_case(8), 8)
+
+    assert power_note(rows, alpha=0.05, alternative="two-sided") is None
+    assert next(r for r in rows if r["strategy"] == "fedaco")["p_value_holm"] < 0.05
+
+
+def test_a_one_sided_test_is_available_but_not_the_default() -> None:
+    """Halving the achievable p is legitimate for a directional hypothesis and illegitimate
+    if chosen after seeing the two-sided result, so it must be opt-in."""
+    two_sided = _rows(_best_case(6), 6, "two-sided")
+    one_sided = _rows(_best_case(6), 6, "greater")
+
+    p_two = next(r for r in two_sided if r["strategy"] == "fedaco")["p_value"]
+    p_one = next(r for r in one_sided if r["strategy"] == "fedaco")["p_value"]
+    assert p_one < p_two
