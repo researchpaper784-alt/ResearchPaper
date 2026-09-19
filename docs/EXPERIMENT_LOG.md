@@ -1458,3 +1458,76 @@ the requirement for whatever family the table actually contains, so it surfaces 
 claim is written rather than after.
 
 440 tests pass, ruff clean; all 16 configs dry-run clean through their own runners.
+
+## 2026-09-19 (later) -- the sweep plan, deduplicated: 2,576 cells -> 1,586
+
+Acting on three decisions at once: keep the 8-seed floor only where a p-value is
+actually claimed, revert it elsewhere, and resolve the two overlapping sweep families.
+
+### Seeds: 8 where a claim rests on them, 5 everywhere else
+
+`main.yaml` and `ablation_a1.yaml` stay at 8. Those are the two places the paper says
+"significantly": the headline FedACO-vs-FedAvg comparison, and the make-or-break control
+asking whether ACO beats random search at equal budget. At 5 seeds neither could produce
+p < 0.05 under any data.
+
+Everything else went back to 5. The other ablations and the robustness sweeps are read as
+*descriptions* -- which component carries the result, how performance degrades under
+attack -- and effect sizes and degradation curves carry that without a significance test.
+Raising them cost ~640 cells and strengthened no claim in the paper.
+
+### The overlap was worse than duplicated compute
+
+Matching the two ablation families by *run-config key* rather than by label found five
+duplicated variants -- and a collision:
+
+| key varied | `ablation_all` called it | granular called it |
+|---|---|---|
+| `aco-persistence` | **A1** | **A2** |
+| `aco-fitness-mode` | A3 | A3 |
+| `model-norm` | A9 | A9 |
+| `aco-target-sum` | shrinkage | A7 |
+| `aco-gamma-dispersion` | gamma_dispersion | A4 |
+
+**`ablation_all`'s "A1" was persistence; `ablation_a1.yaml` is the search-method control.
+Both wrote to `results/fl/ablation`.** "A1" in a results table meant two different
+experiments depending on which runner produced it, and nothing downstream could have told
+them apart. The ~176 duplicated cells were the smaller half of that problem.
+
+`robustness.yaml` was the same shape: its label_flip, sign_flip, gaussian and
+partial-participation variants all duplicated R1/R2/R3, which sweep *three* attacker
+fractions where the combined file sampled one or two -- the finer grid strictly contains
+the coarser one, so removing them loses nothing.
+
+Both combined files now keep only what no granular config covers:
+
+- `ablation_all`: the safety-fallback ablation and the concentration-penalty shape pair.
+  288 -> 60 cells.
+- `robustness`: the `scaled` magnitude-only attack. 360 -> 75 cells. Kept deliberately --
+  it is the one attack an alignment-based heuristic cannot see, since FedACO's `a_k` is a
+  cosine and is blind to a scaled update, so only the norm ratio `r_k` can catch it.
+  Dropping it would remove the single case that separates the method's two heuristics.
+
+### A live bug found while updating the Makefile
+
+`make ablations-granular` globbed `configs/experiment/ablation_a*.yaml`, which also
+matches `ablation_all.yaml` -- a different YAML shape the granular runner cannot parse
+(`KeyError: 'partitions'`). The target would have died partway through the ablation set.
+Narrowed to `ablation_a[0-9].yaml`.
+
+### The plan now
+
+| | cells |
+|---|---:|
+| main (8 seeds) | 576 |
+| ablation_all | 60 |
+| robustness | 75 |
+| ablation_a1 (8 seeds) | 80 |
+| ablation_a2-a9 | 525 |
+| robustness_r1-r5 | 270 |
+| **total** | **1,586** |
+
+Down from 2,576 with both families at 8 seeds. Run both targets in each family -- they no
+longer overlap.
+
+440 tests pass, ruff clean.

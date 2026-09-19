@@ -51,9 +51,14 @@ partitions:
   - name: attackers_30pct
     overrides: {attack-fraction: 0.30}
 
-# 8 seeds, raised from 3. The signed-rank test's p-value floor is set by the pair
-# count alone: at 3 seeds the smallest two-sided p it can return is 0.2500, so this
-# sweep could not produce a significant result at alpha=0.05 under any data. 8 seeds moves
-# the floor to 0.0078. See docs/OPEN_QUESTIONS.md, "5 seeds cannot produce a significant
-# result", and `analysis.seeds_needed_for` for the family-size dependence.
-seeds: [0, 1, 2, 3, 4, 5, 6, 7]
+# 5 seeds, deliberately. These sweeps are read as *descriptions* -- which component
+# carries the result, how performance degrades under attack -- and effect sizes and
+# degradation curves carry that without a significance test. The 8-seed floor is
+# reserved for the two places a p-value is actually claimed: main.yaml's headline
+# comparison and ablation_a1's ACO-vs-random-search control. Raising these too costs
+# ~640 cells and strengthens no claim in the paper.
+#
+# ⚠️ If a claim of the form "X significantly beats Y" ends up resting on this sweep,
+# it needs 8 seeds like the others -- `make tables` prints the requirement for
+# whatever family the table contains. See docs/OPEN_QUESTIONS.md.
+seeds: [0, 1, 2, 3, 4]

@@ -32,109 +32,66 @@ regimes:
     regime: quantity_skew
     skew-sigma: 1.0
 
-# 8 seeds, raised from 5. The signed-rank test's p-value floor is set by the pair
-# count alone: at 5 seeds the smallest two-sided p it can return is 0.0625, so this
-# sweep could not produce a significant result at alpha=0.05 under any data. 8 seeds moves
-# the floor to 0.0078. See docs/OPEN_QUESTIONS.md, "5 seeds cannot produce a significant
-# result", and `analysis.seeds_needed_for` for the family-size dependence.
-seeds: [0, 1, 2, 3, 4, 5, 6, 7]
+# 5 seeds, deliberately. These sweeps are read as *descriptions* -- which component
+# carries the result, how performance degrades under attack -- and effect sizes and
+# degradation curves carry that without a significance test. The 8-seed floor is
+# reserved for the two places a p-value is actually claimed: main.yaml's headline
+# comparison and ablation_a1's ACO-vs-random-search control. Raising these too costs
+# ~640 cells and strengthens no claim in the paper.
+#
+# ⚠️ If a claim of the form "X significantly beats Y" ends up resting on this sweep,
+# it needs 8 seeds like the others -- `make tables` prints the requirement for
+# whatever family the table contains. See docs/OPEN_QUESTIONS.md.
+seeds: [0, 1, 2, 3, 4]
 
 variants:
+  # ⚠️ This file is NOT "all the ablations", despite its name, and must not be run as if
+  # it were. A1-A9 live in configs/experiment/ablation_a[1-9].yaml and are driven by
+  # scripts/run_sweep_granular.py. What remains here is only what that family does not
+  # cover.
+  #
+  # Five variants were removed on 2026-09-19 because a granular config already varied the
+  # same run-config key, matched by key rather than by label:
+  #
+  #   removed from here        key varied                 covered by
+  #   a1_persistence_none/full aco-persistence            ablation_a2.yaml
+  #   a3_fitness_server_val    aco-fitness-mode           ablation_a3.yaml
+  #   a9_batchnorm             model-norm                 ablation_a9.yaml
+  #   shrinkage_0.8/1.2        aco-target-sum             ablation_a7.yaml
+  #   gamma_dispersion_0.5/2.0 aco-gamma-dispersion       ablation_a4.yaml
+  #
+  # Those cost ~176 duplicated cells, but the compute was the smaller problem. **The
+  # labels collided**: this file called persistence "A1" while ablation_a1.yaml is the
+  # ACO-vs-random-search control, and both wrote to results/fl/ablation. "A1" in a
+  # results table meant two different experiments depending on which runner produced it.
+  # Nothing downstream could have distinguished them.
+
   # The control. Everything below is differenced against this.
   - name: default
-
-  # --- A1: cross-round pheromone persistence -------------------------------------
-  # The "Adaptive" in the project's own title. aco/pheromone.py's docstring states the
-  # stake plainly: remove persistence and the swarm-intelligence framing "should show a
-  # measurable drop, or the framing is decorative". This is the ablation that tests it.
-  #
-  # Read alongside the health check: if `make health` already reports the colony INERT,
-  # persistence="none" will differ from default by ~nothing, and that null result is
-  # about tau being flat rather than about persistence not mattering.
-  - name: a1_persistence_none
-    aco-persistence: none
-  - name: a1_persistence_full
-    aco-persistence: full
-
-  # --- A3: fitness mode ----------------------------------------------------------
-  # `server_val` is the upper-bound reference: it scores candidates by materializing a
-  # model and evaluating macro-F1 on the server val split, which assumes the server holds
-  # data -- the assumption `data_free` exists to avoid. It is orders of magnitude more
-  # expensive per evaluation, hence the heavily reduced colony budget, which is the plan's
-  # own prescription rather than a shortcut.
-  #
-  # `client_probe` is deliberately absent: its broadcast/collect round-trip is not wired
-  # into the strategy (FedACO rejects the mode at construction rather than silently
-  # accepting it), so a variant naming it would fail every cell.
-  - name: a3_fitness_server_val
-    aco-fitness-mode: server_val
-    aco-ants-start: 6
-    aco-ants-end: 4
-    aco-iters-start: 3
-    aco-iters-end: 2
-
-  # --- A9: normalization, the confound control -----------------------------------
-  # GroupNorm is the federated default because BatchNorm's running statistics aggregate
-  # badly across non-IID clients -- a known FL pathology, not specific to this method.
-  # The centralized numbers already show BatchNorm slightly *ahead* on pooled data
-  # (0.9300 vs 0.9203), so this variant separates "GroupNorm helps FedACO" from
-  # "GroupNorm helps any federated method", which the centralized run cannot settle.
-  - name: a9_batchnorm
-    model-norm: batchnorm
-
-  # --- Global shrinkage s --------------------------------------------------------
-  # docs/OPEN_QUESTIONS.md records s as a deliberate Phase 4 scope reduction: it is a
-  # fixed config value, swept here as fixed values rather than searched per-round. The
-  # per-round search would add a (K+1)-th decision to the construction graph and is not
-  # implemented.
-  - name: shrinkage_0.8
-    aco-target-sum: 0.8
-  - name: shrinkage_1.2
-    aco-target-sum: 1.2
 
   # --- The safety fallback -------------------------------------------------------
   # With the fallback off, FedACO can lose to FedAvg outright. That is the point: the
   # default configuration silently *becomes* FedAvg whenever the colony loses, so the
   # main table cannot separate "the colony helped" from "the fallback protected it".
-  # This variant is how that separation gets measured.
+  # Not in the plan's A-list and not covered by any granular config.
   - name: no_safety_fallback
     aco-safety-fallback: false
 
   # --- The concentration penalty's shape -----------------------------------------
   # Dispersion is a weighted variance, so it is exactly zero at a single-client vertex:
-  # the fitness pays nothing for discarding every client but one, and the only thing
-  # standing against that is `gamma_3 * P_max(K)` -- log K under the proposed "entropy"
-  # penalty, 1 - 1/K under "gini". Dispersion is bounded and sits near 1 at every K after
-  # normalization, so "gini" is on its scale and "entropy" is not: the gamma_3 needed to
-  # rule out the degenerate vertex varies 2.7-4.4x across K in {2..50} under "entropy"
-  # and 1.01-1.53x under "gini" (docs/EXPERIMENT_LOG.md, 2026-09-18).
+  # the fitness pays nothing for discarding every client but one, and the only guard is
+  # `gamma_3 * P_max(K)` -- log K under the proposed "entropy" penalty, 1 - 1/K under
+  # "gini". The gamma_3 needed to rule out the degenerate vertex varies 2.7-4.4x across
+  # K under "entropy" and 1.01-1.53x under "gini" (docs/EXPERIMENT_LOG.md, 2026-09-18).
   #
-  # Measured on synthetic deltas, which is why this is an ablation rather than a changed
-  # default: whether it matters on real brain-MRI deltas at K=20 is what these cells
-  # settle. Read them next to `corner_margin`, which is logged per round -- if the
-  # default's margin is comfortably negative at this K, the two variants should differ by
-  # very little, and that null result is the useful answer.
+  # `penalty_entropy_strong` runs the *proposed* shape at the same gamma_3, so a win for
+  # gini cannot be confounded with "gamma_3 was simply too small". Read both next to
+  # `corner_margin`, which is logged per round.
   - name: penalty_gini
     aco-concentration-penalty: gini
-    # gamma_3 is re-pointed with the shape, not held fixed: the two penalties have
-    # different vertex values, so the same number means a different strength under each.
-    # 0.23 is the measured K-invariant requirement at heterogeneity 1.0, rounded up.
     aco-gamma-entropy: 0.25
-  # The same strengthening applied to the *proposed* shape, so `penalty_gini` is not
-  # confounded with "gamma_3 was simply too small". Under "entropy" this is well above
-  # every K's requirement, which is the point: it isolates the shape from the level.
   - name: penalty_entropy_strong
     aco-gamma-entropy: 0.25
-
-  # --- gamma_2, the dispersion weight --------------------------------------------
-  # Left at 1.0 in the Phase 4 close-out rather than retuned, because normalizing
-  # dispersion by trace(G)/K made it co-equal with alignment and silently changing a
-  # hyperparameter that paper/ALGORITHM.md specifies is not a bug fix
-  # (docs/EXPERIMENT_LOG.md, 2026-09-17). This is where that decision gets tested.
-  - name: gamma_dispersion_0.5
-    aco-gamma-dispersion: 0.5
-  - name: gamma_dispersion_2.0
-    aco-gamma-dispersion: 2.0
 
 common:
   num-clients: 20
