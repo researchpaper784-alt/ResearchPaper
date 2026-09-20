@@ -489,3 +489,92 @@ def test_a_degenerate_base_is_reported_as_impossible_not_as_a_big_number() -> No
     vertex = torch.tensor([1.0, 0.0, 0.0, 0.0])
 
     assert required_gamma_entropy(gram, vertex, DataFreeFitnessConfig()) == float("inf")
+
+
+# ======================================================================================
+# dispersion_reference -- removing the vertex degeneracy at its root
+# ======================================================================================
+
+
+@pytest.mark.parametrize("num_clients", [4, 10, 20])
+def test_a_fixed_reference_charges_a_vertex_what_a_moving_one_does_not(num_clients: int) -> None:
+    """The root of the whole problem, stated as the difference between the two modes.
+
+    `weighted_dispersion` is a weighted variance about `Delta(alpha)`, and at `alpha = e_j`
+    the mean *is* `delta_j` -- so the term is exactly zero and a single-client answer pays
+    nothing. About a fixed reference the same vertex costs `||delta_j - Delta_base||^2`, which
+    is large. This is not "small vs smaller": one is zero.
+    """
+    from fedswarm.aco.gram import dispersion_about_reference, weighted_dispersion
+
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    vertex = torch.eye(num_clients)[0]
+
+    assert float(weighted_dispersion(vertex, gram.gram)) == pytest.approx(0.0, abs=1e-9)
+    assert float(dispersion_about_reference(vertex, base, gram.gram)) > 0.1
+
+
+@pytest.mark.parametrize("num_clients", [10, 20])
+@pytest.mark.parametrize("noise", [1.5, 3.0])
+def test_the_fixed_reference_kills_the_corner_at_the_default_penalty(
+    num_clients: int, noise: float
+) -> None:
+    """Both halves at once, at `gamma_entropy=0.1`, which is what makes this the fix rather
+    than another trade.
+
+    Raising `gamma_entropy` to 0.6 also made the margin negative -- and pushed the whole
+    landscape down with it: the MAX-MIN rule deposits `rho * Q * max(F, 0)`, so 7 of 15 real
+    rounds deposited nothing, tau never moved, and FedACO finished 0.21 macro-F1 behind plain
+    FedAvg. A fix has to leave the fitness positive where the colony actually searches.
+    """
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, corner_margin
+
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=noise), trim_fraction=0.2)
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    cfg = DataFreeFitnessConfig(gamma_entropy=0.1, dispersion_reference="base")
+
+    assert corner_margin(gram, base, cfg) < 0.0, "the corner still wins"
+    # The FedAvg point -- where the colony starts and what it is judged against -- must stay
+    # in positive territory, or the deposit rule silently switches the mechanism off.
+    assert DataFreeFitness(gram, cfg, reference=base).evaluate(base) > 0.0
+
+
+def test_base_mode_refuses_to_run_without_a_reference() -> None:
+    """A silently-uniform default would remove the vertex degeneracy too, so every diagnostic
+    would look repaired while the term measured spread about a point the aggregation never
+    uses. That is the failure mode this project keeps finding; refusing is cheaper."""
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig
+
+    gram = precompute_gram(_consensus_deltas(4, noise=1.5))
+
+    with pytest.raises(ValueError, match="needs `reference`"):
+        DataFreeFitness(gram, DataFreeFitnessConfig(dispersion_reference="base"))
+
+
+def test_corner_margin_under_base_mode_agrees_with_evaluating_the_vertices() -> None:
+    """`corner_margin`'s closed form assumes dispersion vanishes at a vertex, which is false
+    in this mode -- so it switches to direct evaluation. Same quantity, checked."""
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, corner_margin
+
+    num_clients = 6
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    cfg = DataFreeFitnessConfig(gamma_entropy=0.1, dispersion_reference="base")
+    fitness = DataFreeFitness(gram, cfg, reference=base)
+
+    direct = max(
+        fitness.evaluate(torch.eye(num_clients)[j]) for j in range(num_clients)
+    ) - fitness.evaluate(base)
+
+    assert corner_margin(gram, base, cfg) == pytest.approx(direct, abs=1e-6)
+
+
+def test_the_default_dispersion_reference_is_still_the_method_as_proposed() -> None:
+    """Every result produced before 2026-09-20 used the moving mean. Changing the default
+    would silently make them incomparable with anything produced after -- and "base" is
+    supported by synthetic deltas so far, which is exactly the evidence that mislead this
+    project on the level set."""
+    from fedswarm.aco.fitness import DataFreeFitnessConfig
+
+    assert DataFreeFitnessConfig().dispersion_reference == "weighted_mean"

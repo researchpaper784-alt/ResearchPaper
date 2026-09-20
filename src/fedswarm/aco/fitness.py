@@ -14,7 +14,13 @@ from typing import Protocol
 import torch
 from torch.utils.data import DataLoader
 
-from fedswarm.aco.gram import GramPrecompute, apply_delta, weighted_dispersion, weighted_norm_sq
+from fedswarm.aco.gram import (
+    GramPrecompute,
+    apply_delta,
+    dispersion_about_reference,
+    weighted_dispersion,
+    weighted_norm_sq,
+)
 from fedswarm.eval.evaluator import evaluate as evaluate_model
 
 
@@ -110,6 +116,26 @@ class DataFreeFitnessConfig:
     # it is the method as proposed; "gini" exists so the Phase 7 ablation can measure the
     # choice on real data instead of the question being settled on synthetic deltas.
     concentration_penalty: str = "entropy"
+    # What the dispersion term measures spread ABOUT. "weighted_mean" is the method as
+    # proposed (plan §4.5): a weighted variance about `Delta(alpha)`, which moves with alpha.
+    # "base" measures it about `Delta(base_weights)` -- the FedAvg point -- which does not.
+    #
+    # This is not a tuning knob, it is the fix for a structural degeneracy. A weighted
+    # variance about its own mean is exactly zero at every vertex, so "discard every client
+    # but one" pays nothing for its dispersion and only `gamma_3 * P_max` stands against the
+    # alignment it gets for free. The first real GPU runs measured the consequence: at the
+    # default `gamma_entropy=0.1` the corner outscored the FedAvg point in 15/15 rounds, and
+    # the 0.6 needed to stop it pushed the whole landscape negative -- the MAX-MIN rule
+    # deposits `rho * Q * max(F, 0)`, so 7 of 15 rounds deposited nothing, the pheromone never
+    # moved, and FedACO finished 0.21 macro-F1 BEHIND plain FedAvg.
+    #
+    # Under "base" a vertex costs `||delta_j - Delta_base||^2`, which is large. The default
+    # stays "weighted_mean" because that is the method as proposed and every result so far
+    # used it; "base" is selectable so the choice is measured rather than asserted.
+    dispersion_reference: str = "weighted_mean"
+
+
+DISPERSION_REFERENCES = ("weighted_mean", "base")
 
 
 class DataFreeFitness:
@@ -132,9 +158,28 @@ class DataFreeFitness:
     [0.763, 0.933] and tau develops real spread in all 9 configs.
     """
 
-    def __init__(self, gram: GramPrecompute, config: DataFreeFitnessConfig | None = None) -> None:
+    def __init__(
+        self,
+        gram: GramPrecompute,
+        config: DataFreeFitnessConfig | None = None,
+        reference: torch.Tensor | None = None,
+    ) -> None:
         self.gram = gram
         self.config = config or DataFreeFitnessConfig()
+        if self.config.dispersion_reference not in DISPERSION_REFERENCES:
+            raise ValueError(
+                f"Unknown dispersion_reference {self.config.dispersion_reference!r} "
+                f"(expected one of {DISPERSION_REFERENCES})"
+            )
+        if self.config.dispersion_reference == "base" and reference is None:
+            # Refused rather than defaulted to uniform. A silently-uniform reference would
+            # still remove the vertex degeneracy, so every diagnostic would look repaired
+            # while the term measured spread about a point the aggregation never uses.
+            raise ValueError(
+                "dispersion_reference='base' needs `reference` (the base_weights whose "
+                "Delta the spread is measured about); there is no safe default"
+            )
+        self.reference = reference
 
     def evaluate(self, alpha: torch.Tensor) -> float:
         eps = 1e-12
@@ -142,7 +187,10 @@ class DataFreeFitness:
         alignment = (alpha @ self.gram.g_rob) / (
             torch.sqrt(a_g_a) * math.sqrt(max(self.gram.rob_norm_sq, eps))
         )
-        dispersion = weighted_dispersion(alpha, self.gram.gram)
+        if self.config.dispersion_reference == "base":
+            dispersion = dispersion_about_reference(alpha, self.reference, self.gram.gram)
+        else:
+            dispersion = weighted_dispersion(alpha, self.gram.gram)
         if self.config.normalize_dispersion:
             dispersion = dispersion / max(self.gram.mean_sq_norm, eps)
         penalty = concentration_penalty(alpha, self.config.concentration_penalty)
@@ -192,18 +240,28 @@ def corner_margin(
     answer outscores the reference the method is judged against.
     """
     config = config or DataFreeFitnessConfig()
-    eps = 1e-12
-    norms = torch.diagonal(gram.gram).clamp_min(eps).sqrt()
-    cosines = gram.g_rob / (norms * math.sqrt(max(gram.rob_norm_sq, eps)))
-
     num_clients = int(base_weights.numel())
-    best_vertex = config.gamma_alignment * float(
-        cosines.max()
-    ) - config.gamma_entropy * _max_concentration_penalty(
-        num_clients, config.concentration_penalty
-    )
-    fedavg = DataFreeFitness(gram, config).evaluate(base_weights)
-    return best_vertex - fedavg
+    fitness = DataFreeFitness(gram, config, reference=base_weights)
+
+    if config.dispersion_reference == "base":
+        # The closed form above does not apply: dispersion no longer vanishes at a vertex,
+        # which is the entire point of that mode. Evaluating F at each of the K vertices is
+        # K * O(K) = O(K^2) -- the same order the closed form was written to achieve -- so
+        # nothing is lost by computing it directly, and a second copy of the algebra that
+        # could drift from `evaluate` is avoided.
+        identity = torch.eye(num_clients, dtype=base_weights.dtype)
+        best_vertex = max(fitness.evaluate(identity[j]) for j in range(num_clients))
+    else:
+        eps = 1e-12
+        norms = torch.diagonal(gram.gram).clamp_min(eps).sqrt()
+        cosines = gram.g_rob / (norms * math.sqrt(max(gram.rob_norm_sq, eps)))
+        best_vertex = config.gamma_alignment * float(
+            cosines.max()
+        ) - config.gamma_entropy * _max_concentration_penalty(
+            num_clients, config.concentration_penalty
+        )
+
+    return best_vertex - fitness.evaluate(base_weights)
 
 
 def required_gamma_entropy(
@@ -259,7 +317,7 @@ def required_gamma_entropy(
         # configs/partition/ gives every client data), so it is reported rather than
         # papered over with a large finite number.
         return float("inf")
-    margin = corner_margin(gram, base_weights, config)
+    margin = corner_margin(gram, base_weights, config)  # linear in gamma_entropy either way
     crossing = config.gamma_entropy + margin / span
     if crossing <= 0:
         # Already negative by more than the penalty contributes: the corner loses on the

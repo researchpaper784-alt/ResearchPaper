@@ -1109,3 +1109,77 @@ a post-fix run before it means anything.
 **Why 491 tests missed it.** Every one of them calls the handlers directly, in one process,
 where the server's `seed_everything` had already run and there is no Ray actor boundary to
 cross. The failure needs a real federation, which this project first had today.
+
+## Phase 4 -- the degenerate corner is a fitness-design fault, not a tuning problem
+
+**Status: cause identified and a fix implemented behind a flag, 2026-09-20. Unconfirmed on
+real deltas.** The previous entry said to raise `aco-gamma-entropy` until the corner margin
+went negative. That was done, and it is the wrong fix.
+
+### What the second gate run showed
+
+At `aco-gamma-entropy=0.6` (the measured 0.481 requirement plus headroom), at K=10:
+
+| check | result |
+|---|---|
+| 3. corner degenerate? | **CLEAR** -- FedAvg outscores the best vertex by 0.4524 |
+| 2. deposit floor | **7 of 15 rounds** had no positive alpha, so deposited nothing |
+| 1. colony searching? | unanswerable (the best case went negative; see below) |
+| 4. beats FedAvg? | **BEHIND: 0.1185 vs 0.3286, margin -0.2101** |
+
+The corner was closed by breaking the mechanism. `F = gamma_1*align - gamma_2*disp -
+gamma_3*P`, so a penalty large enough to outweigh a vertex's free alignment also drags every
+*interior* candidate down. The MAX-MIN rule deposits `rho * Q * max(F, 0)`, so a negative
+fitness deposits nothing however well the colony searches: tau never moves, `tau^a * eta^b`
+collapses to `eta^b`, and what remains is deterministic heuristic weighting that lost to
+plain averaging by 0.21 macro-F1.
+
+### The prior problem, which was in the first run's data all along
+
+`fedavg_fitness` is logged per round and nothing read it. At the **default**
+`gamma_entropy=0.1`, over the first gate's 15 rounds:
+
+    F at the FedAvg point: mean -0.0005, negative in 7/15 rounds, range -0.2798 to +0.1833
+
+The objective does not rank the aggregation FedACO exists to improve on above zero. It is
+zero-centred noise there. So the colony's `best_fitness` mean of +0.1602 is a margin over
+noise, and there is no `gamma_entropy` that fixes that -- raising it only moves the reference
+point further below zero.
+
+### The cause, and why no amount of gamma_3 reaches it
+
+Dispersion is `sum_k alpha_k ||delta_k - Delta(alpha)||^2`: a weighted variance about a mean
+that **moves with alpha**. At `alpha = e_j` the mean *is* `delta_j`, so every term is exactly
+zero -- not small, zero. A single-client answer pays nothing for dispersion and collects the
+alignment for free, leaving only `gamma_3 * log K` against it. The degeneracy is structural.
+
+### The fix, implemented and unconfirmed
+
+`aco-dispersion-reference` selects what the spread is measured about:
+`"weighted_mean"` (the method as proposed, still the default) or `"base"` -- about
+`Delta(base_weights)`, the FedAvg point, which does not move with alpha. A vertex then costs
+`||delta_j - Delta_base||^2`, which is large. Same O(K^2) Gram-only expansion, same cost.
+
+It is also the more defensible quantity: FedACO's job is to beat FedAvg, so "how far are
+these clients from the aggregate I am trying to beat" is worth charging for, while "how far
+are they from wherever I put the mean" is trivially answered by collapsing onto one client.
+
+Measured on synthetic consensus deltas, K in {10, 20}, noise in {1.5, 3.0}, at the **default**
+`gamma_entropy=0.1`:
+
+| | corner margin | F(best) | alpha_max |
+|---|---|---|---|
+| weighted_mean | +0.0571 (corner wins) | +0.3731 | 0.119 |
+| base | **-0.5056** | +0.3720 | 0.119 |
+
+Surgical where `gamma_3=0.6` was not: the corner loses and nothing else moves.
+
+**What is open.** All of that is synthetic. Consensus deltas have high alignment and low
+dispersion, which is exactly the regime where this is easy, and real MRI deltas under
+dirichlet(0.3) are not that regime -- the level-set episode is precisely a case of synthetic
+evidence not transferring. The next gate run at `aco-dispersion-reference=base` and
+`aco-gamma-entropy=0.1` is what settles it. A6 gains a `dispersion_about_fedavg_point` cell
+so the choice is measured rather than asserted (250 -> 260 cells).
+
+**If it wins, it is not a hyperparameter result.** It is a correction to the plan's §4.5
+fitness, and the paper has to describe the method that way.

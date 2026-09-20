@@ -244,6 +244,18 @@ aco-search-method = "aco"
 # 1 - 1/K -- and that is what decides whether one `aco-gamma-entropy` can hold across K.
 # See docs/OPEN_QUESTIONS.md, "Residual 3".
 aco-concentration-penalty = "entropy"
+# What the dispersion term measures spread ABOUT. "weighted_mean" is the method as proposed
+# (a weighted variance about Delta(alpha)); "base" measures it about the FedAvg point.
+# Not a tuning knob: a variance about its own mean is exactly ZERO at every vertex, so
+# "discard every client but one" pays no dispersion at all and only gamma_3 * P_max stands
+# against the alignment a vertex gets for free. The first real GPU runs measured the cost --
+# the corner outscored the FedAvg point in 15/15 rounds at the default gamma_3, and the 0.6
+# needed to stop it drove the whole landscape negative (7/15 rounds deposited nothing,
+# FedACO finished 0.21 macro-F1 behind FedAvg). Under "base" a vertex costs
+# ||delta_j - Delta_base||^2, and on synthetic deltas the margin goes to -0.51..-0.78 at the
+# DEFAULT gamma_3 with F(best) and alpha_max essentially unchanged.
+# Default stays "weighted_mean": it is the method as proposed and every result so far used it.
+aco-dispersion-reference = "weighted_mean"
 # Heuristic desirability weights (aco/heuristics.py).
 aco-beta-alignment = 2.0
 aco-beta-drift = 1.0

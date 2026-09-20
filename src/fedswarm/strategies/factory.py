@@ -16,7 +16,11 @@ from flwr.serverapp.strategy import FedAdam, FedAvg, FedMedian, FedProx, FedTrim
 from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig
-from fedswarm.aco.fitness import CONCENTRATION_PENALTIES, DataFreeFitnessConfig
+from fedswarm.aco.fitness import (
+    CONCENTRATION_PENALTIES,
+    DISPERSION_REFERENCES,
+    DataFreeFitnessConfig,
+)
 from fedswarm.aco.heuristics import HeuristicWeights
 from fedswarm.aco.pheromone import PheromoneConfig
 from fedswarm.strategies.fedaco import FedACO, FedACOConfig
@@ -248,6 +252,14 @@ def _build_fedaco(
             f"Unknown aco-concentration-penalty {penalty_shape!r} "
             f"(expected one of {CONCENTRATION_PENALTIES})"
         )
+    dispersion_reference = str(
+        run_config.get("aco-dispersion-reference", DataFreeFitnessConfig.dispersion_reference)
+    )
+    if dispersion_reference not in DISPERSION_REFERENCES:
+        raise ValueError(
+            f"Unknown aco-dispersion-reference {dispersion_reference!r} "
+            f"(expected one of {DISPERSION_REFERENCES})"
+        )
     fitness = DataFreeFitnessConfig(
         gamma_alignment=float(
             run_config.get("aco-gamma-alignment", DataFreeFitnessConfig.gamma_alignment)
@@ -264,6 +276,10 @@ def _build_fedaco(
         ),
         # Phase 7's penalty-shape ablation: "entropy" (the method as proposed) | "gini".
         concentration_penalty=penalty_shape,
+        # "weighted_mean" (the method as proposed) | "base". Validated here for the same
+        # reason as the penalty shape: an unknown value would otherwise surface from inside a
+        # round, where `flwr run` reports "Exit Code: 700" and still exits 0.
+        dispersion_reference=dispersion_reference,
     )
     heuristics = HeuristicWeights(
         beta_alignment=float(run_config.get("aco-beta-alignment", HeuristicWeights.beta_alignment)),

@@ -146,10 +146,39 @@ def check_colony_searching(result: dict, num_levels: int, flat_fraction: float) 
     best = _best_case(result, len(gaps), num_levels)
     best_mean = statistics.fmean(best) if best else 0.0
 
+    # A non-positive best case is not a colony verdict, it is the absence of one, and
+    # reporting it as INERT is worse than reporting nothing. `best_case_gaps` scales the
+    # deposit by the run's mean `best_fitness`, and raising `aco-gamma-entropy` to 0.6 to
+    # close the corner drove that mean negative -- so the "best case" came out at -0.000002
+    # and `mean_gap / best_mean` printed **-315130%** of the budget, which then fell below
+    # the INERT threshold and was announced as "pheromone is carrying essentially no
+    # signal". The colony had not been measured at all; the denominator had changed sign.
+    #
+    # The real content of a non-positive mean fitness belongs to check 2: the MAX-MIN rule
+    # deposits `rho * Q * max(F, 0)`, so a negative fitness deposits nothing by design. That
+    # is a fitness problem, and check 1 cannot see it.
+    if best_mean <= 0:
+        return {
+            "question": "Is the colony searching?",
+            "verdict": "NO DATA",
+            "detail": (
+                f"cannot be answered: this run's mean `best_fitness` is non-positive, so the "
+                f"best-case concentration the deposit rule permits is {best_mean:.2%} -- zero "
+                "or less. The MAX-MIN deposit is `rho * Q * max(F, 0)`, so a colony given a "
+                "negative fitness deposits nothing however well it searches, and tau cannot "
+                "move. Read check 2, not this one: the question is why the fitness is "
+                "negative, not whether the colony is trying."
+            ),
+            "entropy_ceiling": ceiling,
+            "entropy_per_round": entropies,
+            "mean_gap_fraction": mean_gap,
+            "best_case_gap_fraction": best_mean,
+        }
+
     # `realized` is what the colony did as a fraction of what the budget allowed;
     # `required` is what it would have had to do to clear the absolute threshold.
-    realized = mean_gap / best_mean if best_mean else 0.0
-    required = flat_fraction / best_mean if best_mean else float("inf")
+    realized = mean_gap / best_mean
+    required = flat_fraction / best_mean
     budget_note = (
         f" Best case at this budget averages {best_mean:.2%}, so the colony realized "
         f"{realized:.0%} of the concentration available to it and would have needed "
@@ -237,26 +266,55 @@ def check_deposit_floor(result: dict) -> dict:
     scale_note = (
         f" delta_mean_sq_norm ranged {min(scales):.4f}–{max(scales):.4f}." if scales else ""
     )
+
+    # F at the REFERENCE point, which decides whether the fitness is a usable objective at
+    # all -- and which was logged as `fedavg_fitness` from the start while nothing read it.
+    # The first gate run's numbers: mean -0.0005, negative in 7 of 15 rounds, at the DEFAULT
+    # gamma_entropy. The aggregation FedACO exists to improve on scores zero, so a colony
+    # beating it by +0.16 is beating noise -- and every attempt to fix the corner by raising
+    # the penalty pushes this further below zero until nothing deposits at all. Reported here
+    # because "the objective does not rank the reference point above zero" is a different and
+    # prior failure to "some rounds did not deposit"; the second is a symptom of the first.
+    reference = _round_metric(result, "fedavg_fitness")
+    reference_note = ""
+    if reference:
+        ref_mean = statistics.fmean(reference)
+        ref_negative = sum(1 for f in reference if f <= 0.0)
+        reference_note = (
+            f" F at the FedAvg point itself averaged {ref_mean:+.4f} and was <= 0 in "
+            f"{ref_negative}/{len(reference)} rounds."
+        )
+        if ref_negative > len(reference) / 3:
+            reference_note += (
+                " **This is the prior problem.** The objective does not rank the aggregation"
+                " this method exists to improve on above zero, so the colony's margin over it"
+                " is a margin over noise -- and raising `aco-gamma-entropy` to close the"
+                " corner pushes it further down until nothing deposits. Try"
+                " `aco-dispersion-reference=base`, which removes the vertex degeneracy"
+                " without moving the landscape: spread measured about a mean that does not"
+                " follow alpha charges a vertex ||delta_j - Delta_base||^2 rather than"
+                " exactly zero."
+            )
     if not negative:
         verdict = "CLEAR"
         detail = (
             f"best_fitness stayed positive every round "
             f"({min(fitness):.4f}–{max(fitness):.4f}), so every round deposited."
-            + scale_note
+            + scale_note + reference_note
         )
     elif len(negative) == len(fitness):
         verdict = "ENGAGED"
         detail = (
             f"best_fitness was <= 0 in all {len(fitness)} rounds "
             f"({min(fitness):.4f}–{max(fitness):.4f}): every deposit was zeroed by the "
-            "max(F, 0) floor, which fully explains an INERT verdict above." + scale_note
+            "max(F, 0) floor, which fully explains an INERT verdict above." + scale_note + reference_note
         )
     else:
         verdict = "PARTIAL"
         detail = (
             f"best_fitness was <= 0 in {len(negative)} of {len(fitness)} rounds "
             f"(rounds {negative[:8]}{'...' if len(negative) > 8 else ''}); those rounds "
-            "deposited nothing." + scale_note
+            "deposited nothing." + scale_note + reference_note
         )
     return {
         "question": "Has the deposit floor engaged?",

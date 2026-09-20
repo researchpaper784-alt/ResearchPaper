@@ -133,8 +133,49 @@ def weighted_norm_sq(alpha: torch.Tensor, gram: torch.Tensor) -> torch.Tensor:
 
 def weighted_dispersion(alpha: torch.Tensor, gram: torch.Tensor) -> torch.Tensor:
     """sum_k alpha_k * ||delta_k - Delta(alpha)||^2, expanded per §4.6 so it only ever
-    touches G, never a materialized d-dim vector."""
+    touches G, never a materialized d-dim vector.
+
+    ⚠️ The mean is `Delta(alpha)`, which MOVES WITH alpha, and that is the origin of the
+    project's degenerate-optimum problem: at `alpha = e_j` the mean *is* `delta_j`, so every
+    term is zero and a single-client answer pays nothing at all. See
+    `dispersion_about_reference` for the fixed-reference alternative.
+    """
     g_alpha = gram @ alpha
     a_g_a = alpha @ g_alpha
     diag = torch.diagonal(gram)
     return (alpha * (diag - 2 * g_alpha + a_g_a)).sum()
+
+
+def dispersion_about_reference(
+    alpha: torch.Tensor, reference: torch.Tensor, gram: torch.Tensor
+) -> torch.Tensor:
+    """sum_k alpha_k * ||delta_k - Delta(reference)||^2 -- the same quantity about a mean
+    that does NOT move with alpha.
+
+    This exists because the degeneracy `weighted_dispersion` creates is structural, not a
+    matter of tuning. Measuring spread about `Delta(alpha)` makes the term a weighted
+    variance about its own mean, which any vertex minimizes exactly, so "discard every client
+    but one" is free and only the concentration penalty stands against it. The first real GPU
+    runs showed what that costs: at `gamma_entropy=0.1` the corner won 15/15 rounds, and the
+    `gamma_entropy=0.6` needed to stop it pushed the whole landscape negative -- the MAX-MIN
+    rule deposits `rho * Q * max(F, 0)`, so 7 of 15 rounds deposited nothing and FedACO came
+    in 0.21 macro-F1 BEHIND plain FedAvg.
+
+    About a fixed reference (`base_weights`, i.e. the FedAvg point), a vertex costs
+    `||delta_j - Delta_base||^2`, which is large -- exactly what it should be. The
+    degeneracy is removed at the root, with no penalty term doing the work.
+
+    It is also the more defensible quantity to regularize. FedACO's job is to find weights
+    that improve on FedAvg, so "how far are these clients from the aggregate I am trying to
+    beat" is a meaningful thing to charge for; "how far are they from wherever I happened to
+    put the mean" is trivially answered by collapsing onto one client.
+
+    Same O(K^2) Gram-only expansion, with the fixed `reference` in place of alpha inside the
+    mean:
+
+        sum_k alpha_k [G_kk - 2 (G r)_k + r' G r]
+    """
+    g_ref = gram @ reference
+    r_g_r = reference @ g_ref
+    diag = torch.diagonal(gram)
+    return (alpha * (diag - 2 * g_ref + r_g_r)).sum()

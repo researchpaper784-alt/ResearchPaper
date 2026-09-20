@@ -239,7 +239,10 @@ class FedACO(FedAvg):
                 self.model, global_state, deltas, shapes, self.val_loader, self.device
             )
         else:
-            fitness = DataFreeFitness(gram, self.aco_config.fitness)
+            # `reference=base_weights` is what `dispersion_reference="base"` measures spread
+            # about -- the FedAvg point this round, not a fixed constant. Passed always;
+            # ignored under the default "weighted_mean".
+            fitness = DataFreeFitness(gram, self.aco_config.fitness, reference=base_weights)
 
         # Derived per round rather than once per run, so a resumed run (fl/app.py
         # checkpoints every round) reproduces the same colony trajectory it would have

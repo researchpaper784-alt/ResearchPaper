@@ -60,6 +60,18 @@ strategies:
     overrides: {aco-gamma-entropy: 0.5}
   - name: gamma_entropy=1.0
     overrides: {aco-gamma-entropy: 1.0}
+  # What the dispersion term measures spread ABOUT -- added 2026-09-20, and arguably the most
+  # important single cell in the whole ablation suite. A weighted variance about Delta(alpha)
+  # is exactly ZERO at every vertex, which is why the corner wins at any sane gamma_3 and why
+  # the gamma_3 needed to close it (0.481 measured, see the cells above) drags the whole
+  # landscape negative: the first attempt at that left 7 of 15 rounds unable to deposit and
+  # FedACO 0.21 macro-F1 behind FedAvg. Measured about the FedAvg point instead, a vertex
+  # costs ||delta_j - Delta_base||^2 and the degeneracy disappears at the DEFAULT gamma_3.
+  #
+  # If this cell wins, it is not a hyperparameter result -- it is a correction to §4.5's
+  # fitness, and the paper has to say so.
+  - name: dispersion_about_fedavg_point
+    overrides: {aco-dispersion-reference: base}
   - name: a=0.5
     overrides: {aco-pheromone-exp: 0.5}
   - name: a=1.0_default
