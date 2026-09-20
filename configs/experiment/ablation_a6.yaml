@@ -72,6 +72,17 @@ strategies:
   # fitness, and the paper has to say so.
   - name: dispersion_about_fedavg_point
     overrides: {aco-dispersion-reference: base}
+  # The one that actually works. "base" is exactly linear in alpha, so it has no interior
+  # optimum and a vertex on the nearest client is cheaper than any mix -- on real deltas it
+  # moved the corner margin from +0.6184 to +0.3136 and stopped. "aggregate" measures
+  # ||Delta(alpha) - Delta_rob||^2 instead: quadratic, minimized in the interior because
+  # averaging cancels per-client noise. Across K in {10,20} x noise in {1.5,3,6} x
+  # {uniform, dirichlet-skewed} base weights it is the only shape that both rules out the
+  # corner AND keeps F at the FedAvg point positive, at the default gamma_entropy.
+  # Kept alongside "base" rather than replacing it: the paper has to show why the obvious
+  # fixed-reference fix is not the one, and that needs the cell.
+  - name: dispersion_aggregate_drift
+    overrides: {aco-dispersion-reference: aggregate}
   - name: a=0.5
     overrides: {aco-pheromone-exp: 0.5}
   - name: a=1.0_default

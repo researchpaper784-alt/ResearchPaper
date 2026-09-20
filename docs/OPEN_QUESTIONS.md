@@ -1183,3 +1183,61 @@ so the choice is measured rather than asserted (250 -> 260 cells).
 
 **If it wins, it is not a hyperparameter result.** It is a correction to the plan's §4.5
 fitness, and the paper has to describe the method that way.
+
+## Phase 4 -- `dispersion_reference="base"` was not the fix, and could not have been
+
+**Status: superseded by `"aggregate"`, 2026-09-20. Unconfirmed on real deltas.**
+
+The gate run at `aco-dispersion-reference=base`, `aco-gamma-entropy=0.1`, K=10:
+
+| | weighted_mean | base |
+|---|---|---|
+| mean corner margin | +0.6184 | **+0.3136** |
+| F at the FedAvg point | -0.0005 | **-0.0212** |
+| vs FedAvg | -- | **BEHIND 0.1328 vs 0.3321** |
+
+It halved the margin and stopped. That is not bad luck, it is the only thing the term can do:
+
+    dispersion_about_reference(alpha) = sum_k alpha_k * c_k,   c_k = ||delta_k - Delta_ref||^2
+
+`c_k` is fixed before alpha is chosen, so the term is **exactly linear in alpha**. A linear
+function on the simplex attains its extremes at vertices, so it has no interior optimum at
+all. It charges for picking *far* clients, never for concentration -- and a vertex on the
+client with the smallest `c_k` is therefore *cheaper* than any mix. Measured at K=10,
+noise 3.0: cheapest vertex 7.29 against 8.01 at every interior point.
+
+So the previous entry's synthetic result (-0.51 at K=10) was real but not general. Consensus
+deltas at low noise make the `c_k` nearly equal, which hides the whole defect; the probe was
+run in the one regime where a linear term looks like a convex one.
+
+### `"aggregate"`: the distance of the AGGREGATE from the consensus
+
+    ||Delta(alpha) - Delta_rob||^2 = alpha' G alpha - 2 alpha . g_rob + ||Delta_rob||^2
+
+Quadratic in alpha, minimized in the interior, and for a reason that is a property of the
+quantity rather than a penalty bolted onto it: averaging cancels per-client noise, so a
+K-way mix keeps roughly 1/K of each client's deviation from the consensus while a single
+client keeps all of its own. An interior point is genuinely nearer the consensus, not merely
+less penalized. Same precompute, no new O(K*d) work.
+
+Swept over K in {10, 20} x noise in {1.5, 3, 6} x {uniform, dirichlet(0.3)-skewed} base
+weights, at the **default** `gamma_entropy=0.1`, it is the only one of the three shapes that
+is correct in all 12 cells:
+
+| mode | corner margin | F at the FedAvg point |
+|---|---|---|
+| weighted_mean | +0.0012 .. +0.3663 (corner wins) | -0.3276 .. +0.3698 |
+| base | -0.0223 .. -0.8621 | -0.2567 .. +0.3698 |
+| **aggregate** | **-0.7373 .. -1.7790** | **+0.3021 .. +0.9885** |
+
+The second column matters as much as the first. Under the other two shapes, F at the
+reference point is zero-centred noise once the base weights are skewed -- which is exactly
+what the real runs measured (-0.0005, then -0.0212) -- so the colony's margin over it is a
+margin over noise regardless of what the corner does.
+
+**The skewed high-noise cells now reproduce the real runs' negative F(fedavg)**, which is the
+first time this project's synthetic proxy has matched the failure it is standing in for. That
+is a reason to trust it more than the last two probes, not a reason to skip the gate run.
+
+A6 keeps a cell for each of the three (260 -> 270): the paper has to show why the obvious
+fixed-reference fix is not the one, and that needs the measurement, not an argument.

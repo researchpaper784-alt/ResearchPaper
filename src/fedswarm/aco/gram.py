@@ -179,3 +179,34 @@ def dispersion_about_reference(
     r_g_r = reference @ g_ref
     diag = torch.diagonal(gram)
     return (alpha * (diag - 2 * g_ref + r_g_r)).sum()
+
+
+def aggregate_drift(
+    alpha: torch.Tensor, g_rob: torch.Tensor, rob_norm_sq: float, gram: torch.Tensor
+) -> torch.Tensor:
+    """||Delta(alpha) - Delta_rob||^2 -- how far the AGGREGATE lands from the robust
+    consensus, rather than how scattered the clients are around some mean.
+
+    The third and, on the evidence, the only shape of this term that actually rules out a
+    single-client answer. The other two cannot, and for different reasons:
+
+    * `weighted_dispersion` is a variance about `Delta(alpha)`, which every vertex minimizes
+      to exactly zero.
+    * `dispersion_about_reference` is `sum_k alpha_k * c_k` with `c_k = ||delta_k - Delta_ref||^2`
+      fixed -- **exactly linear in alpha**, so it has no interior optimum at all. It charges
+      per client, not for concentration, and a vertex on the client with the smallest `c_k`
+      is therefore CHEAPER than any interior point. Measured at K=10, noise 3.0: cheapest
+      vertex 7.29 against 8.01 at every interior point. On real MRI deltas it took the corner
+      margin from +0.6184 to +0.3136 and stopped -- it could not have flipped the sign.
+
+    This one is quadratic in alpha and minimized in the interior, because averaging cancels
+    the per-client noise: a single client keeps all of its own deviation from the consensus,
+    while a K-way mix keeps roughly 1/K of it. That is a real property of the quantity, not a
+    penalty bolted on, and it is what makes an interior point genuinely better rather than
+    merely less penalized.
+
+    Expanded from the same precompute, no new O(K*d) work:
+
+        ||Delta(alpha) - Delta_rob||^2 = alpha' G alpha - 2 alpha . g_rob + ||Delta_rob||^2
+    """
+    return alpha @ (gram @ alpha) - 2 * (alpha @ g_rob) + rob_norm_sq

@@ -578,3 +578,101 @@ def test_the_default_dispersion_reference_is_still_the_method_as_proposed() -> N
     from fedswarm.aco.fitness import DataFreeFitnessConfig
 
     assert DataFreeFitnessConfig().dispersion_reference == "weighted_mean"
+
+
+def _skewed_weights(num_clients: int, seed: int) -> torch.Tensor:
+    """Num-examples weights under a dirichlet(0.3)-like skew -- the regime the main sweep
+    actually runs, and the one a uniform-base probe hides."""
+    torch.manual_seed(seed)
+    w = torch.distributions.Dirichlet(torch.full((num_clients,), 0.3)).sample()
+    return w / w.sum()
+
+
+def test_base_mode_is_linear_in_alpha_and_therefore_cannot_rule_out_a_vertex() -> None:
+    """Why `dispersion_reference="base"` was not the fix, stated as the property that makes
+    it impossible rather than as a measurement that happened to come out badly.
+
+    `sum_k alpha_k * ||delta_k - Delta_ref||^2` is a weighted average of constants fixed
+    before alpha is chosen. A linear function on the simplex takes its extremes at vertices,
+    so the term has no interior optimum at all -- it charges for picking FAR clients, never
+    for concentration, and a vertex on the client with the smallest constant is CHEAPER than
+    any mix. On real MRI deltas it moved the corner margin from +0.6184 to +0.3136 and could
+    not have flipped the sign at any weight.
+    """
+    from fedswarm.aco.gram import dispersion_about_reference
+
+    num_clients = 10
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=3.0), trim_fraction=0.2)
+    base = torch.full((num_clients,), 1.0 / num_clients)
+
+    a, b = torch.rand(num_clients), torch.rand(num_clients)
+    a, b = a / a.sum(), b / b.sum()
+    mixed = 0.3 * a + 0.7 * b
+    assert float(dispersion_about_reference(mixed, base, gram.gram)) == pytest.approx(
+        0.3 * float(dispersion_about_reference(a, base, gram.gram))
+        + 0.7 * float(dispersion_about_reference(b, base, gram.gram)),
+        abs=1e-5,
+    )
+
+    vertex_costs = [
+        float(dispersion_about_reference(torch.eye(num_clients)[j], base, gram.gram))
+        for j in range(num_clients)
+    ]
+    assert min(vertex_costs) < float(dispersion_about_reference(base, base, gram.gram)), (
+        "the cheapest vertex should undercut an interior point -- that is the defect"
+    )
+
+
+@pytest.mark.parametrize("num_clients", [10, 20])
+@pytest.mark.parametrize("noise", [1.5, 3.0, 6.0])
+def test_aggregate_mode_rules_out_the_corner_under_skew_and_keeps_the_reference_positive(
+    num_clients: int, noise: float
+) -> None:
+    """Both failures at once, in the regime that matters, at the DEFAULT gamma_entropy.
+
+    Skewed base weights and high noise are what the main sweep runs and what the first
+    probes left out. There `weighted_mean` loses the corner AND drives F at the FedAvg point
+    negative (matching the real run's -0.0212), and `base` cannot fix either. `aggregate`
+    measures ||Delta(alpha) - Delta_rob||^2: quadratic in alpha, minimized in the interior
+    because averaging cancels per-client noise, so a mix is genuinely nearer the consensus
+    than any single client rather than merely less penalized.
+    """
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, corner_margin
+
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=noise), trim_fraction=0.2)
+    base = _skewed_weights(num_clients, seed=num_clients)
+    cfg = DataFreeFitnessConfig(gamma_entropy=0.1, dispersion_reference="aggregate")
+
+    assert corner_margin(gram, base, cfg) < 0.0, "a single client still outscores FedAvg"
+    assert DataFreeFitness(gram, cfg, reference=base).evaluate(base) > 0.0, (
+        "the objective must rank the aggregation this method exists to improve on above "
+        "zero, or the colony's margin over it is a margin over noise"
+    )
+
+
+def test_aggregate_drift_prefers_an_average_to_any_single_client() -> None:
+    """The mechanism, isolated from the rest of the fitness. A K-way average keeps roughly
+    1/K of each client's deviation from the consensus; one client keeps all of its own."""
+    from fedswarm.aco.gram import aggregate_drift
+
+    num_clients = 10
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=3.0), trim_fraction=0.2)
+    uniform = torch.full((num_clients,), 1.0 / num_clients)
+
+    at_uniform = float(aggregate_drift(uniform, gram.g_rob, gram.rob_norm_sq, gram.gram))
+    cheapest_vertex = min(
+        float(aggregate_drift(torch.eye(num_clients)[j], gram.g_rob, gram.rob_norm_sq, gram.gram))
+        for j in range(num_clients)
+    )
+    assert at_uniform < cheapest_vertex
+
+
+def test_aggregate_mode_needs_no_reference() -> None:
+    """Unlike "base" it is defined by the robust consensus, which the precompute already
+    holds -- so it cannot be misconfigured by passing the wrong reference."""
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig
+
+    gram = precompute_gram(_consensus_deltas(6, noise=1.5))
+    fitness = DataFreeFitness(gram, DataFreeFitnessConfig(dispersion_reference="aggregate"))
+
+    assert isinstance(fitness.evaluate(torch.full((6,), 1 / 6)), float)

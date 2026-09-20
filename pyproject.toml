@@ -244,17 +244,34 @@ aco-search-method = "aco"
 # 1 - 1/K -- and that is what decides whether one `aco-gamma-entropy` can hold across K.
 # See docs/OPEN_QUESTIONS.md, "Residual 3".
 aco-concentration-penalty = "entropy"
-# What the dispersion term measures spread ABOUT. "weighted_mean" is the method as proposed
-# (a weighted variance about Delta(alpha)); "base" measures it about the FedAvg point.
-# Not a tuning knob: a variance about its own mean is exactly ZERO at every vertex, so
-# "discard every client but one" pays no dispersion at all and only gamma_3 * P_max stands
-# against the alignment a vertex gets for free. The first real GPU runs measured the cost --
-# the corner outscored the FedAvg point in 15/15 rounds at the default gamma_3, and the 0.6
-# needed to stop it drove the whole landscape negative (7/15 rounds deposited nothing,
-# FedACO finished 0.21 macro-F1 behind FedAvg). Under "base" a vertex costs
-# ||delta_j - Delta_base||^2, and on synthetic deltas the margin goes to -0.51..-0.78 at the
-# DEFAULT gamma_3 with F(best) and alpha_max essentially unchanged.
+# What the dispersion term measures. Three shapes, and the difference decides whether the
+# fitness has a usable optimum at all:
+#   "weighted_mean" -- the method as proposed: a weighted variance about Delta(alpha). The
+#       mean MOVES WITH alpha, so at a vertex it IS that client's delta and every term is
+#       exactly zero. "Discard every client but one" pays no dispersion at all, and only
+#       gamma_3 * log K stands against the alignment a vertex collects for free.
+#   "base" -- the same spread about the FedAvg point. NOT the fix, and it cannot be: it is
+#       sum_k alpha_k * c_k with c_k fixed, i.e. exactly LINEAR in alpha, so it has no
+#       interior optimum and a vertex on the client with the smallest c_k is CHEAPER than
+#       any mix (measured at K=10, noise 3.0: 7.29 vs 8.01). On real MRI deltas it moved the
+#       corner margin from +0.6184 to +0.3136 and could not have flipped the sign.
+#   "aggregate" -- ||Delta(alpha) - Delta_rob||^2, how far the AGGREGATE lands from the
+#       robust consensus. Quadratic in alpha and minimized in the interior, because
+#       averaging cancels per-client noise: a K-way mix keeps roughly 1/K of each client's
+#       deviation, one client keeps all of its own. Across K in {10,20} x noise in
+#       {1.5,3,6} x {uniform, dirichlet-skewed} base weights it is the only shape that both
+#       rules out the corner AND keeps F at the FedAvg point positive, at the DEFAULT
+#       gamma_3. The second property matters as much as the first: under the other two, F at
+#       the reference point is zero-centred noise on real data (measured -0.0212), so the
+#       colony's margin over it is a margin over noise.
+#
+# Measured cost of getting this wrong: the corner outscored the FedAvg point in 15/15 rounds
+# at the default gamma_3, and raising gamma_3 to the 0.481 that closes it drove the whole
+# landscape negative -- 7 of 15 rounds deposited nothing under the max(F, 0) floor, tau never
+# moved, and FedACO finished 0.21 macro-F1 behind plain FedAvg.
+#
 # Default stays "weighted_mean": it is the method as proposed and every result so far used it.
+# A6 measures all three.
 aco-dispersion-reference = "weighted_mean"
 # Heuristic desirability weights (aco/heuristics.py).
 aco-beta-alignment = 2.0

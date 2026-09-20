@@ -289,11 +289,14 @@ def check_deposit_floor(result: dict) -> dict:
                 " **This is the prior problem.** The objective does not rank the aggregation"
                 " this method exists to improve on above zero, so the colony's margin over it"
                 " is a margin over noise -- and raising `aco-gamma-entropy` to close the"
-                " corner pushes it further down until nothing deposits. Try"
-                " `aco-dispersion-reference=base`, which removes the vertex degeneracy"
-                " without moving the landscape: spread measured about a mean that does not"
-                " follow alpha charges a vertex ||delta_j - Delta_base||^2 rather than"
-                " exactly zero."
+                " corner pushes it further down until nothing deposits. Use"
+                " `aco-dispersion-reference=aggregate`, which measures"
+                " ||Delta(alpha) - Delta_rob||^2 -- how far the AGGREGATE lands from the"
+                " robust consensus. Averaging cancels per-client noise, so an interior point"
+                " is genuinely closer than any single client rather than merely less"
+                " penalized. Not `base`: that one is exactly LINEAR in alpha, so it has no"
+                " interior optimum and a vertex on the nearest client is cheaper than any"
+                " mix."
             )
     if not negative:
         verdict = "CLEAR"
@@ -536,8 +539,14 @@ def main() -> int:
           f" ({len(everything)} result file(s) with per-round records)")
     # Printed because this is the knob being tuned between attempts, and a report that does
     # not name the value it was produced at cannot be told apart from a stale one.
-    reported_gamma = fedaco.get("config", {}).get("run_config", {}).get("aco-gamma-entropy")
+    reported_run_config = fedaco.get("config", {}).get("run_config", {})
+    reported_gamma = reported_run_config.get("aco-gamma-entropy")
+    # `aco-dispersion-reference` belongs here for the same reason gamma does, and its absence
+    # cost a round trip: a run was made to test it and the report named neither the setting
+    # nor anything that identified which of the three shapes had actually been used.
+    reported_ref = reported_run_config.get("aco-dispersion-reference")
     print(f"  aco-gamma-entropy of the run above: {reported_gamma if reported_gamma is not None else 'unset (default 0.1)'}")
+    print(f"  aco-dispersion-reference: {reported_ref if reported_ref is not None else 'unset (default weighted_mean)'}")
     if fedavg:
         print(f"  baseline: {fedavg['_path']}")
     print(f"  timing: {wall_clock_note(fedaco)}\n")

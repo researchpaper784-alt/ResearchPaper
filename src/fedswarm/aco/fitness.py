@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 from fedswarm.aco.gram import (
     GramPrecompute,
     apply_delta,
+    aggregate_drift,
     dispersion_about_reference,
     weighted_dispersion,
     weighted_norm_sq,
@@ -132,10 +133,16 @@ class DataFreeFitnessConfig:
     # Under "base" a vertex costs `||delta_j - Delta_base||^2`, which is large. The default
     # stays "weighted_mean" because that is the method as proposed and every result so far
     # used it; "base" is selectable so the choice is measured rather than asserted.
+    # "aggregate" is the third shape: ||Delta(alpha) - Delta_rob||^2, how far the AGGREGATE
+    # lands from the robust consensus. It is the only one of the three that can rule out a
+    # single-client answer. "weighted_mean" is zero at every vertex; "base" is exactly LINEAR
+    # in alpha (a weighted average of fixed per-client constants), so it has no interior
+    # optimum and a vertex on the nearest client is cheaper than any mix -- measured, and the
+    # reason it took the real corner margin only from +0.6184 to +0.3136.
     dispersion_reference: str = "weighted_mean"
 
 
-DISPERSION_REFERENCES = ("weighted_mean", "base")
+DISPERSION_REFERENCES = ("weighted_mean", "base", "aggregate")
 
 
 class DataFreeFitness:
@@ -171,7 +178,7 @@ class DataFreeFitness:
                 f"Unknown dispersion_reference {self.config.dispersion_reference!r} "
                 f"(expected one of {DISPERSION_REFERENCES})"
             )
-        if self.config.dispersion_reference == "base" and reference is None:
+        if self.config.dispersion_reference == "base" and reference is None:  # noqa: SIM102
             # Refused rather than defaulted to uniform. A silently-uniform reference would
             # still remove the vertex degeneracy, so every diagnostic would look repaired
             # while the term measured spread about a point the aggregation never uses.
@@ -187,8 +194,13 @@ class DataFreeFitness:
         alignment = (alpha @ self.gram.g_rob) / (
             torch.sqrt(a_g_a) * math.sqrt(max(self.gram.rob_norm_sq, eps))
         )
-        if self.config.dispersion_reference == "base":
+        mode = self.config.dispersion_reference
+        if mode == "base":
             dispersion = dispersion_about_reference(alpha, self.reference, self.gram.gram)
+        elif mode == "aggregate":
+            dispersion = aggregate_drift(
+                alpha, self.gram.g_rob, self.gram.rob_norm_sq, self.gram.gram
+            )
         else:
             dispersion = weighted_dispersion(alpha, self.gram.gram)
         if self.config.normalize_dispersion:
@@ -243,7 +255,7 @@ def corner_margin(
     num_clients = int(base_weights.numel())
     fitness = DataFreeFitness(gram, config, reference=base_weights)
 
-    if config.dispersion_reference == "base":
+    if config.dispersion_reference in ("base", "aggregate"):
         # The closed form above does not apply: dispersion no longer vanishes at a vertex,
         # which is the entire point of that mode. Evaluating F at each of the K vertices is
         # K * O(K) = O(K^2) -- the same order the closed form was written to achieve -- so
