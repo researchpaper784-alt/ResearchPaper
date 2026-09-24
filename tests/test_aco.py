@@ -676,3 +676,67 @@ def test_aggregate_mode_needs_no_reference() -> None:
     fitness = DataFreeFitness(gram, DataFreeFitnessConfig(dispersion_reference="aggregate"))
 
     assert isinstance(fitness.evaluate(torch.full((6,), 1 / 6)), float)
+
+
+def _colony_under(mode: str, num_clients: int = 10, noise: float = 3.0, seed: int = 0):
+    """One real `run_colony` under a dispersion shape, on skewed base weights."""
+    from fedswarm.aco.colony import ColonyConfig, run_colony
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig
+    from fedswarm.aco.heuristics import (
+        HeuristicWeights,
+        desirability_matrix,
+        desirability_scores,
+    )
+    from fedswarm.aco.pheromone import Pheromone, PheromoneConfig
+    from fedswarm.aco.schedules import level_set
+
+    levels = level_set(11, 0.0, 2.5, spacing="linear")
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=noise, seed=seed), trim_fraction=0.2)
+    base = _skewed_weights(num_clients, seed=seed)
+    cfg = DataFreeFitnessConfig(gamma_entropy=0.1, dispersion_reference=mode)
+    fitness = DataFreeFitness(gram, cfg, reference=base)
+    d_k = desirability_scores(gram, base * 4000, torch.zeros(num_clients), HeuristicWeights())
+    eta = desirability_matrix(d_k, levels)
+    tau0 = Pheromone(11, PheromoneConfig()).begin_round([str(i) for i in range(num_clients)])
+    result = run_colony(
+        tau0, eta, levels, base, fitness.evaluate, num_ants=30, num_iterations=10,
+        config=ColonyConfig(), generator=torch.Generator().manual_seed(seed),
+    )
+    return {
+        "improvement": result.best_fitness - fitness.evaluate(base),
+        "alpha_max": float(result.alpha_best.max()),
+        "moved": float((result.alpha_best - base).abs().sum()),
+    }
+
+
+def test_aggregate_mode_leaves_the_colony_somewhere_to_go() -> None:
+    """A sane landscape is not the same as a useful one, and this is the check that was
+    missing when `gamma_entropy=0.6` shipped.
+
+    That setting passed the corner test and collapsed alpha onto the FedAvg point, which made
+    FedACO a slower FedAvg -- and the two numbers being checked at the time (corner margin,
+    F at the reference) both looked fine. What they could not see was whether the colony had
+    anywhere left to move.
+
+    So: under `aggregate` the colony must still find a meaningful improvement over the FedAvg
+    point, with an alpha that is neither collapsed onto it nor at a vertex.
+    """
+    result = _colony_under("aggregate")
+
+    assert result["improvement"] > 0.05, (
+        f"the colony gained only {result['improvement']:+.4f} over FedAvg -- a landscape with "
+        "no corner but nothing to find makes FedACO a slower FedAvg"
+    )
+    assert result["moved"] > 0.1, "alpha barely left the FedAvg point"
+    assert 0.15 < result["alpha_max"] < 0.9, (
+        f"alpha_max {result['alpha_max']:.3f} is either collapsed onto uniform (1/K = 0.1) "
+        "or sitting on a vertex"
+    )
+
+
+def test_base_mode_flattens_the_landscape_as_well_as_failing_on_the_corner() -> None:
+    """The second, independent reason `dispersion_reference="base"` was the wrong fix, and a
+    consequence of the same linearity: a linear term added to the objective tilts it without
+    curving it, so the corner is charged and the interior is levelled. The colony finds an
+    order of magnitude less improvement than under `aggregate`."""
+    assert _colony_under("aggregate")["improvement"] > 5 * _colony_under("base")["improvement"]

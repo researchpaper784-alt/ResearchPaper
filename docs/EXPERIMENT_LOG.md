@@ -1939,3 +1939,39 @@ different paper-level conclusion to "ACO does not help", reached for 4 GPU-hours
 A1's 33.
 
 527 tests pass, ruff clean.
+
+## 2026-09-24 (later) -- the check that was missing when gamma_entropy=0.6 shipped
+
+`aggregate` was shipped on two numbers: the corner margin and F at the FedAvg point. Both
+looked right. Those are exactly the two numbers that looked right for `gamma_entropy=0.6`,
+which then collapsed alpha onto the FedAvg point and made FedACO a slower FedAvg. Neither can
+see whether the colony has anywhere left to go.
+
+A real `run_colony` under all three shapes, K=10, noise 3.0, dirichlet(0.3)-skewed base
+weights, gamma_entropy=0.1, 5 seeds:
+
+| mode | corner | F(base) | improvement over FedAvg | alpha_max | \|alpha-base\|_1 |
+|---|---|---|---|---|---|
+| weighted_mean | +0.2501 | +0.0096 | +0.0391 | 0.420 | 0.470 |
+| base | -0.1915 | +0.0096 | **+0.0084** | 0.458 | 0.156 |
+| **aggregate** | **-0.8924** | **+0.4157** | **+0.1554** | 0.317 | 0.355 |
+
+Under `aggregate` the colony gains **4x** what it finds under the method as proposed and
+**18x** what it finds under `base`, with an alpha that is neither collapsed onto the FedAvg
+point (uniform would be 0.100) nor sitting on a vertex. Entropy 1.635 against a 2.303 ceiling:
+genuinely non-uniform, not concentrated.
+
+**A second, independent reason `base` was the wrong fix**, and a consequence of the same
+linearity that made it unable to rule out the corner: a linear term added to an objective
+tilts it without curving it, so the corner gets charged and the interior gets levelled. It
+moved alpha the least of the three (0.156) and found almost nothing (+0.0084). It failed in
+both directions at once.
+
+Both properties are now tests rather than a probe I ran once, because "the landscape is sane"
+and "the landscape is useful" are different claims and this project has now twice shipped the
+first while believing it had checked the second.
+
+Still synthetic. But this is the skewed high-noise regime that reproduces the real runs'
+F(fedavg) < 0, so it is the closest proxy available -- and the gate run is what settles it.
+
+529 tests pass, ruff clean.
