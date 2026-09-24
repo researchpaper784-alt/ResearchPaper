@@ -934,14 +934,16 @@ robustness configs. The granular configs turned out to be at **3** seeds, not 5:
    864 cells rather than 576. `make tables` prints the requirement for whatever family the
    table actually contains, so this surfaces before the claim is written.
 
-2. **The combined and granular sweep families overlap, and that now costs more than the
-   seeds did.** `ablation_all.yaml` covers A1/A3/A9 while `ablation_a1/a3/a9.yaml` cover the
-   same ground individually; `robustness.yaml` covers R1-R5's territory in combined form.
-   Running both families runs those experiments twice at 8 seeds each.
+### Resolved, 2026-09-19 (was "still open" above -- e50f407 closed it, this note wasn't updated at the time)
 
-   Both families exist for a real reason -- they read different YAML shapes, and the
-   granular ones cover A2 and A4-A8 that `ablation_all.yaml` explicitly does not. But
-   nothing says to run *both*, and the 2576-cell total assumes you do. Picking one family
-   for the overlapping cells, or dropping the duplicates from whichever runs second, is a
-   scope call for whoever owns the ablation runs -- and is worth more compute than any
-   remaining seed decision.
+2. ~~The combined and granular sweep families overlap~~. Fixed in the same commit that did
+   the 8-seed scoping (`e50f407`): `ablation_all.yaml` now keeps only safety-fallback and
+   concentration-penalty (60 cells, down from 288 -- everything a granular `ablation_a*.yaml`
+   already covers was removed), and `robustness.yaml` keeps only the `scaled`
+   magnitude-only attack (75 cells, down from 360 -- the one case an alignment-based
+   heuristic can't see, since `a_k` is a cosine and blind to a pure magnitude change).
+   Both targets (`make ablations` + `make ablations-granular`, `make robustness` +
+   `make robustness-granular`) are now meant to be run together, not as alternatives --
+   re-verified 2026-09-24 with `--dry-run` against the current merged code: `ablation_all`
+   60 cells, `robustness` 75 cells, the 9 granular ablation configs 605 cells combined,
+   the 5 granular robustness configs 270 cells combined. No overlap, nothing crashes.
