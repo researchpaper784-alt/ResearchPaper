@@ -232,6 +232,50 @@ def required_supernodes(defaults: dict[str, Any], overrides: dict[str, Any]) -> 
     return int({**defaults, **overrides}.get("num-clients", 2))
 
 
+def gpu_fraction_problem(gpus_per_client: float | None, num_clients: int) -> str | None:
+    """Refuse to start a sweep that would train on CPU on a GPU box. None means clear.
+
+    Ray hides accelerators from an actor requested with `num_gpus=0`. That is not a guess:
+    `ray/_private/worker.py` (2.55.1) computes
+    `override_on_zero = env_bool(RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO_ENV_VAR, True)` and warns
+    that *future* versions "will no longer override accelerator visible devices env var if
+    num_gpus=0 or num_gpus=None (default)" -- so the current version does. A ClientApp actor
+    given no GPU fraction therefore sees `torch.cuda.is_available() == False` and trains on
+    CPU.
+
+    **Why this has to refuse rather than warn.** The ServerApp runs in the driver process, not
+    a Ray actor, so it keeps the GPU: server-side evaluation, `test_macro_f1` and every logged
+    metric look completely normal. The only symptom is wall-clock, and the plan's own cost
+    projection is the thing you would check it against -- so the failure reads as "the estimate
+    was optimistic", which is exactly what a 4-core box legitimately causes too. For
+    `main.yaml` that is 576 cells x 100 rounds of client training at CPU speed: it does not
+    finish inside any Kaggle quota, and nothing in the result files says why.
+
+    An explicit `--gpus-per-client 0` is honoured -- someone who says they want CPU gets CPU.
+    It is the *unset* case on a GPU box that is refused.
+    """
+    if gpus_per_client is not None:
+        return None
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+    except Exception:  # pragma: no cover - no torch means no GPU training either
+        return None
+
+    suggested = round(1.0 / max(num_clients, 1), 4)
+    return (
+        "A GPU is present but --gpus-per-client was not set. Ray hides GPUs from ClientApp "
+        "actors requested with num_gpus=0, so every client would train on CPU while the "
+        "server kept the GPU -- the results would look correct and the sweep would simply "
+        "never finish.\n"
+        f"  Pass --gpus-per-client {suggested} to let all {num_clients} ClientApps share the "
+        "card, or a larger fraction to run fewer concurrently.\n"
+        "  Pass --gpus-per-client 0 if you really do want CPU training."
+    )
+
+
 def configure_federation(
     num_supernodes: int,
     cpus_per_client: int = 1,

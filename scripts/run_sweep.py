@@ -46,6 +46,7 @@ from pathlib import Path
 
 import yaml
 
+from fedswarm.sweep import gpu_fraction_problem  # noqa: E402
 from fedswarm.utils.runner import (
     diagnose,
     format_run_config,
@@ -288,12 +289,20 @@ def configure_federation(
     return True, f"{num_clients} supernodes, {cpus_per_client} CPU each"
 
 
-def preflight(num_clients: int, skip: bool) -> list[str]:
+def preflight(num_clients: int, skip: bool, gpus_per_client: float | None = 0.0) -> list[str]:
     """Problems worth refusing to start 360 runs over. Returns a list of warnings; an
     empty list means clear."""
     warnings = []
     if shutil.which("flwr") is None:
         warnings.append("`flwr` is not on PATH -- activate the venv (.venv/bin) first.")
+
+    # The most expensive way this sweep can fail is by succeeding slowly: see
+    # `sweep.gpu_fraction_problem`. Shared with run_sweep_granular.py rather than
+    # reimplemented, because this script already carries a second copy of
+    # `configure_federation` and one divergent guard is enough.
+    gpu_problem = gpu_fraction_problem(gpus_per_client, num_clients)
+    if gpu_problem:
+        warnings.append(gpu_problem)
 
     cores = os.cpu_count() or 1
     if num_clients > cores:
@@ -350,10 +359,14 @@ def main() -> int:
     parser.add_argument(
         "--gpus-per-client",
         type=float,
-        default=0.0,
+        # Deliberately None, not 0.0: argparse cannot otherwise distinguish "the user left
+        # it alone" from "the user asked for CPU", and `gpu_fraction_problem` refuses only
+        # the first of those on a GPU box.
+        default=None,
         help=(
-            "fraction of a GPU per ClientApp (0.2 = five share one card). Leave at 0 on "
-            "CPU; on a GPU box this is required or the sweep may run on CPU silently"
+            "fraction of a GPU per ClientApp (0.2 = five share one card). Required on a GPU "
+            "box -- unset, Ray hides the GPU from every ClientApp and the sweep trains on "
+            "CPU while looking healthy. Pass 0 to ask for CPU deliberately"
         ),
     )
     parser.add_argument("--stream", action="store_true", help="echo each run's output live")
@@ -404,7 +417,7 @@ def main() -> int:
     print(f"sweep: {spec.get('name', config_path.stem)}  ({len(cells)} cells)")
     print(project_cost(len(cells), rounds, args.seconds_per_round, num_clients))
 
-    warnings = preflight(num_clients, args.skip_preflight)
+    warnings = preflight(num_clients, args.skip_preflight, args.gpus_per_client)
     for warning in warnings:
         print(f"\n  ⚠️  {warning}")
 
@@ -462,7 +475,7 @@ def main() -> int:
     # Correctness, not convenience: without this the Simulation Runtime creates 2
     # ClientApps regardless of `num-clients`, and every result file is mislabelled.
     ok, detail = configure_federation(
-        num_clients, args.cpus_per_client, args.gpus_per_client
+        num_clients, args.cpus_per_client, args.gpus_per_client or 0.0
     )
     if not ok:
         print(f"\nCould not configure the federation ({detail}).")

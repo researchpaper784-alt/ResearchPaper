@@ -39,7 +39,12 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from fedswarm.sweep import expand_grid, order_seed_first, run_sweep  # noqa: E402
+from fedswarm.sweep import (  # noqa: E402
+    expand_grid,
+    gpu_fraction_problem,
+    order_seed_first,
+    run_sweep,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -49,7 +54,7 @@ def load_experiment_config(path: str | Path) -> dict:
         return yaml.safe_load(f)
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="Experiment YAML (see module docstring)")
     parser.add_argument("--dry-run", action="store_true", help="Print the planned run list; run nothing")
@@ -61,11 +66,13 @@ def main() -> None:
     parser.add_argument(
         "--gpus-per-client",
         type=float,
-        default=0.0,
+        # None, not 0.0 -- see `sweep.gpu_fraction_problem`: argparse cannot otherwise tell
+        # "left alone" from "asked for CPU", and only the first is refused on a GPU box.
+        default=None,
         help=(
-            "fraction of a GPU per ClientApp (0.2 = five share one card). Leave at 0 on "
-            "CPU. On a GPU box this is required: at 0 the ClientApp actors may get no "
-            "GPU allocation and the sweep silently runs on CPU"
+            "fraction of a GPU per ClientApp (0.2 = five share one card). Required on a GPU "
+            "box -- unset, Ray hides the GPU from every ClientApp and the sweep trains on "
+            "CPU while looking healthy. Pass 0 to ask for CPU deliberately"
         ),
     )
     parser.add_argument(
@@ -85,6 +92,18 @@ def main() -> None:
         )
     )
 
+    # Before anything starts: a sweep that trains on CPU on a GPU box looks healthy and
+    # never finishes (`sweep.gpu_fraction_problem`). A dry run is exempt -- it runs nothing.
+    if not args.dry_run:
+        largest_k = max(
+            (int(r.overrides.get("num-clients", 2)) for r in runs), default=2
+        )
+        problem = gpu_fraction_problem(args.gpus_per_client, largest_k)
+        if problem:
+            print(problem)
+            print("\nRefusing to start. Nothing has been run.")
+            return 1
+
     if args.dry_run:
         print(f"{len(runs)} runs planned:")
 
@@ -97,7 +116,7 @@ def main() -> None:
         lock_timeout_s=args.lock_timeout_s,
         dry_run=args.dry_run,
         cpus_per_client=args.cpus_per_client,
-        gpus_per_client=args.gpus_per_client,
+        gpus_per_client=args.gpus_per_client or 0.0,
     )
 
     for entry, run in zip(entries, runs):
@@ -105,7 +124,8 @@ def main() -> None:
 
     completed = sum(1 for e in entries if e["status"] in ("completed", "skipped_completed"))
     print(f"\n{completed}/{len(entries)} runs completed (this call + already-done).")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -8,6 +8,15 @@
 #     make validate-fedaco PY=python FLWR=flwr
 #
 PY ?= .venv/bin/python
+
+# Fraction of a GPU per ClientApp, forwarded to every sweep target. **Set this on a GPU
+# box.** Ray hides the GPU from any actor requested with num_gpus=0, so unset, every client
+# trains on CPU while the server keeps the GPU -- results look correct and the sweep never
+# finishes. The runners refuse to start when a GPU is present and this is empty; they name
+# the fraction to use (1/num-clients lets them all share one card). Leave it empty on CPU.
+#   make main GPUS=0.05
+GPUS ?=
+GPUS_ARG = $(if $(GPUS),--gpus-per-client $(GPUS),)
 FLWR ?= .venv/bin/flwr
 
 
@@ -106,10 +115,10 @@ main-plan:
 	$(PY) scripts/run_sweep.py --config configs/experiment/main.yaml --dry-run
 
 main:
-	$(PY) scripts/run_sweep.py --config configs/experiment/main.yaml
+	$(PY) scripts/run_sweep.py --config configs/experiment/main.yaml $(GPUS_ARG)
 
 main-client-scale:
-	$(PY) scripts/run_sweep_granular.py --config configs/experiment/main_client_scale.yaml
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/main_client_scale.yaml $(GPUS_ARG)
 
 # Phase 7. The two families are now disjoint (2026-09-19). A1-A9 live in their own
 # per-ablation configs and are driven by `ablations-granular`; `ablation_all.yaml` keeps
@@ -122,11 +131,11 @@ ablations-plan:
 	$(PY) scripts/run_sweep.py --config configs/experiment/ablation_all.yaml --dry-run
 
 ablations:
-	$(PY) scripts/run_sweep.py --config configs/experiment/ablation_all.yaml
+	$(PY) scripts/run_sweep.py --config configs/experiment/ablation_all.yaml $(GPUS_ARG)
 
 ablations-granular:
 	for f in configs/experiment/ablation_a[0-9].yaml; do \
-		$(PY) scripts/run_sweep_granular.py --config "$$f" || exit 1; \
+		$(PY) scripts/run_sweep_granular.py --config "$$f" $(GPUS_ARG) || exit 1; \
 	done
 
 # Phase 8. Same split. R1-R5 live in their own configs (`robustness-granular`);
@@ -139,16 +148,16 @@ robustness-plan:
 	$(PY) scripts/run_sweep.py --config configs/experiment/robustness.yaml --dry-run
 
 robustness:
-	$(PY) scripts/run_sweep.py --config configs/experiment/robustness.yaml
+	$(PY) scripts/run_sweep.py --config configs/experiment/robustness.yaml $(GPUS_ARG)
 
 robustness-granular:
 	for f in configs/experiment/robustness_r*.yaml; do \
-		$(PY) scripts/run_sweep_granular.py --config "$$f" || exit 1; \
+		$(PY) scripts/run_sweep_granular.py --config "$$f" $(GPUS_ARG) || exit 1; \
 	done
 
 # The dedicated, denser K sweep for the O(K^2) overhead curve (plan Sec 9.2, figure 5).
 overhead:
-	$(PY) scripts/run_sweep_granular.py --config configs/experiment/overhead.yaml
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/overhead.yaml $(GPUS_ARG)
 
 # --expected-seeds 5, not the script's default of 8. The 8-seed floor exists only where a
 # p-value is actually claimed -- main.yaml's headline comparison and ablation_a1's

@@ -85,6 +85,20 @@ to image it (a KxK cross fills only 2K-1 cells, and the colour scale would be re
 the holes). Producing that figure needs a small factorial sweep over the two knobs A6 shows
 to matter most — worth declaring only after A6 has run and identified them.
 
+### On a GPU box, set `GPUS` before any sweep
+
+```bash
+make main GPUS=0.05        # 1/num-clients lets every ClientApp share one card
+```
+
+Ray hides the GPU from any actor requested with `num_gpus=0`, so with no fraction set every
+ClientApp trains on **CPU** while the ServerApp keeps the GPU. Server-side evaluation and
+every logged metric look completely normal — the only symptom is wall-clock, against a cost
+projection that a small-core box makes optimistic anyway. For `main.yaml` that is 576 cells ×
+100 rounds of CPU training: it does not finish inside any Kaggle quota and no result file says
+why. Both runners now refuse to start in that situation and name the fraction to pass; leave
+`GPUS` empty on CPU, or pass `--gpus-per-client 0` to ask for CPU deliberately.
+
 ### Before the sweep
 
 **On Colab or Kaggle**, pass `PY=python FLWR=flwr` to any `make` target — those runtimes
