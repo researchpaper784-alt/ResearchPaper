@@ -1356,7 +1356,12 @@ for every client -- identical in 3 of the 6 configurations tested, adjacent leve
 A uniform level assignment normalises back to `base_weights` **exactly**
 (`levels_to_alpha`: `tilde = levels[idx] * base_weights`, then scaled to `target_sum`). So when
 the argmax is client-invariant, the greedy branch of the ACS rule constructs **the FedAvg
-point** -- and at `q0=0.7` that is 70% of station decisions.
+point** -- and the screen ran at `q0=0.9`, so that is **90%** of station decisions.
+
+The 0.9 is itself a bug, found on 2026-09-24 and fixed: plan §14 specifies `q0_exploitation:
+0.70`, and `configs/strategy/fedaco.yaml` encodes it, but `pyproject.toml` -- which is what
+`flwr run` and therefore this screen used -- still carried phase-4's 0.9. See "Four sources of
+truth for the FedACO defaults" below.
 
 The colony is therefore anchored at FedAvg by its own exploitation rule, and can only move via
 the 30% exploratory draws. Its best candidate came in at +0.9559 against F(FedAvg) = +0.9558:
@@ -1371,6 +1376,9 @@ almost no per-client dynamic range, so the pheromone-times-desirability rule deg
 rescaling, widening the sigmoid, or lowering `q0` -- are method changes for the team, not
 something to pick unilaterally. Any of them can now be screened locally in minutes.
 
+`q0` has since been screened (see below): lowering it recovers most of the gap but does not
+close it, so it is a contributing cause rather than the whole story.
+
 ### Also measured, and deliberately NOT fixed
 
 The colony visits **82 distinct alphas out of 210 evaluations** (61% duplicates) where random
@@ -1381,3 +1389,132 @@ budget is never spent and the best fitness was **identical** in all 8 configurat
 also broke four tests encoding "no method outspends the shared budget" and changed the meaning
 of the logged `evaluations_used`. Spending the freed budget is a change to the colony's stopping
 rule, which belongs with the heuristic decision above.
+
+## Phase 7 -- RESOLVED: `q0` is a contributing cause of A1's result, not the whole one
+
+A1's local screen left the anchoring diagnosis untested: the argument was that a
+client-invariant `argmax` makes the ACS greedy branch reconstruct the FedAvg point, so at
+`q0=0.9` the colony spends 90% of its station decisions standing still. If that is right,
+lowering `q0` must recover gain. Screened on the same heterogeneous fixture (K=10,
+dirichlet(0.3), 15 rounds, `aggregate`, gamma_3=0.1), 4 values x 3 seeds, 12 real runs:
+
+| `q0` | mean gain over the FedAvg point | per-seed |
+|---|---|---|
+| **0.9** (what the screen ran) | **+0.0013** | `[-0.0002, +0.0002, +0.0039]` |
+| 0.5 | +0.0222 | `[+0.0214, +0.0203, +0.0248]` |
+| 0.2 | +0.0259 | `[+0.0294, +0.0242, +0.0239]` |
+| 0.0 | +0.0287 | `[+0.0268, +0.0301, +0.0292]` |
+
+The effect is **+0.0274 from 0.9 to 0.0, a 22x improvement**, against a between-seed spread of
+0.0033-0.0056 at every level -- so unlike the macro-F1 column below this is not an averaging
+artifact. **The anchoring diagnosis is confirmed.**
+
+It is not monotone below 0.5, and that matters for how it gets described: essentially the whole
+effect is the single step from 0.9 to 0.5 (+0.021), and 0.5 / 0.2 / 0.0 are within noise of each
+other. The finding is "0.9 is pathological", not "less greed is always better".
+
+**But it does not close the gap.** The controls on the identical fixture: coordinate_grid
++0.0501, pso +0.0484, ga +0.0312, random +0.0304. Even at `q0=0.0` -- no exploitation at all,
+which is barely ACO any more -- the colony reaches +0.0287 and still loses to every one of them.
+So the greedy branch is *a* cause, and something else is also wrong. The remaining candidates
+are unchanged and still the team's call: standardising `d_k` across clients before rescaling
+(the 0.04-span problem the anchoring argument rests on, which lowering `q0` routes around rather
+than fixes), and widening the sigmoid.
+
+### What this screen could NOT answer, and why the fixture is at fault
+
+The obvious follow-up -- does a bigger fitness gain give a better model? -- **cannot be answered
+on this fixture**, and the attempt is worth recording because the first pass at it looked like a
+result. Over all 27 local runs (A1's 15 + this screen's 12):
+
+    Pearson r(fitness gain, final macro-F1)  = -0.095
+    Spearman rho                             = -0.235,  permutation p = 0.272 (20k shuffles)
+
+Read carelessly that is "optimising the fitness makes the model worse", which is a much stronger
+and more interesting claim than the data supports. It is not significant, and the reason is that
+the outcome variable is mostly a floor indicator: **11 of 27 runs score macro-F1 exactly
+0.1000**, which for 4 classes is what an all-one-class predictor scores, i.e. total collapse.
+The rest are scattered over 0.1168-0.3750 with no structure.
+
+Per seed the q0 sweep's macro-F1 goes `0.1168 -> 0.1000 -> 0.1000 -> 0.1168`,
+`0.3406 -> 0.3643 -> 0.1000 -> 0.1000`, `0.2109 -> 0.1875 -> 0.3720 -> 0.1000` -- no direction in
+any of the three. My own first reading of this screen, before the per-seed check, was that
+macro-F1 degraded monotonically with `q0` (means 0.2228 -> 0.1056) -- an averaging artifact over
+three seeds that flip between the collapse floor and 0.37. It was never written down, and it is
+recorded here because it is the same mistake as the isolated colony probe in a smaller space:
+a number computed correctly from a fixture that cannot support the claim drawn from it.
+
+**So the fixture is an instrument for fitness behaviour only.** It was validated against the real
+runs' *fitness* signature (F at the FedAvg point near zero, corner_margin positive) and it
+reproduces that faithfully -- which is what earned it trust for A1 and this screen. It was never
+validated as an accuracy instrument, and at 15 rounds it is not one. Any claim of the form
+"configuration X trains a better model" needs the real gate. Fixing this would need more rounds
+or an easier signal, and both change the fixture's fitness signature, which is the thing it
+exists to reproduce -- so it is a genuine trade, not an oversight to patch.
+
+## Phase 4/6/7 -- RESOLVED: four sources of truth for the FedACO defaults, no two agreeing
+
+Found while checking whether the screen above had run at the documented `q0`. It had not.
+
+FedACO's default hyperparameters are written down in four places:
+
+| where | role | `aco-q0` | `aco-rho-round` | `aco-gamma-dispersion` |
+|---|---|---|---|---|
+| `docs/IMPLEMENTATION_PLAN.md` §14 | the spec | 0.70 | 0.30 | 0.50 |
+| `configs/strategy/fedaco.yaml` | per-strategy overrides | 0.70 | 0.30 | 0.50 |
+| `pyproject.toml` `[tool.flwr.app.config]` | **what `flwr run` uses** | **0.9** | **0.1** | **1.0** |
+| `paper/ALGORITHM.md` §14 table | the paper's description | 0.70 | 0.30 | 0.50 |
+
+`pyproject.toml` carried phase-4's values (commit `0bb64b7`); `configs/strategy/fedaco.yaml` was
+written later (commit `09739ca`) from the plan, annotating each line with its §14 symbol. Neither
+was ever reconciled, and **nothing checked them against each other** -- the recurring shape in
+this project, arriving this time as two sources of truth rather than a check that means nothing.
+
+**Which values a sweep gets depends only on how its experiment YAML lists strategies.** Bare
+names (`- fedaco`) go through `run_sweep.py`, which never reads `configs/strategy/`, so the run
+takes pyproject's defaults. A `file:` reference goes through
+`sweep.resolve_entry_overrides`, which layers the strategy file on top. The split runs straight
+through the paper's tables:
+
+    pyproject's values (q0=0.9):   main.yaml, ablation_all.yaml, robustness.yaml
+                                   ...and every `flwr run`, so the Kaggle gate too
+    fedaco.yaml's values (q0=0.70): main_client_scale.yaml, robustness_r1..r4, smoke.yaml
+
+So `main.yaml`'s headline table and `main_client_scale.yaml`'s K-scaling table, which the paper
+reads as one method at different client counts, would have run **different algorithms**. Same for
+`robustness.yaml` against `robustness_r1..r4`. And `aco-gamma-dispersion` is a weight *inside the
+fitness*, so the objective differed, not only the search over it -- 1.0 against 0.50 is double
+weight on the dispersion term.
+
+### Fixed
+
+`pyproject.toml` now matches plan §14 on all three keys. That direction is not a choice between
+two defensible values: the plan is the spec, `fedaco.yaml` and `ALGORITHM.md` both already encode
+it, and A6 is the ablation that will tune these from that documented starting point.
+
+`tests/test_config_defaults.py` (32 tests) locks it down, and each assertion was confirmed to
+fail when the drift is reintroduced:
+
+* every `configs/strategy/*.yaml` key that also exists in `pyproject.toml` must hold the same
+  value -- a strategy file may add keys, never contradict a default;
+* every strategy-file key must be a declared run_config key (an undeclared one makes `flwr run`
+  exit with a bare `[code: 15]`, a misspelled declared one is silently ignored);
+* both must match plan §14, with a separate test that re-parses §14 and fails if the
+  transcription in the test file has itself gone stale;
+* and an end-to-end test building the run_config by *both* runner paths and requiring every
+  `aco-*` key to agree.
+
+### Also fixed: `paper/ALGORITHM.md` described keys that do not exist
+
+All 21 flat keys in its §14 table used a `fedaco-` prefix; the real prefix is `aco-`. Anyone
+following that table to reproduce a run would have passed keys `flwr run` rejects outright. It
+also described the levels as "log-spaced over [0.0, 2.5]" -- log spacing was a real experimental
+error, fixed long ago, recorded in `EXPERIMENT_LOG.md`, and still in the paper's own method
+description. Both corrected.
+
+### What this does to results already in hand
+
+Every local screen in this document ran at `q0=0.9`, `gamma_2=1.0`, `rho_round=0.1` -- verified
+from the embedded `config.run_config` in the result JSONs, not inferred. A1's screen is therefore
+a measurement of a configuration the paper does not document, and is being re-run at the
+corrected defaults. The Kaggle gate is in the same position: it used pyproject, so it ran at 0.9.

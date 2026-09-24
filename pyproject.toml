@@ -205,8 +205,15 @@ aco-ants-start = 30
 aco-ants-end = 10
 aco-iters-start = 10
 aco-iters-end = 4
+# ⚠️ Every `aco-*` default below is plan §14's starting point, and it is duplicated in
+# `configs/strategy/fedaco.yaml`. The two must agree: which of them a sweep gets depends
+# only on whether its experiment YAML lists strategies as bare names (`- fedaco`, so these
+# defaults apply) or as `file: configs/strategy/fedaco.yaml`. They silently disagreed on
+# aco-q0 / aco-rho-round / aco-gamma-dispersion from phase-4 until 2026-09-24, which made
+# main.yaml and main_client_scale.yaml different algorithms under one name.
+# `tests/test_config_defaults.py` now fails if they drift apart again.
 # ACS transition rule and within-round pheromone update (aco/colony.py).
-aco-q0 = 0.9
+aco-q0 = 0.70
 aco-pheromone-exp = 1.0
 aco-heuristic-exp = 2.0
 aco-rho = 0.1
@@ -220,7 +227,7 @@ aco-stagnation-patience = 5
 # shared by the colony and the pheromone store, which use the same bounds by design.
 aco-persistence = "decayed"
 aco-tau0 = 1.0
-aco-rho-round = 0.1
+aco-rho-round = 0.30
 aco-absence-decay = 0.5
 # Data-free fitness (aco/fitness.py). `aco-normalize-dispersion=false` restores the
 # pre-2026-09-17 unnormalized dispersion term; there is no experimental reason to set
@@ -228,7 +235,7 @@ aco-absence-decay = 0.5
 # proposed) or "server_val" (upper-bound reference, needs a much smaller colony budget);
 # "client_probe" is not selectable -- its round-trip is Phase 7 work.
 aco-gamma-alignment = 1.0
-aco-gamma-dispersion = 1.0
+aco-gamma-dispersion = 0.50
 aco-gamma-entropy = 0.1
 aco-normalize-dispersion = true
 aco-fitness-mode = "data_free"

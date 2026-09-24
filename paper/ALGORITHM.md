@@ -153,28 +153,36 @@ $I_0{=}10$.
 
 ## Default hyperparameters (plan §14, `configs/strategy/fedaco.yaml`)
 
+These values live in **two** files that must agree: `pyproject.toml`'s
+`[tool.flwr.app.config]` (what every `flwr run` uses, and what any experiment YAML listing
+strategies as bare names gets) and `configs/strategy/fedaco.yaml` (layered on top for YAMLs
+using `file:`). They disagreed on `aco-q0`, `aco-rho-round` and `aco-gamma-dispersion` from
+phase-4 until 2026-09-24; `tests/test_config_defaults.py` now checks both against plan §14
+and against each other. The flat key names below were also wrong in every row until the same
+date — the prefix is `aco-`, not `fedaco-`.
+
 | Plan §14 name | This repo's flat key | Default |
 |---|---|---|
-| `levels` | `fedaco-num-levels`, `-level-low`, `-level-high` | 11 levels, log-spaced over [0.0, 2.5] |
-| `alpha_exponent_a` | `fedaco-a-exponent` | 1.0 |
-| `beta_exponent_b` | `fedaco-b-exponent` | 2.0 |
-| `rho_evaporation` | `fedaco-rho` | 0.10 |
-| `q0_exploitation` | `fedaco-q0` | 0.70 |
-| `n_ants` | `fedaco-ants-start` (decays to `fedaco-ants-end`=10) | 30 |
-| `n_iterations` | `fedaco-iters-start` (decays to `fedaco-iters-end`=4) | 10 |
-| `tau_init` | `fedaco-tau0` | 1.0 |
-| `tau_min` / `tau_max` | `fedaco-tau-min` / `fedaco-tau-max` | 0.01 / 10.0 |
-| `pheromone_persistence` | `fedaco-pheromone-persistence` | `decayed` |
-| `rho_round` | `fedaco-rho-round` | 0.30 |
-| `fitness_mode` | `fedaco-fitness-mode` | `data_free` |
-| `gamma1_alignment` | `fedaco-gamma-alignment` | 1.0 |
-| `gamma2_dispersion` | `fedaco-gamma-dispersion` | 0.50 |
-| `gamma3_entropy` | `fedaco-gamma-entropy` | 0.10 |
-| `weight_sum` | `fedaco-target-sum` | 1.0 (fixed, not "learned" — see below) |
-| `safety_fallback` | `fedaco-safety-fallback` | `true` |
+| `levels` | `aco-num-levels`, `-level-low`, `-level-high`, `-level-spacing` | 11 levels, **linearly** spaced over [0.0, 2.5] |
+| `alpha_exponent_a` | `aco-pheromone-exp` | 1.0 |
+| `beta_exponent_b` | `aco-heuristic-exp` | 2.0 |
+| `rho_evaporation` | `aco-rho` | 0.10 |
+| `q0_exploitation` | `aco-q0` | 0.70 |
+| `n_ants` | `aco-ants-start` (decays to `aco-ants-end`=10) | 30 |
+| `n_iterations` | `aco-iters-start` (decays to `aco-iters-end`=4) | 10 |
+| `tau_init` | `aco-tau0` | 1.0 |
+| `tau_min` / `tau_max` | `aco-tau-min` / `aco-tau-max` | 0.01 / 10.0 |
+| `pheromone_persistence` | `aco-persistence` | `decayed` |
+| `rho_round` | `aco-rho-round` | 0.30 |
+| `fitness_mode` | `aco-fitness-mode` | `data_free` |
+| `gamma1_alignment` | `aco-gamma-alignment` | 1.0 |
+| `gamma2_dispersion` | `aco-gamma-dispersion` | 0.50 |
+| `gamma3_entropy` | `aco-gamma-entropy` | 0.10 |
+| `weight_sum` | `aco-target-sum` | 1.0 (fixed, not "learned" — see below) |
+| `safety_fallback` | `aco-safety-fallback` | `true` |
 | `budget_schedule` | *(implementation-fixed: linear, not the plan's suggested cosine)* | n/a |
 | `early_stop_patience` | `ColonyConfig.stagnation_patience` (not yet a flat run_config key) | 5 |
-| *(not in plan §14)* | `fedaco-search-method` | `aco` — the A1 ablation axis |
+| *(not in plan §14)* | `aco-search-method` | `aco` — the A1 ablation axis |
 
 Two real deviations from §14, both already documented in `docs/OPEN_QUESTIONS.md`
 and in `configs/strategy/fedaco.yaml`'s own comments: the budget schedule is linear
@@ -214,7 +222,7 @@ same `Fitness.evaluate(alpha) -> float` interface (`aco/fitness.py`):
 `ServerValFitness` (materializes a candidate model, evaluates macro-F1 on a server val
 set — an upper-bound reference) and `ClientProbeFitness` (scores a fixed menu of
 candidates from client-reported losses collected one round earlier).
-`fedaco-fitness-mode=server_val` is fully wired into `FedACO.aggregate_train` (pass
+`aco-fitness-mode=server_val` is fully wired into `FedACO.aggregate_train` (pass
 `model`/`val_loader`/`device` to the constructor, or let `strategies/factory.py` do it
 via `fl/app.py::global_val_loader`) — `client_probe` is the one mode still not wired
 for live execution (selecting it raises `NotImplementedError`, not a silent fallback);

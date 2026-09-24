@@ -31,6 +31,20 @@ small and the dispersion term large. Label-parity images cannot do that at any s
 here has to be confirmed on the real gate before it goes in the paper -- the log-spaced-level
 episode is what happens when synthetic evidence is trusted to transfer.
 
+⚠️ **It is an instrument for fitness behaviour only -- not for model quality.** Measured over
+the 27 local runs of the A1 and q0 screens, **11 scored final macro-F1 of exactly 0.1000**,
+which for 4 classes is what an all-one-class predictor scores: total collapse. The remaining 16
+scatter over 0.1168-0.3750 with no structure, and `rho(fitness gain, macro-F1) = -0.235` at
+`p = 0.27` -- indistinguishable from noise in either direction. That is a property of the
+fixture at these settings, not a finding about the fitness: 15 rounds on a deliberately hard
+task collapses often enough that the accuracy column is mostly a floor indicator.
+
+So this fixture can rank configurations by *fitness* behaviour, which is what it was validated
+to do, and cannot support any claim of the form "configuration X trains a better model". Those
+need the real gate. Raising `--amplitude`, lowering `--noise`, or running more rounds would make
+it an accuracy instrument and would change the fitness signature it exists to reproduce -- see
+the note on difficulty below. That is a real trade, not a defect to patch.
+
 Run:
   python scripts/synthetic_heterogeneous_dataset.py --out-dir /tmp/het --num-images 600 --image-size 32
 """
