@@ -762,7 +762,55 @@ def merge_train_metrics(rounds_log: list[dict], strategy_result, round_offset: i
     from `rounds_log` is skipped rather than appended: `rounds_log` is the authoritative
     record of rounds that were actually evaluated and checkpointed.
     """
-    metrics = getattr(strategy_result, "train_metrics_clientapp", None)
+    _merge_clientapp_metrics(
+        rounds_log, strategy_result, "train_metrics_clientapp", "train_", round_offset
+    )
+
+
+def merge_evaluate_metrics(rounds_log: list[dict], strategy_result, round_offset: int = 0) -> None:
+    """Fold the per-round `aggregate_evaluate` MetricRecord into `rounds_log`, in place.
+
+    **This is the other half of `merge_train_metrics`, and it was missing.** `Result` carries
+    `evaluate_metrics_clientapp` alongside `train_metrics_clientapp` (verified against the
+    installed flwr==1.36.0 dataclass), and nothing read it -- so every client's
+    `evaluate_handler` ran a forward pass over its local-val split, every round, and the
+    result went to Flower's console and nowhere else.
+
+    Two costs, and the second is the one that mattered.
+
+    Wasted compute is the small one: a per-client forward pass per round across the ~1,700
+    cells this project plans.
+
+    The real cost is that it made a bug undetectable. On Kaggle every client's evaluation
+    failed -- the model was on CPU while the batches were on the GPU -- and Flower's summary
+    printed `Aggregated ClientApp-side Evaluate Metrics: {}`. The run still wrote a result
+    marked `completed`, and that result looked *identical* to a healthy one, because these
+    fields were never in it. Three GPU sessions went past before anyone read the console
+    line. A field that is absent cannot be checked; one that is recorded and empty can.
+
+    It also loses a capability the code went out of its way to build.
+    `per_class_confusion_counts` is additive across clients precisely so a correct pooled
+    macro-F1 can be recomputed under label skew -- the plan flags naive averaging of
+    per-client macro-F1 as wrong, and R1/R2's whole point is behaviour under skew. Those
+    counts were computed per client per round and thrown away.
+
+    Prefixed `client_eval_` rather than `eval_`: the entries already carry server-side
+    `test_*` and `val_*` from `build_evaluate_fn`, and these are a different measurement --
+    each client's own held-out split, not the server's pooled one. Naming them so the
+    difference is visible in the result file is the point.
+    """
+    _merge_clientapp_metrics(
+        rounds_log, strategy_result, "evaluate_metrics_clientapp", "client_eval_", round_offset
+    )
+
+
+def _merge_clientapp_metrics(
+    rounds_log: list[dict], strategy_result, attribute: str, prefix: str, round_offset: int
+) -> None:
+    """Shared body. One implementation so the train and evaluate halves cannot drift in how
+    they map rounds -- the offset arithmetic on a resumed run is the fiddly part, and having
+    it twice is how one of them ends up off by one."""
+    metrics = getattr(strategy_result, attribute, None)
     if not metrics:
         return
     by_round = {entry["round"]: entry for entry in rounds_log}
@@ -771,7 +819,7 @@ def merge_train_metrics(rounds_log: list[dict], strategy_result, round_offset: i
         if entry is None:
             continue
         for key, value in dict(record).items():
-            entry[f"train_{key}"] = value
+            entry[f"{prefix}{key}"] = value
 
 
 def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offset: int):
@@ -912,6 +960,7 @@ def main(grid: Grid, context: Context) -> None:
     )
     wall_clock_s = time.time() - t_start
     merge_train_metrics(rounds_log, strategy_result, round_offset)
+    merge_evaluate_metrics(rounds_log, strategy_result, round_offset)
 
     write_result(
         output_dir / f"{run_id}.json",
@@ -953,6 +1002,7 @@ __all__ = [
     "train_handler",
     "evaluate_handler",
     "build_evaluate_fn",
+    "merge_evaluate_metrics",
     "merge_train_metrics",
     "global_test_loader",
     "global_val_loader",

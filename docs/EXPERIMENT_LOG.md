@@ -2126,3 +2126,70 @@ every result file that governed only the server; and the reproducibility band se
 non-reproducible run. Every one was invisible because something reported success.
 
 557 tests pass, ruff clean.
+
+## 2026-09-24 (the important one) -- the FL harness runs on THIS box, and it found another dropped half
+
+`ray` and `flwr.simulation` are installed in this container, on Linux x86_64. Every note in this
+repo saying the harness cannot run locally is about the *Intel-macOS* dev machine and has been
+quietly false here for the whole session. So a real `flwr run .` went end to end on the
+synthetic smoke dataset, and three things came out of it.
+
+### 1. The determinism fix is confirmed empirically, not structurally
+
+Two runs, identical config, `seed=0`, separate processes:
+
+| | run 1 | run 2 |
+|---|---|---|
+| final_test_macro_f1 | 0.3333333333 | 0.3333333333 |
+| train_best_fitness | 0.8654202819 | 0.8654202819 |
+| train_corner_margin | -0.0249431129 | -0.0249431129 |
+| train_alpha | [0.25714287, 0.25714287, 0.22857143, 0.25714287] | identical |
+
+**11 of 11 metrics bit-for-bit identical.** Until now the only evidence was a test asserting
+that `seed_everything` appears inside the handlers -- which proves the call exists, not that it
+works. The same run also shows `train_server_round: 3.0` (was -1) and
+`participating_client_ids: [0, 1, 2, 3]` (sorted), so both halves of the 2b7c479 fix are
+confirmed on real output.
+
+### 2. Client-side evaluation was computed every round and thrown away
+
+`Result` carries `evaluate_metrics_clientapp` beside `train_metrics_clientapp` (verified
+against the installed dataclass). `merge_train_metrics` folded in the first. **Nothing read the
+second.** So every client's `evaluate_handler` ran a forward pass over its local-val split,
+every round, and the output reached Flower's console and nowhere else.
+
+Wasted compute is the small cost -- a per-client forward pass per round across ~1,700 planned
+cells. The real cost is that **it is why the GPU bug survived three sessions.** The fields that
+vanished were never in the result file, so a `completed` result with every client's evaluation
+failing was byte-comparable to a healthy one. A field that is absent cannot be checked; one
+recorded and empty can.
+
+It also lost a capability the code went out of its way to build.
+`per_class_confusion_counts` is additive across clients *precisely* so a correct pooled
+macro-F1 can be recomputed under label skew -- the plan flags naive averaging of per-client
+macro-F1 as wrong, and label skew is what R1/R2 measure. Those counts were computed and
+discarded. `merge_evaluate_metrics` now folds them in under `client_eval_`; a real run confirms
+19 fields land in the result file, per-class counts included.
+
+### 3. CI asserted `status == "completed"` and nothing else
+
+Which is exactly the assertion the GPU bug satisfied. `scripts/check_smoke_result.py` now
+checks that a result is *complete* rather than merely finished -- client-side evaluation
+present, `train_server_round` counting from 1, per-round records existing, a populated `final`
+-- and CI runs the smoke a **second time** and requires the two to agree exactly.
+
+That second run is the part no unit test can replace. The unseeded-client bug needs two real
+processes to show, which CI has and a developer's `pytest` does not. Comparison is bit-for-bit,
+not a tolerance band: same machine, same build, same seed, so there is no drift to absorb and a
+tolerance would hide the one failure it exists for -- the shipped reproducibility band was 0.15
+wide while the variance it was meant to absorb was 0.19.
+
+Each check was verified against a mutated copy of the real result: the device bug, the -1 round
+number, a run that aggregated nothing, and two runs differing at the same seed are all caught,
+and a healthy result passes.
+
+**Fifth instance of the same defect class, and the one that explains the others**: a subsystem
+whose output goes nowhere cannot be checked, so every bug inside it is invisible by
+construction.
+
+572 tests pass, ruff clean.

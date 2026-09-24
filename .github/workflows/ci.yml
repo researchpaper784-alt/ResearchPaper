@@ -74,14 +74,30 @@ jobs:
           FLWR_DISABLE_RUNTIME_DEPENDENCY_INSTALLATION: "1"
         run: |
           .venv/bin/flwr run . --stream --run-config "num-clients=2 min-client-size=2 image-size=16 local-batch-size=4 num-rounds=2 num-classes=4 cache-dir='/tmp/fedswarm_ci_smoke/cache' manifest-path='/tmp/fedswarm_ci_smoke/manifest.csv' partition-cache-dir='/tmp/fedswarm_ci_smoke/partitions' output-dir='/tmp/fedswarm_ci_smoke/results' checkpoint-dir='/tmp/fedswarm_ci_smoke/checkpoints'"
-      - name: Verify a completed result was written
+      # `status == completed` on its own is the assertion that let the GPU bug through.
+      # On Kaggle every client's evaluation failed -- model on CPU, batches on GPU -- and the
+      # run still wrote a result marked `completed`, because the fields that vanished were
+      # never in the result file. Three GPU sessions went past. Each check below is a bug this
+      # repo actually shipped, not a hypothetical.
+      - name: Verify the result is complete, not merely finished
         run: |
           ls /tmp/fedswarm_ci_smoke/results/*.json
-          .venv/bin/python -c "
-          import json, glob
-          paths = glob.glob('/tmp/fedswarm_ci_smoke/results/*.json')
-          assert paths, 'no result file was written'
-          payload = json.load(open(paths[0]))
-          assert payload['status'] == 'completed', payload['status']
-          print('CI smoke result:', payload['final'])
-          "
+          .venv/bin/python scripts/check_smoke_result.py \
+            --results-dir /tmp/fedswarm_ci_smoke/results
+
+      # Runs the identical config a second time and compares. `seed_everything` used to run
+      # in `server_app.main()` only, and a ClientApp is a separate Ray actor process, so every
+      # client's train loader shuffled from OS entropy -- two runs of the same config and seed
+      # returned 0.1363 and 0.3286 on Kaggle. No unit test can catch that: it needs two real
+      # processes, which is exactly what CI has and a developer's pytest run does not.
+      - name: Run the smoke a second time and check it reproduces
+        env:
+          FEDSWARM_REPO_ROOT: ${{ github.workspace }}
+          FLWR_DISABLE_RUNTIME_DEPENDENCY_INSTALLATION: "1"
+        run: |
+          cp /tmp/fedswarm_ci_smoke/results/*.json /tmp/first_run.json
+          rm -f /tmp/fedswarm_ci_smoke/results/*.json /tmp/fedswarm_ci_smoke/checkpoints/*
+          .venv/bin/flwr run . --stream --run-config "num-clients=2 min-client-size=2 image-size=16 local-batch-size=4 num-rounds=2 num-classes=4 cache-dir='/tmp/fedswarm_ci_smoke/cache' manifest-path='/tmp/fedswarm_ci_smoke/manifest.csv' partition-cache-dir='/tmp/fedswarm_ci_smoke/partitions' output-dir='/tmp/fedswarm_ci_smoke/results' checkpoint-dir='/tmp/fedswarm_ci_smoke/checkpoints'"
+          .venv/bin/python scripts/check_smoke_result.py \
+            --results-dir /tmp/fedswarm_ci_smoke/results \
+            --compare-against /tmp/first_run.json
