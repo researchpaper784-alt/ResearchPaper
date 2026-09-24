@@ -85,6 +85,39 @@ to image it (a KxK cross fills only 2K-1 cells, and the colour scale would be re
 the holes). Producing that figure needs a small factorial sweep over the two knobs A6 shows
 to matter most — worth declaring only after A6 has run and identified them.
 
+### Check a sweep config runs before spending GPU hours on it
+
+```bash
+python scripts/synthetic_heterogeneous_dataset.py --out-dir /tmp/fx --num-images 600 --image-size 32
+make preflight-configs FIXTURE=/tmp/fx
+```
+
+Runs one cell of every declared arm at 2 rounds and K=6. `strategy_from_run_config` rejecting a
+bad config is necessary and not sufficient — it builds the strategy, not the round, and a config
+can construct cleanly then die at round 1. The worst case does not raise at all: a
+`min-train-nodes` above the supernode count makes Flower's `sample_nodes` wait in a
+`while ...: sleep(1)` loop that never gives up, so the run consumes the whole session and writes
+nothing. A minute per arm on CPU against several hundred GPU-hours.
+
+### Which sweeps are worth running right now
+
+The sweeps do not all have the same prerequisites, and two different questions decide it:
+
+| tier | sweeps | cells | GPU-h | condition |
+|---|---|---|---|---|
+| 1 | R1–R6, `robustness.yaml`, A9, A3 | 430 | 90–179 | none — run these first |
+| 2 | A4, A5, A7 | 175 | 36–73 | survive a reframe, but only interpretable once the colony's mechanism is sound |
+| 3 | A2, A6, A8, `ablation_all` | 340 | 88–175 | ACO-specific; dropped entirely if claim C2 is reframed |
+
+Tier 2 is the distinction worth being careful about: those three ablate the *fitness* and
+*desirability* terms, which a reframe keeps — but if the colony is not searching (the safety
+fallback currently fires in 44% of rounds, where a coordinate sweep improves in every one) then
+every arm collapses toward the same behaviour and the ablation measures noise rather than the
+term it names. `scripts/check_fedaco_health.py --strict` is the gate on that.
+
+A1 (80 cells) is not in this table: it is the main sweep's own go/no-go on claim C2, and
+`docs/OPEN_QUESTIONS.md` records what three local screens already say about it.
+
 ### On a GPU box, set `GPUS` before any sweep
 
 ```bash

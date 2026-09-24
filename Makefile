@@ -221,6 +221,17 @@ fitness-repro:
 		$(PY) scripts/check_fedaco_health.py --results-dir /tmp/fedswarm_het/$$mode; \
 	done
 
+# Execute one tiny cell of every arm of every sweep config, to prove the config survives
+# round 1 before anyone spends GPU hours on it. Constructing a strategy is not the same as
+# running a round, and the worst failure here does not raise at all: a `min-train-nodes` above
+# the supernode count makes Flower's sample_nodes loop forever, consuming a whole Kaggle
+# session and writing nothing. Needs a synthetic fixture -- build one with
+# scripts/synthetic_heterogeneous_dataset.py and point FIXTURE at it.
+FIXTURE ?= /tmp/fedswarm_fixture
+CONFIGS ?= configs/experiment/robustness_r*.yaml configs/experiment/ablation_a[0-9].yaml
+preflight-configs:
+	$(PY) scripts/preflight_sweep_configs.py --fixture $(FIXTURE) --configs $(CONFIGS)
+
 # Plan §9.3's acceptance criterion: every figure and table regenerates from results/ with
 # no manual steps, byte-for-byte identically on a second pass. Nothing checked this until
 # 2026-09-24, and the first run found two faults no unit test could see -- both needed the
