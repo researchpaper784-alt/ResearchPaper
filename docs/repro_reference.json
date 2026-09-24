@@ -1,24 +1,26 @@
 {
-  "_comment": "Phase 10 (plan): reference tolerance band for scripts/verify_repro.py, seeded from a real, verified completed smoke run -- results/fl/e35285b33a_0.json (gitignored, kept locally; git_sha 9b01a4621a256e2c170501fc7608197411165590, this repo's own phase-4 commit; provenance.gpu.available=false, CPU runtime -- see docs/OPEN_QUESTIONS.md's Phase 3 breakthrough entry). Not a statistically-estimated band from many runs (only one real completed run exists so far) -- a generous absolute tolerance around that single verified data point, wide enough to absorb float-determinism drift across platforms/torch versions, tight enough to catch a genuinely broken pipeline (e.g. a model that never trains at all, or a crash reported as success).",
-  "run_config": {
-    "strategy-name": "fedavg",
-    "num-clients": 2,
-    "num-rounds": 2,
-    "regime": "iid",
-    "model-name": "simple_cnn",
-    "model-norm": "groupnorm",
-    "image-size": 112
-  },
-  "reference_source_run_id": "e35285b33a_0",
-  "metrics": {
-    "final_test_macro_f1": {
-      "reference": 0.4465611406754979,
-      "tolerance_abs": 0.15,
-      "min_acceptable": 0.10
-    }
-  },
-  "num_rounds_completed": {
-    "reference": 2,
-    "exact_match_required": true
+ "_comment": "Phase 10 (plan): reference tolerance band for scripts/verify_repro.py, seeded from a real, verified completed smoke run -- results/fl/e35285b33a_0.json (gitignored, kept locally; git_sha 9b01a4621a256e2c170501fc7608197411165590, this repo's own phase-4 commit; provenance.gpu.available=false, CPU runtime -- see docs/OPEN_QUESTIONS.md's Phase 3 breakthrough entry). Not a statistically-estimated band from many runs (only one real completed run exists so far) -- a generous absolute tolerance around that single verified data point, wide enough to absorb float-determinism drift across platforms/torch versions, tight enough to catch a genuinely broken pipeline (e.g. a model that never trains at all, or a crash reported as success).",
+ "run_config": {
+  "strategy-name": "fedavg",
+  "num-clients": 2,
+  "num-rounds": 2,
+  "regime": "iid",
+  "model-name": "simple_cnn",
+  "model-norm": "groupnorm",
+  "image-size": 112
+ },
+ "reference_source_run_id": "e35285b33a_0",
+ "metrics": {
+  "final_test_macro_f1": {
+   "reference": 0.4465611406754979,
+   "tolerance_abs": 0.15,
+   "min_acceptable": 0.1
   }
+ },
+ "num_rounds_completed": {
+  "reference": 2,
+  "exact_match_required": true
+ },
+ "seeded_after_commit": null,
+ "_STALE": "SEEDED BEFORE CLIENT-SIDE SEEDING EXISTED (git_sha 9b01a462..., pre-2b7c479). The reference value below is one draw from an unrecorded distribution: at that commit `seed_everything` ran only in server_app.main(), and a ClientApp is a separate Ray actor process, so every client's train loader shuffled from OS entropy. Two Kaggle runs of an identical FedAvg config later returned 0.1363 and 0.3286 -- a 0.19 swing against this file's own 0.15 tolerance. `load_reference` refuses this file; regenerate with `python scripts/verify_repro.py --seed-reference` from a completed post-fix run. Kept rather than deleted so the numbers any pre-fix result was checked against stay on record."
 }

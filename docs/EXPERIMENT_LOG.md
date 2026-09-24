@@ -2027,3 +2027,50 @@ with persistence off, it was never about stigmergy.
 Person C's workstream is now 1,015 cells / 101,500 rounds / ~217 GPU-hours.
 
 547 tests pass, ruff clean.
+
+## 2026-09-24 (last) -- verify_repro was checking a non-reproducible number against a band narrower than its variance
+
+Phase 10's acceptance criterion is "runs the smoke config and checks final metrics fall within
+a recorded tolerance band". The band, `docs/repro_reference.json`, was seeded from run
+`e35285b33a_0` at git_sha `9b01a462...` -- **before** client-side seeding existed. At that
+commit `seed_everything` ran only in `server_app.main()`, and a ClientApp is a separate Ray
+actor process, so every client's train loader shuffled from OS entropy.
+
+So the reference value was one draw from an unrecorded distribution. Its `tolerance_abs` was
+0.15, documented as "wide enough to absorb float-determinism drift". The drift was not
+float-sized: two Kaggle runs of an identical FedAvg config, same seed, returned **0.1363 and
+0.3286** -- a 0.19 swing, wider than the band itself. The check was comparing a
+non-reproducible quantity against a tolerance narrower than its own variance, and passing or
+failing at random.
+
+Post-fix it is worse rather than better. Runs reproduce now, and a deterministic value has no
+reason to land near an old random draw -- so the check would fail for correct runs. Either way
+`verify_repro: PASSED` never meant what the plan says it means, and a reproducibility claim in
+a paper resting on it is not recoverable once published.
+
+**`load_reference` now refuses a band that does not carry `seeded_after_commit` equal to the
+determinism-fix commit**, with the reason and the remedy in the error. `verify_repro.py` exits
+2 on that refusal rather than pretending to a verdict, and gains `--seed-reference` to write a
+fresh band from a completed run in one command instead of hand-edited JSON.
+
+Two deliberate choices in that:
+
+- **Seeding is its own mode, not a fallback.** Re-seeding whenever the check fails would turn
+  every regression into a new reference and the check into a no-op. B's notebook prints the
+  command and does not run it.
+- **The regenerated tolerance is 0.05, not 0.15.** The old value was sized to absorb variance
+  the code no longer has. With the clients seeded, the same config and seed reproduce, so the
+  band only needs to cover genuine cross-platform float drift -- and a band three times wider
+  than the effect it measures cannot catch a broken pipeline, which is its only job.
+
+The stale file is marked rather than deleted, so the numbers any pre-fix result was checked
+against stay on record. Its two existing tests now pass `allow_stale=True` and check the
+file's *shape*, which is what they were really for; verifying against it is what the refusal
+covers.
+
+**This is the third instance this session of the same defect class**: a check that runs, passes,
+and means nothing. The others were the client-side evaluation whose metrics came back silently
+empty, and the `seed` recorded in every result file that governed only the server. All three
+were invisible precisely because something was reported as working.
+
+552 tests pass, ruff clean.
