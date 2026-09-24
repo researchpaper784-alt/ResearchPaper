@@ -120,7 +120,26 @@ def plot_overhead_vs_k(k_values: np.ndarray, overhead_ms: np.ndarray) -> Figure:
     (plan §4.6/§9.2 -- the empirical half of the O(K^2) claim). The fit constrains
     the curve through the origin (overhead(0)=0 is physically required, a free
     intercept would let the fit hide a systematic offset the plan's claim doesn't
-    make room for) by fitting c in overhead = c*K^2 via least squares on K^2 alone."""
+    make room for) by fitting c in overhead = c*K^2 via least squares on K^2 alone.
+
+    ⚠️ **The measured data is not quadratic in the range this paper runs, so this
+    overlay currently asserts more than the numbers support.**
+    `scripts/bench_aggregation_overhead.py` measures K from 5 to 800 at d=390,404 on CPU
+    (which is where aggregation really runs): `ms/K^2` falls 43x across that range while
+    `ms/K` rises only 3.7x, and the implied GFLOP/s climbs monotonically from 1.2 to 52.9 --
+    the arithmetic is never the limit. Least squares gives R^2 = 0.972 for a linear fit
+    against 0.969 for the quadratic one: effectively tied, because both are approximating a
+    curve that is between the two and closer to linear. The Gram build is
+    memory-bandwidth-bound (O(Kd) traffic) long before it is compute-bound (O(K^2 d)
+    arithmetic).
+
+    O(K^2) remains the correct asymptotic statement and the honest claim -- that overhead is
+    negligible -- holds more strongly than the plan expected, at 1.0-3.1% of round wall-clock
+    across every K measured, improving as K grows. But a reader who plots `ms/K^2` sees it
+    fall by a factor of 43, so figure 5 should show the measured points with the fit that
+    describes them, or plot both, rather than a lone quadratic overlay. Deciding which is a
+    paper-presentation call, so this is documented rather than silently changed.
+    """
     k_values = np.asarray(k_values, dtype=float)
     overhead_ms = np.asarray(overhead_ms, dtype=float)
     fig = Figure(figsize=(6.0, 4.0))

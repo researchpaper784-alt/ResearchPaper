@@ -2429,3 +2429,72 @@ reproduced the real runs' fitness signature on every axis checked so far, but it
 and a claim this consequential should not rest on it alone.
 
 606 tests pass, ruff clean.
+
+## 2026-09-24 (later still) -- claim C3 holds, but not for the reason it claims
+
+`overhead.yaml` goes to K=200, which needs 200 Ray actors and the real dataset, so it cannot
+run here. But C3 is about *server-side* work, and that is directly measurable:
+`scripts/bench_aggregation_overhead.py` times `precompute_gram` plus `run_colony` on K x d
+delta tensors at d=390,404 (simple_cnn's state dict, image-size independent).
+
+**Why this proxy is trustworthy where the isolated colony probe was not.** The colony probe
+tried to *rank search methods by fitness* and failed because its synthetic landscape did not
+reproduce the real one. This measures the wall-clock of a deterministic computation on arrays
+of a given shape, and `deltas @ deltas.T` does identical arithmetic whether the deltas came
+from training or a generator. It also runs on the right device: `precompute_gram` builds its
+output with `device=deltas.device`, the deltas arrive as Flower message arrays, and FedACO's
+`device` argument is used only by `fitness_mode="server_val"` -- so aggregation is on CPU in
+real runs too. And it is anchored: the project's one real measurement is 198 ms at K=10 on a
+T4 box; this benchmark gives 121-131 ms, a ratio of 0.61-0.66x on a different host CPU.
+
+### The claim's substance holds, and improves with K
+
+| K | overhead (gram + colony) | share of a round |
+|---|---|---|
+| 5 | 117 ms | 3.13% |
+| 10 | 131 ms | 1.74% |
+| 20 | 204 ms | 1.36% |
+| 50 | 434 ms | 1.16% |
+| 100 | 757 ms | 1.01% |
+| 200 | 1467 ms | 0.98% |
+
+(Round cost extrapolated as 7500 ms x K/10 from the measured K=10 point -- an assumption, so
+the percentages are softer than the overhead numbers, which are measured.)
+
+### The O(K^2) shape does not appear
+
+| K | gram ms | ms/K | ms/K^2 | implied GFLOP/s |
+|---|---|---|---|---|
+| 5 | 15.8 | 3.155 | 0.6310 | 1.2 |
+| 20 | 86.7 | 4.333 | 0.2167 | 3.6 |
+| 100 | 593.4 | 5.934 | 0.0593 | 13.2 |
+| 200 | 1355.8 | 6.779 | 0.0339 | 23.0 |
+| 400 | 3624.3 | 9.061 | 0.0227 | 34.5 |
+| 800 | 9442.0 | 11.803 | 0.0148 | 52.9 |
+
+`ms/K^2` falls **43x** across the range while `ms/K` rises only 3.7x, and the implied GFLOP/s
+climbs monotonically from 1.2 to 52.9 -- the arithmetic is never the limit. Least squares:
+**linear R^2 = 0.9722, quadratic R^2 = 0.9689.** Effectively tied, because both approximate a
+curve that sits between them and closer to linear.
+
+The reason is memory traffic. `deltas @ deltas.T` is O(K^2 d) arithmetic but only O(Kd) bytes
+read, and at K=200 that matrix is 312 MB. The build is bandwidth-bound long before it is
+compute-bound, and it has still not crossed over at K=800 (1.25 GB).
+
+The colony is separately flat: 90-188 ms across K=5-200, a 1.3x rise for a 40x rise in K. The
+Gram trick makes each fitness evaluation O(K), so the fixed 30x10 budget should give O(A*I*K) --
+but at these sizes the per-evaluation Python loop dominates the vector work entirely.
+
+### What this means for the paper
+
+O(K^2) is still the right *asymptotic* statement, and C3's honest claim -- negligible overhead
+-- holds more strongly than the plan expected. But plan §9.2's figure 5 asks for a fitted c*K^2
+curve overlaid on the measurements, which `figures.plot_overhead_vs_k` implements, and that
+overlay would assert a shape the data does not show: a reader who plots `ms/K^2` sees it fall
+43x. The function's docstring now records the measurement and the options; which fit the figure
+shows is a presentation decision, so it is documented rather than changed unilaterally.
+
+Confirming the constant on the real hardware is still worth `overhead.yaml`'s 7 cells (~0.1
+GPU-h) -- the cheapest sweep in the project.
+
+637 tests pass, ruff clean.
