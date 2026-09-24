@@ -73,6 +73,12 @@ from fedswarm.utils.runner import load_result_files
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# A run smaller than this cannot certify a 100-round K=20 sweep. Deliberately well below the
+# real sweep shape -- the point is to exclude smoke and fixture runs, not to demand a rerun of
+# the thing being gated.
+MIN_ROUNDS_TO_CERTIFY = 15
+MIN_CLIENTS_TO_CERTIFY = 10
+
 # How close to log(L) counts as "uniform". Entropy is a log-scale quantity and the top of
 # its range is flat, so a small absolute gap is a large behavioural one: at L=11, 2% below
 # maximum still leaves tau nearly flat across levels. This threshold is a judgement call,
@@ -494,6 +500,16 @@ def main() -> int:
             "DEGENERATE -- for gating a later, expensive step on this check passing"
         ),
     )
+    parser.add_argument(
+        "--require-sound",
+        action="store_true",
+        help=(
+            "exit nonzero unless the mechanism is affirmatively SOUND: check 1 SEARCHING, "
+            "check 3 CLEAR, and the run long enough and large enough to stand in for a "
+            "100-round K=20 sweep. Stricter than --strict, which only blocks on a fatal "
+            "verdict. Use this before spending GPU hours on ablations of colony internals"
+        ),
+    )
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -624,7 +640,61 @@ def main() -> int:
             "failure -- this gate is too short to answer it, and A1 runs at 100 rounds where\n"
             "it is answerable. Not treating it as a blocker. Check 3 is what --strict gates on."
         )
-    return 1 if (args.strict and (colony_blocks or degenerate)) else 0
+    if args.strict and (colony_blocks or degenerate):
+        return 1
+
+    # `--require-sound` answers a DIFFERENT question from `--strict`, and conflating them was a
+    # real fault. `--strict` asks "is anything here fatal?", which is what person B's 15-round
+    # gate needs: UNDERPOWERED must not block it, or a caller who has just fixed the corner is
+    # still refused with no remedy but to lengthen a gate whose whole purpose is to be short.
+    #
+    # `--require-sound` asks "is the mechanism sound enough to ablate?", which is what person
+    # C's notebook needs before spending 515 cells and 107-215 GPU-hours on A2/A4-A8: those
+    # sweeps measure colony internals, so on a colony that is not searching every arm collapses
+    # toward the same behaviour and the ablation measures noise rather than the term it names.
+    #
+    # Reading `--strict`'s exit 0 as "sound" is how a 6-round K=6 toy run on a synthetic fixture
+    # certifies the mechanism: checks 2 and 3 come back CLEAR because a small K makes the
+    # entropy penalty relatively stronger, check 1 is inconclusive and does not block, and the
+    # caller unlocks the sweeps. "Not proven degenerate" is not "sound".
+    if args.require_sound:
+        blockers = []
+        if colony_verdict != "SEARCHING":
+            blockers.append(
+                f"check 1 is {colony_verdict}, not SEARCHING -- ablating the colony's own "
+                "machinery needs evidence the colony searches at all"
+            )
+        if checks[2]["verdict"] != "CLEAR":
+            blockers.append(f"check 3 is {checks[2]['verdict']}, not CLEAR")
+
+        # A run far smaller than the sweeps it is certifying cannot stand in for them.
+        rounds = len([r for r in fedaco.get("rounds", []) if r.get("train_best_fitness") is not None])
+        clients = int((fedaco.get("config") or {}).get("run_config", {}).get("num-clients", 0))
+        if rounds < MIN_ROUNDS_TO_CERTIFY:
+            blockers.append(
+                f"the run judged is {rounds} rounds; at least {MIN_ROUNDS_TO_CERTIFY} are "
+                "needed before it stands in for a 100-round sweep"
+            )
+        if clients and clients < MIN_CLIENTS_TO_CERTIFY:
+            blockers.append(
+                f"the run judged is K={clients}; the sweeps being gated run K=20, and a small "
+                "K makes the concentration penalty relatively stronger, so check 3 passing "
+                "here says little about them"
+            )
+
+        if blockers:
+            print("\n--require-sound: REFUSING to certify the mechanism.")
+            for blocker in blockers:
+                print(f"  - {blocker}")
+            print(
+                "\nThis is not a verdict that the method is broken; it is a refusal to call it "
+                "sound\non this evidence. Run the gate at full length on the real dataset first."
+            )
+            return 1
+        print("\n--require-sound: mechanism certified -- check 1 SEARCHING, check 3 CLEAR, "
+              f"on a {rounds}-round K={clients} run.")
+
+    return 0
 
 
 if __name__ == "__main__":

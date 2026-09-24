@@ -515,3 +515,129 @@ def test_the_freshest_run_is_reported_not_the_first_one_found(tmp_path: Path) ->
     assert "z_new.json" in out
     assert "aco-gamma-entropy of the run above: 0.6" in out
     assert "CLEAR" in out
+
+# ======================================================================================
+# `--strict` and `--require-sound` answer different questions
+# ======================================================================================
+
+
+def test_strict_and_require_sound_are_not_the_same_gate() -> None:
+    """Conflating them was a real fault, found 2026-09-24.
+
+    `--strict` asks "is anything here fatal?" and deliberately lets UNDERPOWERED through --
+    person B's gate is 15 rounds by design, and blocking on an inconclusive check would refuse
+    a caller who has just fixed the corner, with no remedy but lengthening a gate whose whole
+    purpose is to be short.
+
+    Person C's notebook asked a different question with the same flag: "is the mechanism sound
+    enough to ablate?" before spending 515 cells and 107-215 GPU-hours on A2/A4-A8. Reading
+    exit 0 as "sound" means a 6-round K=6 run on the synthetic fixture certifies the colony --
+    checks 2 and 3 come back CLEAR because a small K makes the concentration penalty relatively
+    stronger, check 1 is inconclusive and does not block, and the caller unlocks the sweeps.
+
+    "Not proven degenerate" is not "sound".
+    """
+    source = (REPO_ROOT / "scripts/check_fedaco_health.py").read_text()
+    assert "--require-sound" in source
+    # The two must not collapse into one condition.
+    assert "args.require_sound" in source
+    assert "args.strict" in source
+
+
+def test_c_notebook_gates_on_require_sound_not_strict() -> None:
+    """The notebook is where the exit code is read as MECHANISM_OK, so it is the place the
+    distinction has to land."""
+    import json
+
+    nb = json.loads((REPO_ROOT / "notebooks/kaggle_ablations_robustness.ipynb").read_text())
+    gate_cells = [
+        "".join(c["source"]) for c in nb["cells"]
+        if "check_fedaco_health" in "".join(c["source"]) and "MECHANISM_OK" in "".join(c["source"])
+    ]
+    assert gate_cells, "no cell in C's notebook computes MECHANISM_OK from the health check"
+    for src in gate_cells:
+        assert "--require-sound" in src
+        assert '"--strict"' not in src, (
+            "this cell reads the exit code as 'the mechanism is sound', which --strict does "
+            "not mean"
+        )
+
+
+def test_require_sound_thresholds_are_below_the_real_sweep_shape() -> None:
+    """The thresholds exist to exclude smoke and fixture runs, not to demand a rerun of the
+    thing being gated -- the sweeps run 100 rounds at K=20."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "health", REPO_ROOT / "scripts/check_fedaco_health.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert 0 < module.MIN_ROUNDS_TO_CERTIFY < 100
+    assert 0 < module.MIN_CLIENTS_TO_CERTIFY < 20
+
+
+def test_the_two_gates_diverge_on_a_run_too_small_to_certify(tmp_path: Path) -> None:
+    """End to end, on the case that motivated the split.
+
+    The run below is healthy on every check -- check 1 SEARCHING, check 3 CLEAR, nothing
+    negative anywhere -- and is still only 6 rounds at K=6. `--strict` must pass it, because
+    nothing here is a fatal verdict and blocking it is what leaves person B's 15-round gate
+    unpassable. `--require-sound` must refuse it, because nothing here certifies that a
+    100-round K=20 sweep will behave the same way, and person C's notebook spends 515 cells on
+    the answer.
+
+    The pheromone entropy declines steadily so tau has demonstrably left uniform: with it held
+    constant the verdict is INERT, which is a real negative and blocks both flags -- that tells
+    you nothing about whether the two gates differ.
+    """
+    import json
+    import subprocess
+
+    entropies = [2.398, 2.36, 2.32, 2.28, 2.24, 2.20]
+    rounds = [
+        {
+            "round": index,
+            "train_best_fitness": 0.98,
+            "train_fedavg_fitness": 0.98,
+            "train_alpha": [1 / 6] * 6,
+            "train_alpha_max": 0.18,
+            "train_alpha_entropy": 1.79,
+            "train_pheromone_entropy": entropy,
+            "train_corner_margin": -0.55,
+            "train_fallback_used": 0,
+            "train_delta_mean_sq_norm": 0.3,
+            "test_macro_f1": 0.1,
+            "val_macro_f1": 0.1,
+        }
+        for index, entropy in enumerate(entropies)
+    ]
+    (tmp_path / "toy_0.json").write_text(json.dumps({
+        "run_id": "toy_0",
+        "config": {"run_config": {"strategy-name": "fedaco", "num-clients": 6,
+                                  "aco-num-levels": 11, "local-epochs": 1},
+                   "strategy": "fedaco", "seed": 0},
+        "rounds": rounds,
+        "final": {"final_test_macro_f1": 0.1, "num_rounds_completed": 6},
+        "status": "completed",
+    }))
+
+    script = str(REPO_ROOT / "scripts" / "check_fedaco_health.py")
+    strict = subprocess.run(
+        [sys.executable, script, "--results-dir", str(tmp_path), "--strict"],
+        capture_output=True, text=True,
+    )
+    sound = subprocess.run(
+        [sys.executable, script, "--results-dir", str(tmp_path), "--require-sound"],
+        capture_output=True, text=True,
+    )
+
+    assert strict.returncode == 0, (
+        "--strict must not block a run with no negative verdict on it.\n" + strict.stdout
+    )
+    assert sound.returncode == 1, (
+        "--require-sound must refuse a 6-round K=6 run.\n" + sound.stdout
+    )
+    assert "REFUSING to certify" in sound.stdout
+    assert "6 rounds" in sound.stdout and "K=6" in sound.stdout
