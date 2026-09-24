@@ -2074,3 +2074,55 @@ empty, and the `seed` recorded in every result file that governed only the serve
 were invisible precisely because something was reported as working.
 
 552 tests pass, ruff clean.
+
+## 2026-09-24 (last, really) -- the LaTeX table dropped both of the markdown's warnings
+
+Following the pattern from the reproducibility band -- a check that runs, passes and means
+nothing -- into the one place it matters most: the artifact that goes in the paper.
+
+`make_tables.py` emits markdown, CSV and LaTeX from one `rows` list, deliberately, so two
+formatters cannot drift. They had drifted anyway, because `to_latex` built its DataFrame from
+`strategy, partition, mean, std, n` and dropped two things the markdown carried.
+
+**1. Incomplete cells were indistinguishable from complete ones.** Built from a sweep with 3 of
+8 fedaco seeds:
+
+    markdown:  | fedaco | default | 3 ⚠️ | 0.5100 ± 0.0100 | ...
+               ⚠️ **1 cell(s) have fewer seeds than expected** ... Do not quote anything
+
+    latex:     fedaco & 0.510 $\pm$ 0.010 \\
+
+Character-for-character identical to a complete cell. The markdown is read by whoever ran the
+sweep; **the LaTeX is what goes in the paper**, and the main sweep runs over many sessions, so
+a partially-filled table is its normal state for weeks. The plan's own rule is "never
+hand-type a number into the paper", which makes this emitter the number.
+
+**2. The caption advertised a significance threshold the test could not reach.** The same
+table's markdown says "these p-values cannot reach 0.05 at this seed count -- the smallest
+possible two-sided p at n=3 is 0.2500". Its LaTeX caption said
+`($^{*}p<0.05$, $^{**}p<0.01$, $^{***}p<0.001$)`. A reader of the paper had no way to know the
+legend promised something no data could deliver.
+
+Both now live in the caption, because a caption is the only thing that travels with a table
+someone pastes into a draft. After the fix, the same partial sweep:
+
+    \caption{... $^{\dagger}$~1 cell(s) are built from fewer seeds than planned and are not
+    comparable to the rest: fedaco/iid (3 of 8). Do not quote these numbers. No significance
+    markers are shown: at $n=3$ paired seeds the signed-rank test's smallest attainable
+    two-sided $p$ is 0.2500 ... so $p<0.05$ is unreachable at any data ...}
+
+    fedaco & 0.510 $\pm$ 0.010$^{\dagger}$ \\
+
+A complete, adequately-powered sweep gets its legend back and carries no dagger -- verified,
+because a warning that is always present is wallpaper.
+
+`power_note` (markdown) and `_latex_power_note` now share `_power_floor`. Two formatters
+computing "is this table underpowered" separately is precisely how one ended up warning about
+what the other advertised, and a test asserts they agree at n in {3, 5, 6, 8, 10}.
+
+**Fourth instance of the same defect class this session.** The others: client-side evaluation
+failing on GPU while the run reported `completed` with an empty metrics block; the `seed` in
+every result file that governed only the server; and the reproducibility band seeded from a
+non-reproducible run. Every one was invisible because something reported success.
+
+557 tests pass, ruff clean.

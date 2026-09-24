@@ -272,12 +272,10 @@ def power_note(rows: list[dict], alpha: float, alternative: str) -> str | None:
     "not significant" for every row while the data is as favourable as data can be. Saying
     so in the table beats leaving it for whoever writes the discussion section.
     """
-    tested = [r for r in rows if r.get("p_value") is not None and r.get("n_pairs")]
-    if not tested:
+    floor_info = _power_floor(rows, alternative)
+    if floor_info is None:
         return None
-    family = len(tested)
-    n_pairs = min(r["n_pairs"] for r in tested)
-    floor = min_achievable_p(n_pairs, alternative)
+    family, n_pairs, floor = floor_info
     if floor * family <= alpha:
         return None
 
@@ -293,6 +291,48 @@ def power_note(rows: list[dict], alpha: float, alternative: str) -> str | None:
         f"Every 'not significant' in this table is therefore a statement about the sample "
         f"size, not about the data. Clearing {alpha} over this family needs {target}, or a "
         f"smaller family of claims. Do not read these rows as evidence of no effect.\n"
+    )
+
+
+def _power_floor(rows: list[dict], alternative: str) -> tuple[int, int, float] | None:
+    """`(family_size, n_pairs, floor)` for the tested rows, or None if nothing was tested.
+
+    Factored out so `power_note` and `_latex_power_note` cannot disagree about whether a
+    table is underpowered -- two formatters computing the same thing separately is how the
+    markdown ended up warning about something the LaTeX advertised.
+    """
+    tested = [r for r in rows if r.get("p_value") is not None and r.get("n_pairs")]
+    if not tested:
+        return None
+    family = len(tested)
+    n_pairs = min(r["n_pairs"] for r in tested)
+    return family, n_pairs, min_achievable_p(n_pairs, alternative)
+
+
+def _latex_power_note(rows: list[dict], alpha: float, alternative: str) -> str | None:
+    """The same warning as `power_note`, as a caption sentence.
+
+    Separate from `power_note` because that one is markdown -- emoji, `**bold**`, newlines --
+    and none of it survives in a LaTeX caption. The substance has to, though: without it a
+    caption prints "$^{*}p<0.05$" for a threshold the signed-rank test cannot cross at this
+    pair count, and a reader of the paper has no way to know. The markdown table says so in a
+    paragraph the LaTeX never carried.
+    """
+    floor_info = _power_floor(rows, alternative)
+    if floor_info is None:
+        return None
+    family, n_pairs, floor = floor_info
+    if floor * family <= alpha:
+        return None
+    needed = seeds_needed_for(alpha, family, alternative)
+    target = f"{needed} seeds" if needed else "more than 40 seeds"
+    return (
+        f" No significance markers are shown: at $n={n_pairs}$ paired seeds the signed-rank "
+        f"test's smallest attainable {alternative} $p$ is {floor:.4f}, and across "
+        f"{family} comparison{'s' if family != 1 else ''} the Holm--Bonferroni adjusted "
+        f"floor is {min(floor * family, 1.0):.4f} -- so $p<{alpha}$ is unreachable at any "
+        f"data, and every non-significant result here reflects the sample size rather than "
+        f"the effect. Clearing {alpha} over this family requires {target}."
     )
 
 
@@ -354,7 +394,9 @@ def to_markdown(rows: list[dict], baseline: str) -> str:
     return "\n".join(lines)
 
 
-def to_latex(rows: list[dict], baseline: str, path: Path, name: str) -> None:
+def to_latex(
+    rows: list[dict], baseline: str, path: Path, name: str, power_warning: str | None = None
+) -> None:
     """Plan §9.3's deliverable: booktabs, best-in-bold, significance markers.
 
     Built from the *same* `rows` the markdown and CSV come from, and rendered by
@@ -380,6 +422,11 @@ def to_latex(rows: list[dict], baseline: str, path: Path, name: str) -> None:
                 "mean": r["mean"],
                 "std": r["std"],
                 "n": r["n"],
+                # Carried into the LaTeX so an incomplete cell is marked THERE too. It was
+                # dropped here, which is how `0.510 $\pm$ 0.010` from 3 of 8 seeds reached the
+                # paper looking identical to a complete cell while the markdown beside it
+                # showed `3 ⚠️` and two paragraphs of warning.
+                "expected_n": r.get("expected_n"),
             }
             for r in rows
         ]
@@ -412,10 +459,19 @@ def to_latex(rows: list[dict], baseline: str, path: Path, name: str) -> None:
         caption=(
             f"{name}: test macro-F1 (mean $\\pm$ std over seeds). "
             f"Significance vs.\\ {_escape(baseline)}, Wilcoxon signed-rank with "
-            "Holm--Bonferroni correction across the table "
-            "($^{*}p<0.05$, $^{**}p<0.01$, $^{***}p<0.001$)."
+            "Holm--Bonferroni correction across the table"
+            # The legend is conditional. Printing "$^{*}p<0.05$" when the signed-rank test
+            # cannot reach 0.05 at this seed count advertises a threshold no data can cross,
+            # and a reader of the paper has no way to know that -- the markdown table says so
+            # in a paragraph the LaTeX never carried.
+            + (
+                "."
+                if power_warning
+                else " ($^{*}p<0.05$, $^{**}p<0.01$, $^{***}p<0.001$)."
+            )
         ),
         label=f"tab:{name}",
+        power_warning=power_warning,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(tex + "\n")
@@ -499,7 +555,15 @@ def main() -> int:
     )
     (out_dir / f"{results_dir.name}.md").write_text(header + markdown + "\n")
     to_csv(rows, out_dir / f"{results_dir.name}.csv")
-    to_latex(rows, args.baseline, out_dir / f"{results_dir.name}.tex", results_dir.name)
+    to_latex(
+        rows,
+        args.baseline,
+        out_dir / f"{results_dir.name}.tex",
+        results_dir.name,
+        # The same note the markdown carries. It belongs in the LaTeX caption too: a table
+        # copied into a draft takes its caption with it and nothing else.
+        power_warning=_latex_power_note(rows, args.alpha, args.alternative),
+    )
 
     print(header + markdown)
     print(f"\nWrote {out_dir / f'{results_dir.name}.md'}, .csv and .tex")

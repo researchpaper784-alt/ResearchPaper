@@ -353,3 +353,99 @@ def test_an_ablation_table_is_labelled_by_variant_not_strategy(tmp_path: Path) -
     assert "default" in tex and "no-fallback" in tex
     assert tex.count("fedaco") == 0, "ablation rows are the variants, not the strategy"
     assert "dirichlet\\_0.3" in tex, "underscores must be escaped for LaTeX"
+
+
+# ======================================================================================
+# The LaTeX table is what goes in the paper, and it was dropping both warnings
+# ======================================================================================
+
+def _latex_rows(fedaco_n: int, fedavg_n: int = 8, expected: int = 8) -> list[dict]:
+    """Real rows via `summarize`, not hand-built dicts: `add_significance` reads `by_seed`,
+    which only the real pipeline produces, and a fixture that skips it would test a shape the
+    code never sees."""
+    results = []
+    for seed in range(fedavg_n):
+        results.append(_result("fedavg", "iid", seed, 0.880 + 0.002 * seed))
+    for seed in range(fedaco_n):
+        results.append(_result("fedaco", "iid", seed, 0.905 + 0.002 * seed))
+    return _rows(results, expected)
+
+
+def test_an_incomplete_cell_is_marked_in_the_latex_not_only_the_markdown(tmp_path: Path) -> None:
+    """The defect: `to_latex` built its frame from strategy/partition/mean/std/n and dropped
+    `expected_n`, so a cell averaging 3 of 8 seeds printed `0.510 $\\pm$ 0.010` --
+    character-for-character identical to a complete one -- while the markdown beside it showed
+    `3 ⚠️` and a paragraph of warning.
+
+    The markdown is read by whoever ran the sweep. The LaTeX is what goes in the paper, and
+    the main sweep runs over many sessions, so a partially-filled table is its normal state
+    for weeks. The plan's own rule is "never hand-type a number into the paper", which makes
+    this emitter the number.
+    """
+    path = tmp_path / "t.tex"
+    to_latex(_latex_rows(fedaco_n=3), "fedavg", path, "t")
+    tex = path.read_text()
+
+    assert "$^{\\dagger}$" in tex, "the incomplete cell carries no marker"
+    # In the caption, because a caption is the only thing that travels with a table someone
+    # pastes into a draft.
+    assert "fewer seeds than planned" in tex
+    assert "fedaco/iid (3 of 8)" in tex
+    assert "Do not quote these numbers" in tex
+
+
+def test_a_complete_table_carries_no_dagger(tmp_path: Path) -> None:
+    """The warning has to be absent when it does not apply, or it becomes wallpaper."""
+    path = tmp_path / "t.tex"
+    to_latex(_latex_rows(fedaco_n=8), "fedavg", path, "t")
+
+    assert "\\dagger" not in path.read_text()
+
+
+def test_the_significance_legend_is_withheld_when_the_alpha_is_unreachable(tmp_path: Path) -> None:
+    """A caption printing `$^{*}p<0.05$` while the signed-rank test cannot reach 0.05 at this
+    pair count advertises a threshold no data can cross, and a reader of the paper has no way
+    to know. The markdown said so in a paragraph the LaTeX never carried."""
+    from make_tables import _latex_power_note
+
+    rows = _latex_rows(fedaco_n=3, fedavg_n=3, expected=3)
+    warning = _latex_power_note(rows, alpha=0.05, alternative="two-sided")
+    assert warning is not None, "n=3 pairs cannot reach 0.05; the note should fire"
+
+    path = tmp_path / "t.tex"
+    to_latex(rows, "fedavg", path, "t", power_warning=warning)
+    tex = path.read_text()
+
+    assert "$^{*}p<0.05$" not in tex, "the legend promises a threshold the test cannot cross"
+    assert "unreachable at any data" in tex
+    assert "reflects the sample size rather than the effect" in tex
+
+
+def test_an_adequately_powered_table_keeps_its_legend(tmp_path: Path) -> None:
+    from make_tables import _latex_power_note
+
+    rows = _latex_rows(fedaco_n=8, fedavg_n=8, expected=8)
+
+    assert _latex_power_note(rows, alpha=0.05, alternative="two-sided") is None
+
+    path = tmp_path / "t.tex"
+    to_latex(rows, "fedavg", path, "t", power_warning=None)
+
+    assert "$^{*}p<0.05$" in path.read_text()
+
+
+def test_both_power_notes_agree_about_whether_a_table_is_underpowered() -> None:
+    """The markdown and LaTeX warnings compute the same thing, and two formatters computing it
+    separately is exactly how the markdown ended up warning about something the LaTeX
+    advertised. They share `_power_floor`; this pins that they cannot diverge."""
+    from make_tables import _latex_power_note
+
+    for n in (3, 5, 6, 8, 10):
+        rows = _latex_rows(fedaco_n=n, fedavg_n=n, expected=n)
+        markdown = power_note(rows, alpha=0.05, alternative="two-sided")
+        latex = _latex_power_note(rows, alpha=0.05, alternative="two-sided")
+
+        assert (markdown is None) == (latex is None), (
+            f"at n={n} the markdown and LaTeX disagree about whether this table is "
+            f"underpowered: markdown={markdown is not None}, latex={latex is not None}"
+        )
