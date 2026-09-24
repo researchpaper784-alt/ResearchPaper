@@ -2387,3 +2387,45 @@ its numbers looked precise enough to act on.
 Screening the candidate fixes therefore needs real runs. `aco-q0` is already a config key so it
 needs no code change; standardizing `d_k` would need a flag, and is only worth adding if q0
 alone does not account for the anchoring.
+
+## 2026-09-24 (later) -- A1 re-screened at the plan's real defaults: the ranking does not move
+
+The defaults reconciliation (see `OPEN_QUESTIONS.md`, "four sources of truth") meant every local
+screen so far had run at `q0=0.9`, `gamma_2=1.0`, `rho_round=0.1` instead of plan §14's
+0.70 / 0.50 / 0.30 -- verified from the embedded `config.run_config`, not inferred. Since `q0`
+was the axis the anchoring diagnosis rests on, A1 had to be re-screened before any of it could be
+believed. 15 runs, same fixture, same equal-budget harness, only the three corrected defaults:
+
+| method | mean gain over the FedAvg point | per-seed | macro-F1 |
+|---|---|---|---|
+| **aco** | **+0.0066** | `[+0.0088, +0.0025, +0.0085]` | 0.2700 |
+| random | +0.0231 | `[+0.0256, +0.0189, +0.0249]` | 0.1000 |
+| ga | +0.0295 | `[+0.0341, +0.0233, +0.0311]` | 0.1670 |
+| pso | +0.0355 | `[+0.0402, +0.0286, +0.0377]` | 0.2248 |
+| **coordinate_grid** | **+0.0390** | `[+0.0410, +0.0350, +0.0412]` | 0.1000 |
+
+**ACO beats every control on 0 of 3 seeds, and loses to the best by 5.9x.** The ordering is
+identical to the drifted screen -- coordinate_grid > pso > ga > random > aco -- and ACO's
+per-seed spread (0.0025-0.0088) does not overlap any control's.
+
+Every method's absolute gain fell (e.g. coordinate_grid +0.0501 -> +0.0390), which is expected
+and not a result: `gamma_2` halved, so F is on a different scale. **Only the within-screen
+ranking transfers between the two screens**, and it is unchanged.
+
+So the config bug was real, worth fixing, and **not the cause of A1's failure**. ACO went from
++0.0013 to +0.0066 -- a 5x improvement on its own terms, still 5.9x short of the weakest thing
+it needs to beat. Combined with the `q0` sweep, which reached +0.0287 at `q0=0.0` and still lost
+to every control: greedy anchoring is a real contributing mechanism and fixing it does not
+rescue the claim.
+
+**What this means for plan §11's week-5 gate.** The plan's stated failure condition was "ACO
+ties random search at equal budget -- stop and reframe". Three independent local screens now say
+it does not tie random search, it loses to it, at both the drifted and the documented defaults.
+The gate's instruction was to reframe before spending weeks 6-12, and roughly 80% of the
+project's remaining 351-701 GPU-hours sits behind it.
+
+Confirming this on the real gate costs A1's 80 cells (17-33 GPU-h). The local fixture has
+reproduced the real runs' fitness signature on every axis checked so far, but it is a fixture,
+and a claim this consequential should not rest on it alone.
+
+606 tests pass, ruff clean.
