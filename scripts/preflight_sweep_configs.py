@@ -22,6 +22,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import sys
 import time
@@ -92,6 +93,31 @@ def main() -> int:
     out = Path(args.out) if args.out else Path("/tmp/preflight-sweeps")
     out.mkdir(parents=True, exist_ok=True)
 
+    paths = []
+    for pattern in args.configs:
+        # Any glob metacharacter, not just `*`. Checking for `*` alone silently treated
+        # `configs/experiment/ablation_a[0-9].yaml` as a literal filename and died on
+        # FileNotFoundError after 36 arms had already passed -- and a character class is the
+        # natural way to name A1-A9, so this is the pattern a caller reaches for first.
+        if any(ch in pattern for ch in "*?["):
+            matched = sorted(REPO_ROOT.glob(pattern))
+            if not matched:
+                raise SystemExit(f"no config matched {pattern!r}")
+            paths.extend(matched)
+        else:
+            path = Path(pattern)
+            if not path.is_absolute():
+                path = REPO_ROOT / path
+            if not path.exists():
+                raise SystemExit(f"no such config: {path}")
+            paths.append(path)
+
+    if shutil.which("flwr") is None:
+        raise SystemExit(
+            "`flwr` is not on PATH. Activate the venv first (export PATH=\"$PWD/.venv/bin:"
+            "$PATH\"), or this dies with a bare FileNotFoundError from subprocess."
+        )
+
     # The federation has to be set before any run: num_supernodes defaults to 2 and no
     # run-config key can carry it, so a K=6 cell would wait forever for nodes 3-6.
     subprocess.run(
@@ -99,10 +125,6 @@ def main() -> int:
          str(SHRINK["num-clients"]), "--client-resources-num-cpus", "1"],
         cwd=REPO_ROOT, capture_output=True, text=True,
     )
-
-    paths = []
-    for pattern in args.configs:
-        paths.extend(sorted(REPO_ROOT.glob(pattern)) if "*" in pattern else [Path(pattern)])
 
     failures, passed = [], 0
     for path in paths:

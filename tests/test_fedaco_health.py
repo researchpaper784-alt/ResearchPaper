@@ -641,3 +641,34 @@ def test_the_two_gates_diverge_on_a_run_too_small_to_certify(tmp_path: Path) -> 
     )
     assert "REFUSING to certify" in sound.stdout
     assert "6 rounds" in sound.stdout and "K=6" in sound.stdout
+
+
+def test_b_notebook_does_not_read_a_strict_pass_as_a_searching_colony() -> None:
+    """B's gate correctly uses `--strict` -- its question really is "is anything fatal?" before
+    spending 80 cells on A1. What it must not do is describe that pass as the colony working.
+
+    UNDERPOWERED stopped blocking `--strict` on 2026-09-24, which left the cell's own comment
+    claiming it "exits nonzero when the colony is not searching". A reader seeing
+    `GATE 1: PASSED` would then take the mechanism as demonstrated, and pass that on to person
+    C, whose ablations of colony internals need the stricter gate.
+    """
+    import json
+
+    nb = json.loads((REPO_ROOT / "notebooks/kaggle_main_sweep.ipynb").read_text())
+    gate = [
+        "".join(c["source"]) for c in nb["cells"]
+        if "GATE_1_PASSED = health.returncode" in "".join(c["source"])
+    ]
+    assert gate, "no cell in B's notebook derives GATE_1_PASSED from the health check"
+    src = gate[0]
+
+    assert "exits nonzero when the colony is not searching" not in src, (
+        "that is what --strict used to do; UNDERPOWERED no longer blocks it"
+    )
+    assert "--require-sound" in src, (
+        "the cell should point at the stricter gate, since a --strict pass does not certify "
+        "the mechanism"
+    )
+    # The distinction has to reach the reader at runtime, not only in a comment they may skim.
+    assert "UNDERPOWERED" in src and "nothing fatal" in src
+    compile(src, "kaggle_main_sweep_gate_cell", "exec")
