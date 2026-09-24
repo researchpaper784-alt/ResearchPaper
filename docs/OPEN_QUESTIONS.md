@@ -1283,3 +1283,41 @@ is a reason to trust it more than the last two probes, not a reason to skip the 
 
 A6 keeps a cell for each of the three (260 -> 270): the paper has to show why the obvious
 fixed-reference fix is not the one, and that needs the measurement, not an argument.
+
+
+## Phase 3 -- a mis-set supernode count hangs a run forever, and nothing can detect it
+
+**Status: mitigated where it can be, open where it cannot.**
+
+Flower's node sampler (`flwr.serverapp.strategy.strategy_utils.sample_nodes`) is
+
+    while len(all_nodes := list(grid.get_node_ids())) < min_available_nodes:
+        sleep(1)
+
+with no give-up. If the federation is configured for fewer SuperNodes than a run's
+`min-available-nodes` / `min-train-nodes` asks for, the run does not fail -- it logs
+"Waiting for nodes to connect" once a second and consumes the whole session.
+
+**Observed live, 2026-09-24**, while screening A1 locally: a run configured for 4 supernodes
+while asking for 10 sat at round 1 for over three minutes with the machine *idle*
+(load average 0.29, ClientApp actors at 2% CPU) before it was killed. Identical runs against
+a correctly configured federation finish 15 rounds in 39 seconds. On a Kaggle session that is
+nine hours and no output.
+
+**What makes it worse than an ordinary misconfiguration:** `flwr federation
+simulation-config` can only SET the count, never read it. There is no way to ask what the
+federation is currently configured for, so a preflight cannot check it -- the only protection
+is to set it immediately before every run that depends on it.
+
+**Mitigations in place.** `run_sweep.py` and `run_sweep_granular.py` both call
+`configure_federation` before their cells and refuse if it fails, so every sweep is covered.
+The gap was the notebooks' *bare* `flwr run` gate cells, which relied on a section-3 cell
+having been run earlier in the same session -- a stale kernel, a restarted SuperLink or a
+Run-All from the middle would all leave the count wrong. B's gate cell now sets it itself,
+immediately before the runs.
+
+**Still open.** Nothing can catch this from inside the application once a run has started.
+A wrapper that bounded each `flwr run` with a timeout and treated "Waiting for nodes to
+connect" in the log as fatal would close it -- worth doing if a session is ever lost to this,
+and not worth the complexity before then. If a run sits at round 0 or 1 with an idle machine,
+this is the first thing to check.

@@ -2278,3 +2278,29 @@ the target takes 5 with the asymmetry written down rather than silently flagging
 avoid mis-marking 80.
 
 573 tests pass, ruff clean.
+
+## 2026-09-24 -- lost ten minutes to the hazard I had just written a guard for
+
+While screening A1 locally, a run sat at round 1 for three and a half minutes with the machine
+**idle** -- load average 0.29, ClientApp actors at 2% CPU -- when identical runs finish 15
+rounds in 39 seconds. Four ClientApp actors existed; the run asked for `min-available-nodes=10`.
+
+That is Flower's `while len(grid.get_node_ids()) < min_available_nodes: sleep(1)`, the
+unbounded wait I documented in `fl/cold_start.py` two commits earlier and guarded against for
+R6 specifically. It is not specific to R6 at all: **any** run whose node requirements exceed
+the configured supernode count hangs forever, and `flwr run` never errors.
+
+The script I wrote for the A1 screen did not re-issue `simulation-config`, inheriting whatever
+the previous experiment had left. That is exactly the shape of B's gate cell, which relies on
+section 3 having run earlier in the session -- and a stale kernel, a restarted SuperLink or a
+Run-All from the middle all leave it wrong. On Kaggle it costs nine hours and produces nothing.
+
+`flwr federation simulation-config` can only SET the count, never read it, so no preflight can
+check it after the fact. The only protection is setting it immediately before each run that
+depends on it, which B's gate cell now does. The sweeps were already covered --
+`run_sweep.py` and `run_sweep_granular.py` both call `configure_federation` and refuse if it
+fails. C's notebook uses only those runners, so it has no bare `flwr run` to fix.
+
+Worth recording as a pattern, not just an incident: I documented this failure mode, wrote a
+guard for one narrow case of it, and then walked into the general case within the hour. The
+guard was scoped to where I was looking rather than to where the hazard was.
