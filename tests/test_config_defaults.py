@@ -242,3 +242,55 @@ def test_a6_arms_labelled_default_actually_are_the_default() -> None:
         f"A6 arms named `_default` that are not the default (arm value, real default): "
         f"{mismatched}"
     )
+
+
+# ======================================================================================
+# Every sweep must write where its table target looks
+# ======================================================================================
+
+
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [("ablation_a[0-9].yaml", "results/fl/ablation"),
+     ("robustness_r*.yaml", "results/fl/robustness")],
+)
+def test_every_granular_config_sets_its_output_dir(pattern: str, expected: str) -> None:
+    """None of the 15 granular configs set `output-dir` until 2026-09-24, so all of them fell
+    through to pyproject's `results/fl` -- while `make tables-ablation` reads
+    `results/fl/ablation` and `make tables-robustness` reads `results/fl/robustness`.
+
+    C would have run 1,025 cells and then had both table commands find nothing, or worse,
+    `tables-ablation` would have produced a plausible-looking table from `ablation_all` alone.
+    The three aggregate configs (main/robustness/ablation_all) already set theirs, which is
+    how the gap stayed invisible.
+    """
+    paths = sorted((ROOT / "configs/experiment").glob(pattern))
+    assert paths, f"no configs matched {pattern}"
+    for path in paths:
+        spec = yaml.safe_load(path.read_text()) or {}
+        actual = (spec.get("base_overrides") or {}).get("output-dir")
+        assert actual == expected, (
+            f"{path.name} writes to {actual!r}; its table target reads {expected!r}"
+        )
+
+
+def test_no_sweep_config_silently_inherits_the_smoke_round_count() -> None:
+    """pyproject's `num-rounds = 2` is the smoke default. A sweep config that does not
+    override it runs 2 rounds per cell and records `status: completed` -- a whole sweep's
+    worth of results that look finished and mean nothing."""
+    smoke_rounds = _flwr_defaults()["num-rounds"]
+    assert smoke_rounds == 2, "this test's premise moved; re-read it"
+
+    missing = []
+    for path in sorted((ROOT / "configs/experiment").glob("*.yaml")):
+        spec = yaml.safe_load(path.read_text()) or {}
+        if not (spec.get("strategies")):
+            continue
+        block = {**(spec.get("common") or {}), **(spec.get("base_overrides") or {})}
+        if "num-rounds" not in block:
+            missing.append(path.name)
+
+    # smoke.yaml is the one config that legitimately wants the smoke round count.
+    assert [m for m in missing if m != "smoke.yaml"] == [], (
+        f"configs that would run {smoke_rounds} rounds per cell: {missing}"
+    )

@@ -100,58 +100,99 @@ def _defaults() -> dict:
     return tomllib.loads(path.read_text())["tool"]["flwr"]["app"]["config"]
 
 
+# Keys that are not experimental conditions. Everything else in the resolved config is, and
+# `_variant_of` marks any of it that differs from the default -- see that function for why the
+# previous hand-listed approach could not work.
+_NOT_A_CONDITION = frozenset({
+    # Paths and bookkeeping.
+    "cache-dir", "checkpoint-dir", "manifest-path", "output-dir", "partition-cache-dir",
+    # Already part of the grouping key, so marking them would duplicate the row label.
+    "strategy-name", "regime", "alpha", "seed", "partition-seed",
+    # Reporting/plumbing rather than condition.
+    "deterministic", "num-classes", "num-rounds",
+})
+
+# Short names for the marks, so a label stays readable. Anything unlisted is marked by its
+# key with the `aco-`/`fedaco-` prefix stripped.
+_MARK_NAMES = {
+    "aco-persistence": "persistence", "aco-fitness-mode": "fitness", "model-norm": "norm",
+    "aco-target-sum": "s", "aco-gamma-dispersion": "g2", "aco-gamma-entropy": "g3",
+    "aco-gamma-alignment": "g1", "aco-q0": "q0", "aco-rho": "rho",
+    "aco-pheromone-exp": "a", "aco-heuristic-exp": "b", "aco-num-levels": "levels",
+    "aco-search-method": "search", "aco-desirability-scaling": "scaling",
+    "aco-dispersion-reference": "ref", "fraction-train": "participation",
+    "num-clients": "K", "aco-ants-start": "ants", "aco-iters-start": "iters",
+}
+
+
+def _mark_name(key: str) -> str:
+    if key in _MARK_NAMES:
+        return _MARK_NAMES[key]
+    for prefix in ("aco-", "fedaco-", "model-"):
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return key
+
+
 def _variant_of(run_config: dict) -> str:
-    """Reconstruct the ablation variant from the run config.
+    """Reconstruct the experimental condition from the resolved config.
 
-    The sweep runner knows the variant name, but a result file records only the resolved
-    config, so the variant has to be recovered from the knobs that differ from default.
-    Anything unrecognised falls back to "default" rather than being guessed at.
+    The sweep runner knows the arm's name, but a result file records only the resolved
+    config, so the condition has to be recovered from whatever differs from the defaults.
 
-    Defaults come from `_defaults()`, never from a literal here: a knob whose default moves
-    would otherwise relabel every existing result as a variant.
+    **Why this compares everything rather than a hand-picked list.** It used to check about
+    eight knobs by name, and on 2026-09-24 a check of every declared sweep arm found that
+    **42 distinct arms collapsed onto the single key `(fedaco, dirichlet_0.3, default)`** --
+    including all five of `ablation_a1`'s search methods, which *is* the project's go/no-go
+    gate, plus most of A6's 27 arms, all of A5's, both of A8's, R5's four client counts and
+    R6's cold-start arms. `make_tables` groups by (strategy, regime, variant), so each
+    collision averages unrelated arms into one row: A1 would have reported ACO, random
+    search, coordinate grid, PSO and GA as a single number.
+
+    The log already recorded this failure for the robustness sweeps -- "whichever file was
+    read last would win, and the published table would average a clean control together with
+    a 30%-sign-flip run and report it as one number with n=5" -- and the fix then was to add
+    the two keys those sweeps varied. Adding keys one at a time is what left the ablations
+    broken, because every new ablation axis needs another entry here and nothing fails when
+    one is missing. Comparing the whole config cannot go stale that way.
+
+    `_NOT_A_CONDITION` holds the exclusions: paths, the keys already in the grouping label,
+    and plumbing. Defaults come from `_defaults()`, never from literals -- a default that
+    moves would otherwise relabel every existing result (which is exactly what reconciling
+    `aco-gamma-dispersion` to plan §14's 0.50 did).
     """
     defaults = _defaults()
     marks = []
 
-    def _differs(key: str, caster=str):
-        if key not in run_config:
-            return False
-        try:
-            return caster(run_config[key]) != caster(defaults[key])
-        except (KeyError, TypeError, ValueError):
-            return False
+    for key in sorted(run_config):
+        if key in _NOT_A_CONDITION or key not in defaults:
+            continue
+        actual, default = run_config[key], defaults[key]
+        if isinstance(default, bool) or isinstance(actual, bool):
+            differs = bool(actual) != bool(default)
+        elif isinstance(default, (int, float)) and isinstance(actual, (int, float)):
+            differs = float(actual) != float(default)
+        else:
+            differs = str(actual) != str(default)
+        if not differs:
+            continue
+        if key == "aco-safety-fallback" and actual is False:
+            marks.append("no-fallback")
+        else:
+            marks.append(f"{_mark_name(key)}={actual}")
 
-    if _differs("aco-persistence"):
-        marks.append(f"persistence={run_config['aco-persistence']}")
-    if _differs("aco-fitness-mode"):
-        marks.append(f"fitness={run_config['aco-fitness-mode']}")
-    if _differs("model-norm"):
-        marks.append(f"norm={run_config['model-norm']}")
-    if _differs("aco-target-sum", float):
-        marks.append(f"s={run_config['aco-target-sum']}")
-    if _differs("aco-gamma-dispersion", float):
-        marks.append(f"g2={run_config['aco-gamma-dispersion']}")
-    if _differs("aco-gamma-entropy", float):
-        marks.append(f"g3={run_config['aco-gamma-entropy']}")
-    if _differs("aco-q0", float):
-        marks.append(f"q0={run_config['aco-q0']}")
-    if _differs("aco-desirability-scaling"):
-        marks.append(f"scaling={run_config['aco-desirability-scaling']}")
-    if _differs("aco-dispersion-reference"):
-        marks.append(f"ref={run_config['aco-dispersion-reference']}")
-    if run_config.get("aco-safety-fallback") is False:
-        marks.append("no-fallback")
-    # Phase 8. Without these every robustness variant collapses to "default": the 9
-    # variants x 5 seeds per strategy would key into the same per-seed dict, whichever
-    # file was read last would win, and the published table would average a clean control
-    # together with a 30%-sign-flip run and report it as one number with n=5.
-    attack = str(run_config.get("attack", "none"))
+    # The attack is one condition spread over several keys; collapsing it keeps the label
+    # readable and keeps "10% gaussian" distinct from "10% sign-flip".
+    attack = str(run_config.get("attack", defaults.get("attack", "none")))
     if attack != str(defaults.get("attack", "none")):
-        marks.append(f"attack={attack}@{run_config.get('attack-fraction', 0)}")
-        if _differs("attack-scale", float):
-            marks.append(f"x{run_config['attack-scale']}")
-    if _differs("fraction-train", float):
-        marks.append(f"participation={run_config['fraction-train']}")
+        marks = [m for m in marks if not m.startswith(("attack=", "attack-fraction=",
+                                                       "attack-scale=", "num-malicious-nodes="))]
+        mark = f"attack={attack}@{run_config.get('attack-fraction', 0)}"
+        scale = run_config.get("attack-scale")
+        if scale is not None and float(scale) != float(defaults.get("attack-scale", 1.0)):
+            mark += f"x{scale}"
+        marks.insert(0, mark)
+
     return ",".join(marks) if marks else "default"
 
 
