@@ -40,38 +40,43 @@ regimes:
     regime: dirichlet
     alpha: 0.3
 
+# 5 seeds, deliberately. These sweeps are read as *descriptions* -- which component
+# carries the result, how performance degrades under attack -- and effect sizes and
+# degradation curves carry that without a significance test. The 8-seed floor is
+# reserved for the two places a p-value is actually claimed: main.yaml's headline
+# comparison and ablation_a1's ACO-vs-random-search control. Raising these too costs
+# ~640 cells and strengthens no claim in the paper.
+#
+# ⚠️ If a claim of the form "X significantly beats Y" ends up resting on this sweep,
+# it needs 8 seeds like the others -- `make tables` prints the requirement for
+# whatever family the table contains. See docs/OPEN_QUESTIONS.md.
 seeds: [0, 1, 2, 3, 4]
 
 variants:
-  # The control: same strategies, same regime, no adversary. Without it in the same sweep
-  # there is no honest baseline to measure degradation against, and differencing against
-  # the main table would fold in every difference between the two sweeps' settings.
+  # ⚠️ Like ablation_all.yaml, this file is no longer the whole robustness story and must
+  # not be run as if it were. R1-R5 live in configs/experiment/robustness_r*.yaml and are
+  # driven by scripts/run_sweep_granular.py.
+  #
+  # Six variants were removed on 2026-09-19 because a granular config already covered the
+  # same attack at the same fractions, matched by run-config key rather than by label:
+  #
+  #   removed from here      covered by
+  #   label_flip_20          robustness_r1_label_flip.yaml  (fractions 0.1/0.2/0.3)
+  #   sign_flip_10/30        robustness_r2_update_attack.yaml (sign_flip 0.1/0.2/0.3)
+  #   gaussian_20            robustness_r2_update_attack.yaml (gaussian 0.1/0.2/0.3)
+  #   participation_50/25    robustness_r3_stragglers.yaml  (fraction-train 0.1/0.3/0.5)
+  #
+  # The granular configs sweep *three* fractions where this file sampled one or two, so
+  # nothing is lost by removing them -- the finer grid strictly contains the coarser one.
+  #
+  # `scaled` is the exception and is why this file still exists: no granular config covers
+  # a magnitude-only attack. That matters specifically because it is the one attack an
+  # alignment-based heuristic cannot see -- FedACO's a_k is a cosine and is blind to a
+  # scaled update, so only the norm-ratio r_k can catch it. Dropping it would remove the
+  # single case that separates the method's two heuristics.
+
   - name: clean
 
-  # --- update poisoning, increasing share of the federation ----------------------
-  # 10% and 30% bracket the usual reporting points. 30% is above the classic Byzantine
-  # tolerance of most robust rules, so it is where they are expected to break -- included
-  # deliberately, because a robustness sweep that only tests where defences hold measures
-  # nothing.
-  # `num-malicious-nodes` is Krum's own f -- how many Byzantine clients it assumes. It
-  # defaults to 0, and Krum's guarantee simply does not hold at f=0 when adversaries are
-  # present: it scores each candidate against all n-2 neighbours instead of n-f-2. Left
-  # unset, "Krum broke at 30%" would be a statement about a misconfigured Krum. Set to
-  # match each variant's real attacker count at K=20 (ceil(f*K)). It is ignored by every
-  # other strategy.
-  - name: sign_flip_10
-    attack: sign_flip
-    attack-fraction: 0.1
-    attack-scale: 2.0
-    num-malicious-nodes: 2
-  - name: sign_flip_30
-    attack: sign_flip
-    attack-fraction: 0.3
-    attack-scale: 2.0
-    num-malicious-nodes: 6
-
-  # Magnitude-only. Alignment-based detection cannot see this one at all -- the direction
-  # is correct, only the size is wrong -- so it separates FedACO's two heuristic terms.
   - name: scaled_10
     attack: scaled
     attack-fraction: 0.1
@@ -82,31 +87,6 @@ variants:
     attack-fraction: 0.3
     attack-scale: 10.0
     num-malicious-nodes: 6
-
-  - name: gaussian_20
-    attack: gaussian
-    attack-fraction: 0.2
-    attack-scale: 3.0
-    num-malicious-nodes: 4
-
-  # --- data poisoning ------------------------------------------------------------
-  # The well-formed-update case. Expect robust aggregation to help much less here; if it
-  # appears to help just as much, that is a result worth checking rather than celebrating.
-  - name: label_flip_20
-    attack: label_flip
-    attack-fraction: 0.2
-    num-malicious-nodes: 4
-
-  # --- partial participation -----------------------------------------------------
-  # Not an attack: clients dropping out is ordinary FL, and `fraction-train` already
-  # existed. Included because "robustness" in the plan covers it and because FedACO's
-  # cross-round pheromone is keyed by client id -- a client absent for several rounds has
-  # its row decayed toward tau0 (`aco/pheromone.py::begin_round`), which is a behaviour
-  # nothing has ever exercised at scale.
-  - name: participation_50
-    fraction-train: 0.5
-  - name: participation_25
-    fraction-train: 0.25
 
 common:
   num-clients: 20

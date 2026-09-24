@@ -866,3 +866,82 @@ compromised.
 <num-clients>` itself before the first cell and refuses to start if that fails, rather
 than relying on an operator having run a setup command. More clients than cores is now a
 note that the ETA is optimistic (Ray queues them), not a refusal.
+
+## Phase 9 -- 5 seeds cannot produce a significant result, and that is arithmetic
+
+**Status: acted on 2026-09-19 -- every sweep raised to 8 seeds. Two things remain open; see the end of this section.**
+
+Found 2026-09-19 while folding `analysis.py`'s statistics into `make_tables.py`. The
+signed-rank statistic is discrete, so its p-value has a floor set entirely by the pair
+count -- independent of the data:
+
+| seeds | smallest possible two-sided p | one-sided |
+|---:|---:|---:|
+| 5 | **0.0625** | 0.0312 |
+| 8 | 0.0078 | 0.0039 |
+| 10 | 0.0020 | 0.0010 |
+| 15 | 0.0001 | 0.0001 |
+
+`main.yaml` currently runs **5 seeds**. At 5 seeds a two-sided paired Wilcoxon cannot
+return p < 0.05 *even when every single seed favours FedACO*. Verified directly against
+the implementation, not derived: `analysis.min_achievable_p`.
+
+Holm-Bonferroni then multiplies the smallest p by the family size, so the achievable
+floor depends on how many comparisons the paper claims:
+
+| family | seeds needed for alpha=0.05 (two-sided) |
+|---|---:|
+| 1 comparison | 6 |
+| 6 (FedACO vs FedAvg, 6 regimes) | 8 |
+| 66 (11 baselines x 6 regimes) | 12 |
+
+So the question "how many seeds" cannot be answered without also fixing **how many
+comparisons the paper will make**. Answering it for the wrong family is how a sweep gets
+run twice.
+
+**What has been done about it.** `make_tables.py` now prints a warning whenever the
+table's p-values cannot reach alpha at its own seed count, naming the floor, the family
+size, and the seed count that would suffice. A table reporting "not significant" for a
+Cohen's d of 7.9 is not left for the discussion section to explain. The warning goes
+silent as soon as the test can actually fire, so it is a safeguard rather than noise.
+
+**What has not been decided, and needs to be:**
+
+1. **Raise the seed count.** 5 -> 8 takes `main.yaml` from 360 to 576 cells (+60%);
+   5 -> 12 takes it to 864. This is the honest fix and it costs GPU-hours.
+2. **Shrink the claimed family.** If the paper's headline is FedACO vs FedAvg across 6
+   regimes, that is 6 comparisons and 8 seeds suffices. Every additional baseline the
+   paper claims significance against raises the requirement.
+3. **Use a one-sided test.** Legitimate -- the hypothesis is directional -- and it buys
+   roughly one seed. It is *not* legitimate if chosen after seeing the two-sided result,
+   so `--alternative greater` is opt-in and is recorded in the table when used.
+
+Doing none of these is also a choice: report effect sizes and paired deltas, and state
+plainly that the seed count does not support significance testing. That is defensible if
+said out loud and indefensible if the p-values are printed without the caveat.
+
+### What was done, 2026-09-19
+
+Option 1. **Every sweep now runs 8 seeds** -- `main.yaml` first, then all 16 ablation and
+robustness configs. The granular configs turned out to be at **3** seeds, not 5: a floor of
+0.25, four times worse than the main sweep's. Total sweep size 1508 -> 2576 cells.
+
+### Still open
+
+1. **A 66-comparison family needs 12 seeds, not 8.** 8 clears alpha=0.05 for a
+   six-comparison family -- FedACO against FedAvg in each regime. If the paper claims
+   significance against all 11 baselines in all 6 regimes, 8 is short and `main.yaml` needs
+   864 cells rather than 576. `make tables` prints the requirement for whatever family the
+   table actually contains, so this surfaces before the claim is written.
+
+2. **The combined and granular sweep families overlap, and that now costs more than the
+   seeds did.** `ablation_all.yaml` covers A1/A3/A9 while `ablation_a1/a3/a9.yaml` cover the
+   same ground individually; `robustness.yaml` covers R1-R5's territory in combined form.
+   Running both families runs those experiments twice at 8 seeds each.
+
+   Both families exist for a real reason -- they read different YAML shapes, and the
+   granular ones cover A2 and A4-A8 that `ablation_all.yaml` explicitly does not. But
+   nothing says to run *both*, and the 2576-cell total assumes you do. Picking one family
+   for the overlapping cells, or dropping the duplicates from whichever runs second, is a
+   scope call for whoever owns the ablation runs -- and is worth more compute than any
+   remaining seed decision.

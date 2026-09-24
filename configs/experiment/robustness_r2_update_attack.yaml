@@ -22,7 +22,7 @@ base_overrides:
   local-batch-size: 32
   num-rounds: 100
   deterministic: true
-  attack-noise-sigma: 0.5
+  attack-scale: 0.5
   regime: dirichlet
   alpha: 0.3
 
@@ -38,16 +38,26 @@ strategies:
 
 partitions:
   - name: gaussian_10pct
-    overrides: {attack-mode: gaussian_noise, attacker-fraction: 0.10}
+    overrides: {attack: gaussian, attack-fraction: 0.10}
   - name: gaussian_20pct
-    overrides: {attack-mode: gaussian_noise, attacker-fraction: 0.20}
+    overrides: {attack: gaussian, attack-fraction: 0.20}
   - name: gaussian_30pct
-    overrides: {attack-mode: gaussian_noise, attacker-fraction: 0.30}
+    overrides: {attack: gaussian, attack-fraction: 0.30}
   - name: sign_flip_10pct
-    overrides: {attack-mode: sign_flip, attacker-fraction: 0.10}
+    overrides: {attack: sign_flip, attack-fraction: 0.10}
   - name: sign_flip_20pct
-    overrides: {attack-mode: sign_flip, attacker-fraction: 0.20}
+    overrides: {attack: sign_flip, attack-fraction: 0.20}
   - name: sign_flip_30pct
-    overrides: {attack-mode: sign_flip, attacker-fraction: 0.30}
+    overrides: {attack: sign_flip, attack-fraction: 0.30}
 
-seeds: [0, 1, 2]
+# 5 seeds, deliberately. These sweeps are read as *descriptions* -- which component
+# carries the result, how performance degrades under attack -- and effect sizes and
+# degradation curves carry that without a significance test. The 8-seed floor is
+# reserved for the two places a p-value is actually claimed: main.yaml's headline
+# comparison and ablation_a1's ACO-vs-random-search control. Raising these too costs
+# ~640 cells and strengthens no claim in the paper.
+#
+# ⚠️ If a claim of the form "X significantly beats Y" ends up resting on this sweep,
+# it needs 8 seeds like the others -- `make tables` prints the requirement for
+# whatever family the table contains. See docs/OPEN_QUESTIONS.md.
+seeds: [0, 1, 2, 3, 4]

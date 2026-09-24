@@ -25,13 +25,13 @@ base_overrides:
 
 strategies:
   - name: full
-    overrides: {fedaco-gamma-alignment: 1.0, fedaco-gamma-dispersion: 0.50, fedaco-gamma-entropy: 0.10}
+    overrides: {aco-gamma-alignment: 1.0, aco-gamma-dispersion: 0.50, aco-gamma-entropy: 0.10}
   - name: no_alignment
-    overrides: {fedaco-gamma-alignment: 0.0, fedaco-gamma-dispersion: 0.50, fedaco-gamma-entropy: 0.10}
+    overrides: {aco-gamma-alignment: 0.0, aco-gamma-dispersion: 0.50, aco-gamma-entropy: 0.10}
   - name: no_dispersion
-    overrides: {fedaco-gamma-alignment: 1.0, fedaco-gamma-dispersion: 0.0, fedaco-gamma-entropy: 0.10}
+    overrides: {aco-gamma-alignment: 1.0, aco-gamma-dispersion: 0.0, aco-gamma-entropy: 0.10}
   - name: no_entropy
-    overrides: {fedaco-gamma-alignment: 1.0, fedaco-gamma-dispersion: 0.50, fedaco-gamma-entropy: 0.0}
+    overrides: {aco-gamma-alignment: 1.0, aco-gamma-dispersion: 0.50, aco-gamma-entropy: 0.0}
 
 partitions:
   - name: iid
@@ -41,4 +41,14 @@ partitions:
   - name: quantity_skew
     file: configs/data/quantity_skew.yaml
 
-seeds: [0, 1, 2]
+# 5 seeds, deliberately. These sweeps are read as *descriptions* -- which component
+# carries the result, how performance degrades under attack -- and effect sizes and
+# degradation curves carry that without a significance test. The 8-seed floor is
+# reserved for the two places a p-value is actually claimed: main.yaml's headline
+# comparison and ablation_a1's ACO-vs-random-search control. Raising these too costs
+# ~640 cells and strengthens no claim in the paper.
+#
+# ⚠️ If a claim of the form "X significantly beats Y" ends up resting on this sweep,
+# it needs 8 seeds like the others -- `make tables` prints the requirement for
+# whatever family the table contains. See docs/OPEN_QUESTIONS.md.
+seeds: [0, 1, 2, 3, 4]

@@ -255,3 +255,53 @@ def genetic_algorithm_search(
 
     assert best_alpha is not None
     return ControlResult(best_alpha, best_fitness, used)
+
+
+# ======================================================================================
+# Dispatch -- the single entry point `strategies/fedaco.py` calls
+# ======================================================================================
+
+SEARCH_METHODS = ("aco", "random", "coordinate_grid", "pso", "ga")
+
+_CONTROLS = {
+    "random": random_search,
+    "coordinate_grid": coordinate_grid_search,
+    "pso": pso_search,
+    "ga": genetic_algorithm_search,
+}
+
+
+def run_control(
+    method: str,
+    levels: torch.Tensor,
+    base_weights: torch.Tensor,
+    fitness: BudgetedFitness,
+    budget: int,
+    target_sum: float = 1.0,
+    generator: torch.Generator | None = None,
+) -> ControlResult:
+    """Run one A1 control by name, under the caller's already-capped `fitness`.
+
+    Exists so the strategy has one call site rather than a four-way branch it would
+    have to keep in step with this module. `"aco"` is deliberately *not* handled here:
+    the real colony needs pheromone state that no control has, so `fedaco.py` dispatches
+    it separately and this function rejects it rather than quietly running a control
+    under the colony's name -- which is precisely the substitution A1 exists to detect.
+
+    `coordinate_grid` is deterministic and takes no generator; the other three are
+    seeded from the caller's, so a control run reproduces exactly like a colony run.
+    """
+    if method == "aco":
+        raise ValueError(
+            "run_control does not run the colony -- 'aco' is dispatched by the strategy, "
+            "which owns the pheromone state. Passing it here would silently substitute a "
+            "control for the method under test."
+        )
+    if method not in _CONTROLS:
+        raise ValueError(f"Unknown search method {method!r} (expected one of {SEARCH_METHODS})")
+
+    if method == "coordinate_grid":
+        return coordinate_grid_search(levels, base_weights, fitness, budget, target_sum)
+    return _CONTROLS[method](
+        levels, base_weights, fitness, budget, target_sum, generator=generator
+    )

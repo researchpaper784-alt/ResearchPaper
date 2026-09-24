@@ -89,7 +89,7 @@ iid-band:
 	.venv/bin/python scripts/check_iid_band.py --results-dir results/fl
 
 # Always run `make main-plan` first: it prints the cell count and a cost projection, and
-# refuses nothing, so it is the cheapest way to find out that 360 cells x 100 rounds is
+# refuses nothing, so it is the cheapest way to find out that 576 cells x 100 rounds is
 # more compute than you have before committing to it.
 main-plan:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml --dry-run
@@ -100,11 +100,13 @@ main:
 main-client-scale:
 	.venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/main_client_scale.yaml
 
-# Phase 7. `ablation_all.yaml` covers only the ablations this repo actually names (A1
-# persistence, A3 fitness mode, A9 norm) plus the knobs docs/OPEN_QUESTIONS.md defers
-# here. `ablations-granular` runs A2 and A4-A8 from their own per-ablation configs
-# (configs/experiment/ablation_a*.yaml) instead, since those are not reconstructable
-# from ablation_all.yaml alone -- see the config and docs/OPEN_QUESTIONS.md.
+# Phase 7. The two families are now disjoint (2026-09-19). A1-A9 live in their own
+# per-ablation configs and are driven by `ablations-granular`; `ablation_all.yaml` keeps
+# only what no A-number covers -- the safety-fallback ablation and the concentration-
+# penalty shape. Five variants were removed from it because a granular config already
+# varied the same run-config key, and one of those had `ablation_all` labelling
+# persistence "A1" while ablation_a1.yaml is the ACO-vs-random-search control, both
+# writing to results/fl/ablation. Run BOTH targets; they no longer overlap.
 ablations-plan:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml --dry-run
 
@@ -112,17 +114,16 @@ ablations:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml
 
 ablations-granular:
-	for f in configs/experiment/ablation_a*.yaml; do \
+	for f in configs/experiment/ablation_a[0-9].yaml; do \
 		.venv/bin/python scripts/run_sweep_granular.py --config "$$f" || exit 1; \
 	done
 
-# Phase 8. `robustness.yaml` covers adversarial clients (fl/attacks.py) and partial
-# participation in one combined 225-cell sweep. `robustness-granular` runs the same
-# ground split across the per-threat configs (R1 label-flip, R2 update-attack,
-# R3 stragglers, R4 DP noise, R5 client scaling) instead, one config per threat.
-# Three baselines here -- krum, trimmed-mean, median -- are robust-aggregation rules
-# whose entire justification is this sweep; every number they have so far was earned
-# against an entirely honest federation.
+# Phase 8. Same split. R1-R5 live in their own configs (`robustness-granular`);
+# `robustness.yaml` keeps only the `scaled` magnitude-only attack, which no granular
+# config covers and which is the one case an alignment-based heuristic cannot see --
+# FedACO's a_k is a cosine and is blind to it, so only the norm ratio r_k can catch it.
+# The granular configs sweep three attacker fractions where the combined file sampled
+# one or two, so the finer grid strictly contains the coarser one. Run both.
 robustness-plan:
 	.venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness.yaml --dry-run
 

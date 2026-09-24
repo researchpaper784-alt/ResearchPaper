@@ -33,47 +33,47 @@ base_overrides:
 
 strategies:
   - name: a=0.5
-    overrides: {fedaco-a-exponent: 0.5}
+    overrides: {aco-pheromone-exp: 0.5}
   - name: a=1.0_default
-    overrides: {fedaco-a-exponent: 1.0}
+    overrides: {aco-pheromone-exp: 1.0}
   - name: a=2.0
-    overrides: {fedaco-a-exponent: 2.0}
+    overrides: {aco-pheromone-exp: 2.0}
   - name: b=1.0
-    overrides: {fedaco-b-exponent: 1.0}
+    overrides: {aco-heuristic-exp: 1.0}
   - name: b=2.0_default
-    overrides: {fedaco-b-exponent: 2.0}
+    overrides: {aco-heuristic-exp: 2.0}
   - name: b=4.0
-    overrides: {fedaco-b-exponent: 4.0}
+    overrides: {aco-heuristic-exp: 4.0}
   - name: rho=0.05
-    overrides: {fedaco-rho: 0.05}
+    overrides: {aco-rho: 0.05}
   - name: rho=0.10_default
-    overrides: {fedaco-rho: 0.10}
+    overrides: {aco-rho: 0.10}
   - name: rho=0.30
-    overrides: {fedaco-rho: 0.30}
+    overrides: {aco-rho: 0.30}
   - name: q0=0.5
-    overrides: {fedaco-q0: 0.5}
+    overrides: {aco-q0: 0.5}
   - name: q0=0.7_default
-    overrides: {fedaco-q0: 0.7}
+    overrides: {aco-q0: 0.7}
   - name: q0=0.9
-    overrides: {fedaco-q0: 0.9}
+    overrides: {aco-q0: 0.9}
   - name: ants=15
-    overrides: {fedaco-ants-start: 15, fedaco-ants-end: 5}
+    overrides: {aco-ants-start: 15, aco-ants-end: 5}
   - name: ants=30_default
-    overrides: {fedaco-ants-start: 30, fedaco-ants-end: 10}
+    overrides: {aco-ants-start: 30, aco-ants-end: 10}
   - name: ants=60
-    overrides: {fedaco-ants-start: 60, fedaco-ants-end: 20}
+    overrides: {aco-ants-start: 60, aco-ants-end: 20}
   - name: iters=5
-    overrides: {fedaco-iters-start: 5, fedaco-iters-end: 2}
+    overrides: {aco-iters-start: 5, aco-iters-end: 2}
   - name: iters=10_default
-    overrides: {fedaco-iters-start: 10, fedaco-iters-end: 4}
+    overrides: {aco-iters-start: 10, aco-iters-end: 4}
   - name: iters=20
-    overrides: {fedaco-iters-start: 20, fedaco-iters-end: 8}
+    overrides: {aco-iters-start: 20, aco-iters-end: 8}
   - name: levels=7
-    overrides: {fedaco-num-levels: 7}
+    overrides: {aco-num-levels: 7}
   - name: levels=11_default
-    overrides: {fedaco-num-levels: 11}
+    overrides: {aco-num-levels: 11}
   - name: levels=15
-    overrides: {fedaco-num-levels: 15}
+    overrides: {aco-num-levels: 15}
 
 partitions:
   - name: iid
@@ -81,4 +81,14 @@ partitions:
   - name: dirichlet_0.3
     file: configs/data/dirichlet_0.3.yaml
 
-seeds: [0, 1, 2]
+# 5 seeds, deliberately. These sweeps are read as *descriptions* -- which component
+# carries the result, how performance degrades under attack -- and effect sizes and
+# degradation curves carry that without a significance test. The 8-seed floor is
+# reserved for the two places a p-value is actually claimed: main.yaml's headline
+# comparison and ablation_a1's ACO-vs-random-search control. Raising these too costs
+# ~640 cells and strengthens no claim in the paper.
+#
+# ⚠️ If a claim of the form "X significantly beats Y" ends up resting on this sweep,
+# it needs 8 seeds like the others -- `make tables` prints the requirement for
+# whatever family the table contains. See docs/OPEN_QUESTIONS.md.
+seeds: [0, 1, 2, 3, 4]

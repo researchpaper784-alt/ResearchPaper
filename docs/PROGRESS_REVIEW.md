@@ -264,7 +264,7 @@ this for the search grids, but not for sweep configs that do not exist yet.
 
 ## Phases 6, 7 and 9 — added after the original review
 
-- **`scripts/run_sweep.py`** (Phase 6). 360 cells, resumable via `results/manifest.jsonl`.
+- **`scripts/run_sweep.py`** (Phase 6). 576 cells, resumable via `results/manifest.jsonl`.
   Four of its design choices are failure-driven rather than stylistic: `--stream` always
   (a bare `flwr run` returns before the run starts); exit codes ignored entirely (it lies
   in both directions); preflight refuses to start on CPU oversubscription; result matching
@@ -304,7 +304,7 @@ uniform every round. The check now judges against the run's own reachable ceilin
 reports **UNDERPOWERED** there (docs/EXPERIMENT_LOG.md, 2026-09-17).
 
 So the mechanism question is genuinely *unanswered*, not answered badly — which is exactly
-why the real run matters: the sweep will faithfully produce 360 cells whether or not the
+why the real run matters: the sweep will faithfully produce 576 cells whether or not the
 colony is searching. `make validate-fedaco` at 15 rounds is powered to answer it (22% of
 the best case); a shorter run would not be, and `make pheromone-budget` says so before the
 compute is spent.

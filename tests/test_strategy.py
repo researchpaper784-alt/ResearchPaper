@@ -236,7 +236,6 @@ def test_run_config_reaches_every_fedaco_knob() -> None:
             "aco-beta-drift": 3.0,
             "aco-safety-fallback": False,
             "aco-concentration-penalty": "gini",
-            "aco-search-method": "pso",
         }
     )
     assert isinstance(strategy, FedACO)
@@ -253,7 +252,6 @@ def test_run_config_reaches_every_fedaco_knob() -> None:
     assert cfg.fitness.normalize_dispersion is True
     assert cfg.fitness_mode == "data_free"
     assert cfg.fitness.concentration_penalty == "gini"
-    assert cfg.search_method == "pso"
 
 
 def test_a_mistyped_penalty_shape_is_rejected_at_construction() -> None:
@@ -322,54 +320,101 @@ def test_corner_margin_is_recorded_every_round() -> None:
     assert isinstance(metrics["corner_margin"], float)
 
 
-@pytest.mark.parametrize("search_method", ["random", "coordinate_grid", "pso", "ga"])
-def test_a1_control_search_methods_run_end_to_end(search_method: str) -> None:
-    """Phase 7, A1: every control (`aco/controls.py`) must be reachable through the
-    real `FedACO.aggregate_train`, not just callable in isolation -- a wiring bug here
-    (wrong key name, wrong argument order) would otherwise make `ablation_a1.yaml`
-    silently run "aco" five times instead of the comparison it claims to run."""
-    global_state = _state()
-    replies = [
-        _make_reply(i, _add(global_state, _state(seed=300 + i)), num_examples=float(50 + 10 * i))
+# ======================================================================================
+# Phase 7, A1 -- the equal-budget search controls
+# ======================================================================================
+
+
+def _a1_replies(global_state):
+    return [
+        _make_reply(i, _add(global_state, _state(seed=100 + i)), num_examples=float(50 + 10 * i))
         for i in range(4)
     ]
-    strategy = _new_strategy(num_rounds=1, search_method=search_method, ants_start=6, iters_start=3)
-    strategy._current_arrays = ArrayRecord(global_state)
-
-    arrays_out, metrics = strategy.aggregate_train(1, list(replies))
-
-    assert arrays_out is not None and metrics is not None
-    alpha = torch.tensor(metrics["alpha"])
-    assert alpha.numel() == len(replies)
-    assert torch.isclose(alpha.sum(), torch.tensor(1.0), atol=1e-4)
-    # Nothing for a non-colony control to deposit into -- see the comment at the
-    # `pheromone.end_round` call site in `fedaco.py::aggregate_train`.
-    assert "pheromone_entropy" not in metrics
-    assert metrics["realized_iterations"] == 1
-    assert 0 < metrics["realized_ants"] <= 6 * 3
 
 
-def test_a1_control_search_method_never_touches_pheromone_state() -> None:
-    """The A1 controls exist to isolate "search strategy" from "evaluation budget" --
-    if a control silently mutated pheromone state, a later "aco"-mode round in the same
-    process (not how sweeps actually run, but the isolation should hold regardless)
-    would inherit a trajectory a real colony never produced."""
+@pytest.mark.parametrize("method", ["aco", "random", "coordinate_grid", "pso", "ga"])
+def test_every_search_method_actually_runs_a_round(method: str) -> None:
+    """`aco/controls.py` shipped with 14 passing unit tests and no caller: nothing in the
+    strategy ever invoked it, so A1 -- the plan's "make-or-break experiment" -- would have
+    produced five identical colonies under five different labels. Unit tests on the
+    controls cannot catch that; only calling them through `aggregate_train` can."""
     global_state = _state()
-    replies = [
-        _make_reply(i, _add(global_state, _state(seed=400 + i)), num_examples=float(50 + 10 * i))
-        for i in range(3)
-    ]
-    strategy = _new_strategy(num_rounds=2, search_method="random", ants_start=5, iters_start=2)
+    strategy = _new_strategy(num_rounds=4, search_method=method)
     strategy._current_arrays = ArrayRecord(global_state)
-    client_ids = [str(m["client_id"]) for m in (r.content["metrics"] for r in replies)]
 
-    tau_before = strategy.pheromone.begin_round(client_ids).clone()
-    strategy.aggregate_train(1, list(replies))
-    tau_after = strategy.pheromone.begin_round(client_ids)
+    _, metrics = strategy.aggregate_train(1, _a1_replies(global_state))
 
-    assert torch.allclose(tau_before, tau_after)
+    assert metrics is not None
+    alpha = torch.tensor(list(metrics["alpha"]))
+    assert alpha.numel() == 4
+    assert float(alpha.sum()) == pytest.approx(1.0, abs=1e-5)
 
 
-def test_an_unknown_search_method_is_rejected_at_construction() -> None:
-    with pytest.raises(ValueError, match="search_method"):
-        FedACO(min_train_nodes=2, aco_config=FedACOConfig(search_method="simulated_annealing"))
+def test_controls_search_differently_from_the_colony() -> None:
+    """The substitution A1 exists to detect, in reverse: if a control returned the same
+    alpha as the colony, the ablation would report a tie no matter how the method
+    performed. Uses a seed where the fallback does not fire, so what is compared is the
+    search output rather than the FedAvg point every method falls back to."""
+    global_state = _state()
+    replies = _a1_replies(global_state)
+
+    alphas = {}
+    for method in ("aco", "random", "pso", "ga"):
+        strategy = _new_strategy(num_rounds=4, search_method=method, safety_fallback=False)
+        strategy._current_arrays = ArrayRecord(global_state)
+        _, metrics = strategy.aggregate_train(1, list(replies))
+        alphas[method] = tuple(round(float(a), 6) for a in metrics["alpha"])
+
+    assert len(set(alphas.values())) > 1, f"every method returned the same alpha: {alphas}"
+
+
+@pytest.mark.parametrize("method", ["aco", "random", "coordinate_grid", "pso", "ga"])
+def test_no_method_outspends_the_shared_evaluation_budget(method: str) -> None:
+    """A1's whole claim is "at equal budget". A control that quietly evaluated twice as
+    often would win on effort rather than on search quality, and nothing in the accuracy
+    columns would show it. `BudgetedFitness` caps every method at the colony's own
+    `ants x iterations`, and the usage is logged so the analysis can check rather than
+    assume."""
+    global_state = _state()
+    strategy = _new_strategy(num_rounds=4, search_method=method)
+    strategy._current_arrays = ArrayRecord(global_state)
+
+    _, metrics = strategy.aggregate_train(1, _a1_replies(global_state))
+
+    assert metrics["evaluations_used"] <= metrics["evaluation_budget"]
+    assert metrics["evaluation_budget"] > 0
+    # A method that spent almost nothing is not running a real search.
+    assert metrics["evaluations_used"] > 0.25 * metrics["evaluation_budget"]
+
+
+def test_a_control_run_reports_no_colony_metrics() -> None:
+    """A control has no pheromone. Logging `pheromone_entropy: 0` for one would read to
+    every downstream check as a collapsed colony rather than as "not a colony" -- and the
+    health check's question 1 would report INERT for a run that never had a colony."""
+    global_state = _state()
+
+    colony = _new_strategy(num_rounds=4, search_method="aco")
+    colony._current_arrays = ArrayRecord(global_state)
+    _, colony_metrics = colony.aggregate_train(1, _a1_replies(global_state))
+
+    control = _new_strategy(num_rounds=4, search_method="random")
+    control._current_arrays = ArrayRecord(global_state)
+    _, control_metrics = control.aggregate_train(1, _a1_replies(global_state))
+
+    for key in ("pheromone_entropy", "realized_ants", "realized_iterations"):
+        assert key in colony_metrics, key
+        assert key not in control_metrics, key
+    # But the method-agnostic diagnostics stay, or A1 cells become unanalysable.
+    for key in ("best_fitness", "fedavg_fitness", "corner_margin", "evaluations_used"):
+        assert key in control_metrics, key
+
+
+def test_a1_config_key_is_declared_in_pyproject() -> None:
+    """`flwr run` rejects any undeclared --run-config key with a bare "[code: 15]" naming
+    nothing -- and exits 0 while doing it, so a sweep records only "no result file".
+    Verified live: every cell of ablation_a1.yaml failed exactly that way."""
+    import tomllib
+    from pathlib import Path
+
+    declared = tomllib.load(open(Path(__file__).resolve().parents[1] / "pyproject.toml", "rb"))
+    assert "aco-search-method" in declared["tool"]["flwr"]["app"]["config"]

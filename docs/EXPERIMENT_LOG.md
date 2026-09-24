@@ -1346,3 +1346,188 @@ resolves to its own result. The by-value discriminator handles it, which is what
 rewritten for.
 
 324 tests pass, `ruff check .` clean.
+
+## 2026-09-19 -- the analysis stack, and a seed count that cannot reach significance
+
+Person A's third item: `analysis.py` (Wilcoxon, Holm-Bonferroni, Cohen's d, bootstrap CI)
+existed but the Makefile wired `make_tables.py`, which did mean/std/n and no test. Folded
+the statistics in -- `add_significance` pairs by seed (reusing the pairing `add_deltas`
+already did), tests each row against the baseline, and applies Holm once across the whole
+table rather than per regime.
+
+**Then the integration turned up something worse than a missing feature.** The
+signed-rank p-value has a floor set by the pair count alone. At `main.yaml`'s 5 seeds the
+smallest possible two-sided p is **0.0625** -- so the planned analysis could not have
+produced a significant result at alpha=0.05 under any data whatsoever. On synthetic
+best-case input (FedACO ahead on every seed, Cohen's d = 7.91) the table reports:
+
+| strategy | macro-F1 | Delta vs fedavg | p (Holm) | d |
+|---|---|---:|---:|---:|
+| fedaco | 0.9090 +/- 0.0032 | +0.0250 | 0.250 | +7.91 |
+
+A d of 7.9 reported as p = 0.25. Without an explanation, that row reads as "no effect" --
+the single most misleading number the paper could contain, and it would have been
+discovered while writing the discussion section.
+
+`make_tables.py` now prints the reason: the floor, the family size, the best achievable
+adjusted p, and the seed count that would clear alpha. At 8 seeds the same data gives
+p = 0.008 and the warning goes silent, so it is falsifiable rather than always-on.
+
+The seed-count decision is recorded as open in docs/OPEN_QUESTIONS.md, because it is a
+compute-budget question for whoever runs the main sweep and not a code fix: 5 -> 8 seeds
+is 360 -> 576 cells, and clearing alpha over the full 66-comparison family needs 12.
+
+Two of my own errors, for the record. I asserted "8 seeds" in a test where the correct
+answer for a single-comparison family was 6, then "12 seeds" where a 6-regime table is a
+6-comparison family needing 8. The test now asserts the *relationship* -- a larger family
+needs more seeds -- because the count depends on how many claims the table makes and is
+precisely the thing that is easy to miscount by hand.
+
+440 tests pass, ruff clean.
+
+## 2026-09-19 -- main.yaml raised to 8 seeds
+
+Acting on the seed-count finding in the entry above. `main.yaml` goes from 5 to 8 seeds:
+**360 -> 576 cells**, a 60% increase in the sweep's compute.
+
+The reason is arithmetic, not taste. At 5 seeds the signed-rank test's smallest possible
+two-sided p is 0.0625, so the sweep could not have produced a significant result at
+alpha=0.05 under any data. 8 seeds moves the floor to 0.0078, which clears 0.05 after
+Holm-Bonferroni across a six-comparison family (FedACO vs FedAvg in each regime).
+
+`make_tables.py`'s `--expected-seeds` default moves to 8 with it, so a complete run is not
+measured against a stale expectation.
+
+⚠️ **Two things this does not cover, deliberately left as decisions:**
+
+1. **A 66-comparison family still needs 12 seeds (864 cells).** If the paper claims
+   significance against all 11 baselines in all 6 regimes rather than against FedAvg, 8 is
+   not enough. `make tables` prints the requirement for whatever family the table actually
+   contains, so this surfaces before the claim is written rather than after.
+2. **`ablation_all.yaml` and `robustness.yaml` are still at 5 seeds.** Their comparisons
+   (FedACO variants against the default, methods under attack) have their own family sizes
+   and their own compute costs, and raising them was not part of this change. They carry
+   the same floor, so any significance claim from those sweeps has the same problem.
+
+The projected cost at 576 cells is ~770 hours on the only per-round measurement this
+project has -- 48.1 s/round at K=2 on CPU, which docs/EXPERIMENT_LOG.md's compute table
+says in bold not to cite. That number needs replacing with a real GPU measurement from the
+validation run before anyone plans around it.
+
+## 2026-09-19 (later) -- the ablation and robustness sweeps raised to 8 seeds
+
+Completing the change the previous entry left open. All 16 ablation and robustness configs
+now run 8 seeds.
+
+The granular configs were at **3**, not 5 -- a floor of **0.25**, four times worse than the
+main sweep's. A2-A9 and R1-R5 could not have distinguished anything from anything.
+
+| sweep family | cells before | cells at 8 seeds |
+|---|---:|---:|
+| `ablation_all` | 180 | 288 |
+| `robustness` | 225 | 360 |
+| granular `ablation_a1-a9` | 365 | 920 |
+| granular `robustness_r1-r5` | 162 | 432 |
+| **ablations + robustness** | **932** | **2000** |
+| `main` (raised earlier) | 360 | 576 |
+| **grand total** | **1508** | **2576** |
+
+A 71% increase in total sweep size.
+
+### ⚠️ The duplication is now the bigger cost, not the seeds
+
+The combined and granular families **overlap**. `ablation_all.yaml` covers A1/A3/A9, and
+`ablation_a1/a3/a9.yaml` cover the same ground individually; `robustness.yaml` is a
+combined adversarial + partial-participation sweep over the ground R1-R5 cover separately.
+Running both families runs those experiments twice, at 8 seeds each.
+
+Both families exist for a real reason -- they read different YAML shapes and the granular
+ones cover A2 and A4-A8 that `ablation_all.yaml` explicitly does not (the merge entry of
+2026-09-18 records why). But nothing says to run *both*, and the total above assumes you
+do. Picking one family for the overlapping ablations, or dropping the duplicated cells from
+whichever is run second, is worth more compute than any seed decision at this point.
+
+Not decided here: that is a scope call for whoever owns the ablation runs.
+
+### Still not covered
+
+A 66-comparison family (all 11 baselines x 6 regimes) needs **12** seeds, not 8. 8 clears
+alpha=0.05 for a six-comparison family -- FedACO against FedAvg in each regime. If the
+paper claims significance against every baseline, this is still short. `make tables` prints
+the requirement for whatever family the table actually contains, so it surfaces before the
+claim is written rather than after.
+
+440 tests pass, ruff clean; all 16 configs dry-run clean through their own runners.
+
+## 2026-09-19 (later) -- the sweep plan, deduplicated: 2,576 cells -> 1,586
+
+Acting on three decisions at once: keep the 8-seed floor only where a p-value is
+actually claimed, revert it elsewhere, and resolve the two overlapping sweep families.
+
+### Seeds: 8 where a claim rests on them, 5 everywhere else
+
+`main.yaml` and `ablation_a1.yaml` stay at 8. Those are the two places the paper says
+"significantly": the headline FedACO-vs-FedAvg comparison, and the make-or-break control
+asking whether ACO beats random search at equal budget. At 5 seeds neither could produce
+p < 0.05 under any data.
+
+Everything else went back to 5. The other ablations and the robustness sweeps are read as
+*descriptions* -- which component carries the result, how performance degrades under
+attack -- and effect sizes and degradation curves carry that without a significance test.
+Raising them cost ~640 cells and strengthened no claim in the paper.
+
+### The overlap was worse than duplicated compute
+
+Matching the two ablation families by *run-config key* rather than by label found five
+duplicated variants -- and a collision:
+
+| key varied | `ablation_all` called it | granular called it |
+|---|---|---|
+| `aco-persistence` | **A1** | **A2** |
+| `aco-fitness-mode` | A3 | A3 |
+| `model-norm` | A9 | A9 |
+| `aco-target-sum` | shrinkage | A7 |
+| `aco-gamma-dispersion` | gamma_dispersion | A4 |
+
+**`ablation_all`'s "A1" was persistence; `ablation_a1.yaml` is the search-method control.
+Both wrote to `results/fl/ablation`.** "A1" in a results table meant two different
+experiments depending on which runner produced it, and nothing downstream could have told
+them apart. The ~176 duplicated cells were the smaller half of that problem.
+
+`robustness.yaml` was the same shape: its label_flip, sign_flip, gaussian and
+partial-participation variants all duplicated R1/R2/R3, which sweep *three* attacker
+fractions where the combined file sampled one or two -- the finer grid strictly contains
+the coarser one, so removing them loses nothing.
+
+Both combined files now keep only what no granular config covers:
+
+- `ablation_all`: the safety-fallback ablation and the concentration-penalty shape pair.
+  288 -> 60 cells.
+- `robustness`: the `scaled` magnitude-only attack. 360 -> 75 cells. Kept deliberately --
+  it is the one attack an alignment-based heuristic cannot see, since FedACO's `a_k` is a
+  cosine and is blind to a scaled update, so only the norm ratio `r_k` can catch it.
+  Dropping it would remove the single case that separates the method's two heuristics.
+
+### A live bug found while updating the Makefile
+
+`make ablations-granular` globbed `configs/experiment/ablation_a*.yaml`, which also
+matches `ablation_all.yaml` -- a different YAML shape the granular runner cannot parse
+(`KeyError: 'partitions'`). The target would have died partway through the ablation set.
+Narrowed to `ablation_a[0-9].yaml`.
+
+### The plan now
+
+| | cells |
+|---|---:|
+| main (8 seeds) | 576 |
+| ablation_all | 60 |
+| robustness | 75 |
+| ablation_a1 (8 seeds) | 80 |
+| ablation_a2-a9 | 525 |
+| robustness_r1-r5 | 270 |
+| **total** | **1,586** |
+
+Down from 2,576 with both families at 8 seeds. Run both targets in each family -- they no
+longer overlap.
+
+440 tests pass, ruff clean.

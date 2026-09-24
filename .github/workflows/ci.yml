@@ -51,13 +51,16 @@ jobs:
         run: |
           uv venv --python 3.12 .venv
           uv pip install -e ".[dev,simulation]" --python .venv/bin/python
-      - name: Put .venv/bin on PATH
-        # `flwr run` spawns `flower-superlink` as a child process by bare name (PATH
-        # lookup, not relative to the `flwr` binary it was invoked through), so calling
-        # `.venv/bin/flwr` directly without this step fails with "Unable to launch
-        # `flower-superlink`... No such file or directory" -- confirmed by a real CI
-        # run (2026-09-18), not a hypothetical. `$GITHUB_PATH` persists for every
-        # later step in this job, unlike `export PATH=...` in a single `run:` block.
+      # Not cosmetic, and not redundant with calling `.venv/bin/flwr` explicitly below.
+      # `flwr run` starts a local SuperLink by spawning `flower-superlink` as a *separate
+      # process*, resolved through PATH -- not relative to its own sys.executable. Invoked
+      # as `.venv/bin/flwr` with the venv's bin dir absent from PATH, it gets as far as
+      # "Starting local SuperLink..." and then dies with
+      #   Unable to launch `flower-superlink` for local simulation:
+      #   [Errno 2] No such file or directory: 'flower-superlink'
+      # which is exactly how this job failed on the merge push. Reproduced locally with
+      # `env PATH=/usr/bin:/bin .venv/bin/flwr run .`, and fixed by this step.
+      - name: Put the venv's bin dir on PATH (flwr spawns flower-superlink through it)
         run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Build a tiny synthetic dataset (no real MRI data / Kaggle creds in CI)
         run: .venv/bin/python scripts/ci_smoke_dataset.py --out-dir /tmp/fedswarm_ci_smoke

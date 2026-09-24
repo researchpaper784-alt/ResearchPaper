@@ -229,3 +229,53 @@ def bootstrap_rounds_to_target(
         "ci_low": float(np.quantile(resampled_means, alpha / 2)),
         "ci_high": float(np.quantile(resampled_means, 1 - alpha / 2)),
     }
+
+
+def min_achievable_p(n_pairs: int, alternative: str = "two-sided") -> float:
+    """The smallest p-value the signed-rank test can *possibly* return at `n_pairs`.
+
+    Not a curiosity -- a design constraint that has to be checked before a sweep runs,
+    not after. The signed-rank statistic is discrete, so its p-value has a floor set
+    purely by the sample size: with every paired difference favouring the method (the
+    most favourable data that can exist), a two-sided test at n=5 returns **0.0625**.
+    The main sweep's 5 seeds therefore cannot produce p < 0.05 no matter what the numbers
+    say, and after Holm-Bonferroni across a family of 66 comparisons (11 baselines x 6
+    regimes) every adjusted p is 1.0.
+
+    Computed by running the same `wilcoxon_paired_test` this module uses against a
+    synthetic best case, rather than from a closed form, so the floor can never drift
+    away from the test actually being applied.
+
+    | n  | two-sided floor | one-sided floor |
+    |----|-----------------|-----------------|
+    | 5  | 0.0625          | 0.0312          |
+    | 8  | 0.0078          | 0.0039          |
+    | 10 | 0.0020          | 0.0010          |
+    """
+    if n_pairs < 1:
+        return float("nan")
+    best = np.arange(1.0, n_pairs + 1.0)
+    diffs = best - (best - 1.0)  # every pair differs, all in the same direction
+    if np.all(diffs == 0):
+        return float("nan")
+    try:
+        return float(stats.wilcoxon(best, best - 1.0, alternative=alternative).pvalue)
+    except ValueError:
+        return float("nan")
+
+
+def seeds_needed_for(alpha: float, family_size: int, alternative: str = "two-sided") -> int:
+    """Smallest seed count whose Holm-Bonferroni-adjusted floor clears `alpha`.
+
+    Holm's most conservative step multiplies the smallest p by the family size, so the
+    question "how many seeds do we need" cannot be answered without also fixing how many
+    comparisons the paper will claim. Answering it for the wrong family is how a sweep
+    gets run twice.
+
+    Returns 0 if no seed count up to 40 suffices, which means the family is too large for
+    this test rather than the sweep being too small.
+    """
+    for n_pairs in range(2, 41):
+        if min_achievable_p(n_pairs, alternative) * family_size <= alpha:
+            return n_pairs
+    return 0

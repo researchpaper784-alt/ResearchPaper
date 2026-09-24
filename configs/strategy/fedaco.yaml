@@ -9,26 +9,26 @@
 # schedule -- a minor implementation-shape difference, not a different starting
 # point (n_ants=30, n_iterations=10 match §14 exactly as the round-0 values).
 strategy-name: fedaco
-fedaco-num-levels: 11
-fedaco-level-low: 0.0
-fedaco-level-high: 2.5
-fedaco-a-exponent: 1.0       # alpha_exponent_a
-fedaco-b-exponent: 2.0       # beta_exponent_b
-fedaco-rho: 0.10             # rho_evaporation
-fedaco-q0: 0.70              # q0_exploitation
-fedaco-ants-start: 30        # n_ants
-fedaco-ants-end: 10
-fedaco-iters-start: 10       # n_iterations
-fedaco-iters-end: 4
-fedaco-tau0: 1.0             # tau_init
-fedaco-tau-min: 0.01
-fedaco-tau-max: 10.0
-fedaco-pheromone-persistence: decayed
-fedaco-rho-round: 0.30
-fedaco-fitness-mode: data_free
-fedaco-gamma-alignment: 1.0   # gamma1_alignment
-fedaco-gamma-dispersion: 0.50 # gamma2_dispersion
-fedaco-gamma-entropy: 0.10    # gamma3_entropy
-fedaco-target-sum: 1.0        # weight_sum
-fedaco-safety-fallback: true
-fedaco-search-method: aco     # A1 ablation axis -- "aco" is the real method
+aco-num-levels: 11
+aco-level-low: 0.0
+aco-level-high: 2.5
+aco-pheromone-exp: 1.0       # alpha_exponent_a
+aco-heuristic-exp: 2.0       # beta_exponent_b
+aco-rho: 0.10             # rho_evaporation
+aco-q0: 0.70              # q0_exploitation
+aco-ants-start: 30        # n_ants
+aco-ants-end: 10
+aco-iters-start: 10       # n_iterations
+aco-iters-end: 4
+aco-tau0: 1.0             # tau_init
+aco-tau-min: 0.01
+aco-tau-max: 10.0
+aco-persistence: decayed
+aco-rho-round: 0.30
+aco-fitness-mode: data_free
+aco-gamma-alignment: 1.0   # gamma1_alignment
+aco-gamma-dispersion: 0.50 # gamma2_dispersion
+aco-gamma-entropy: 0.10    # gamma3_entropy
+aco-target-sum: 1.0        # weight_sum
+aco-safety-fallback: true
+aco-search-method: aco     # A1 ablation axis -- "aco" is the real method

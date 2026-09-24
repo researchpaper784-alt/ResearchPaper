@@ -7,8 +7,9 @@
 # Two partitions (not all 7 of main.yaml's): iid (the easy case) and dirichlet_0.3
 # (a real heterogeneity regime) -- enough to see whether any edge holds up outside
 # the trivial case, without paying for the full partition grid on what's meant to be
-# a fast go/no-go check. Full 5 seeds: this gate is exactly where seed noise matters
-# most.
+# a fast go/no-go check. Full 8 seeds: this gate is exactly where seed noise matters
+# most, and it is the one comparison the paper cannot afford to report as "inconclusive
+# because the sample was too small" -- see the seed note further down.
 #
 # Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a1.yaml
 
@@ -48,4 +49,9 @@ partitions:
   - name: dirichlet_0.3
     file: configs/data/dirichlet_0.3.yaml
 
-seeds: [0, 1, 2, 3, 4]
+# 8 seeds, raised from 5. The signed-rank test's p-value floor is set by the pair
+# count alone: at 5 seeds the smallest two-sided p it can return is 0.0625, so this
+# sweep could not produce a significant result at alpha=0.05 under any data. 8 seeds moves
+# the floor to 0.0078. See docs/OPEN_QUESTIONS.md, "5 seeds cannot produce a significant
+# result", and `analysis.seeds_needed_for` for the family-size dependence.
+seeds: [0, 1, 2, 3, 4, 5, 6, 7]
