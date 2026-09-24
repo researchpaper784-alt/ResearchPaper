@@ -219,22 +219,52 @@ def add_deltas(rows: list[dict], baseline: str) -> None:
     saw the same seeds, so the per-seed difference has far less variance than the
     difference of the means. `delta_paired` records which was used, so a reader is never
     left guessing whether a small margin survived pairing."""
-    by_regime_seed = {
-        (r["regime"], s): v
+    # Baseline values keyed by (regime, variant, seed), plus the same map restricted to the
+    # default variant as a fallback.
+    #
+    # Matching the variant matters because several sweeps set a tracked knob in
+    # `base_overrides`, so **every** row in them carries that mark and none is "default":
+    # `main_client_scale.yaml` sets fraction-train 0.3, and robustness_r1/r2/r3 set an
+    # attack. Keying the baseline on variant == "default" alone found nothing in those
+    # sweeps, so every delta came out None -- the robustness tables lost the exact column
+    # they exist for, silently, because an empty delta renders as the same "—" as a cell
+    # with no paired seeds.
+    #
+    # Within-variant first is also the comparison those sweeps intend: FedACO against FedAvg
+    # *at the same attack level*, not against an unattacked control. Falling back to the
+    # default variant preserves the ablation behaviour, where the baseline only ever exists
+    # at default and each variant is meant to be read against it.
+    by_variant_seed: dict[tuple[str, str, object], float] = {
+        (r["regime"], r["variant"], s): v
         for r in rows
-        if r["strategy"] == baseline and r["variant"] == "default"
+        if r["strategy"] == baseline
         for s, v in r["by_seed"].items()
     }
+    by_default_seed = {
+        (regime, seed): value
+        for (regime, variant, seed), value in by_variant_seed.items()
+        if variant == "default"
+    }
+
     for row in rows:
-        if row["strategy"] == baseline and row["variant"] == "default":
+        if row["strategy"] == baseline:
+            # A baseline row is its own reference, whatever variant it sits at.
             row["delta"] = 0.0
             row["delta_paired"] = True
             continue
-        shared = [s for s in row["by_seed"] if (row["regime"], s) in by_regime_seed]
+
+        same_variant = [
+            s for s in row["by_seed"] if (row["regime"], row["variant"], s) in by_variant_seed
+        ]
+        if same_variant:
+            reference = {s: by_variant_seed[(row["regime"], row["variant"], s)] for s in same_variant}
+            shared = same_variant
+        else:
+            shared = [s for s in row["by_seed"] if (row["regime"], s) in by_default_seed]
+            reference = {s: by_default_seed[(row["regime"], s)] for s in shared}
+
         if shared:
-            row["delta"] = statistics.fmean(
-                row["by_seed"][s] - by_regime_seed[(row["regime"], s)] for s in shared
-            )
+            row["delta"] = statistics.fmean(row["by_seed"][s] - reference[s] for s in shared)
             row["delta_paired"] = True
             row["delta_n"] = len(shared)
         else:

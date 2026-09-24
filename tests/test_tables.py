@@ -11,6 +11,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from make_tables import (  # noqa: E402
@@ -521,3 +523,86 @@ def test_an_unknown_key_in_the_config_does_not_become_a_variant() -> None:
 
     make_tables._defaults.cache_clear()
     assert make_tables._variant_of({"some-future-key": 42}) == "default"
+
+
+# ======================================================================================
+# The delta column must survive a sweep whose base_overrides set a tracked knob
+# ======================================================================================
+
+
+def _row(strategy: str, variant: str, by_seed: dict, regime: str = "dirichlet_0.3") -> dict:
+    return {
+        "strategy": strategy, "regime": regime, "variant": variant,
+        "by_seed": dict(by_seed), "seeds": sorted(by_seed),
+        "n": len(by_seed), "expected_n": len(by_seed), "incomplete": False,
+        "mean": sum(by_seed.values()) / len(by_seed), "std": 0.0,
+        "val_mean": None, "fallback_rate": None, "pheromone_entropy": None,
+    }
+
+
+def test_deltas_survive_a_sweep_with_no_default_variant() -> None:
+    """`robustness_r1/r2/r3` set an attack in `base_overrides` and `main_client_scale` sets
+    fraction-train, so *every* row in those sweeps carries that mark and none is "default".
+    Keying the baseline on variant == "default" found nothing there, so every delta came out
+    None and the robustness tables silently lost the column they exist for -- an empty delta
+    renders as the same "—" as a cell with no paired seeds.
+    """
+    from make_tables import add_deltas
+
+    rows = [
+        _row("fedavg", "attack=label_flip@0.1", {0: 0.50, 1: 0.52}),
+        _row("fedaco", "attack=label_flip@0.1", {0: 0.55, 1: 0.58}),
+    ]
+    add_deltas(rows, "fedavg")
+
+    assert rows[0]["delta"] == 0.0
+    assert rows[1]["delta"] == pytest.approx(0.055)
+    assert rows[1]["delta_paired"] is True
+
+
+def test_the_baseline_is_matched_within_the_same_variant() -> None:
+    """FedACO at 30% attackers must be read against FedAvg at 30% attackers, not against an
+    unattacked control -- otherwise the robustness table reports the cost of the attack as if
+    it were the method's deficit."""
+    from make_tables import add_deltas
+
+    rows = [
+        _row("fedavg", "default", {0: 0.80}),
+        _row("fedavg", "attack=sign_flip@0.3", {0: 0.40}),
+        _row("fedaco", "attack=sign_flip@0.3", {0: 0.45}),
+    ]
+    add_deltas(rows, "fedavg")
+
+    attacked_aco = next(r for r in rows if r["strategy"] == "fedaco")
+    assert attacked_aco["delta"] == pytest.approx(0.05), (
+        "matched against the unattacked fedavg this would read -0.35, reporting the attack's "
+        "damage as FedACO's"
+    )
+
+
+def test_an_ablation_variant_still_falls_back_to_the_default_baseline() -> None:
+    """The pre-existing behaviour that must not regress: in an ablation sweep the baseline
+    exists only at default, and each variant is meant to be read against it."""
+    from make_tables import add_deltas
+
+    rows = [
+        _row("fedavg", "default", {0: 0.50, 1: 0.50}),
+        _row("fedaco", "persistence=none", {0: 0.55, 1: 0.57}),
+    ]
+    add_deltas(rows, "fedavg")
+
+    assert rows[1]["delta"] == pytest.approx(0.06)
+    assert rows[1]["delta_paired"] is True
+
+
+def test_no_shared_seed_still_reports_no_delta() -> None:
+    from make_tables import add_deltas
+
+    rows = [
+        _row("fedavg", "default", {0: 0.5}),
+        _row("fedaco", "persistence=none", {7: 0.6}),
+    ]
+    add_deltas(rows, "fedavg")
+
+    assert rows[1]["delta"] is None
+    assert rows[1]["delta_paired"] is False

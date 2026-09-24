@@ -2565,4 +2565,20 @@ with the same code on one machine, so any difference is non-determinism in the a
 pipeline itself (an unsorted glob, dict iteration order, an embedded timestamp), and each of
 those makes "did this number change?" unanswerable across a re-run.
 
-658 tests pass, ruff clean.
+### 5. The robustness tables had no delta column at all
+
+Found while checking that `_variant_of` labels every declared sweep cell correctly. It does --
+but that surfaced a pre-existing consequence: `robustness_r1/r2/r3` set an attack in
+`base_overrides` and `main_client_scale.yaml` sets `fraction-train: 0.3`, so **every** row in
+those sweeps carries that mark and none is "default". `add_deltas` keyed its baseline on
+`variant == "default"`, found nothing, and left `delta = None` on every row -- so four sweeps
+printed an empty comparison column, which renders as the same "—" as a cell with no paired
+seeds. Nothing distinguishes "no baseline existed" from "no seeds overlapped".
+
+`add_deltas` now matches the baseline within the same variant first and falls back to the
+default variant. Within-variant is also the comparison those sweeps intend: FedACO against
+FedAvg **at the same attack level**. Matched against an unattacked control instead, a FedACO
+row at 30% sign-flip would read -0.35 rather than +0.05 -- reporting the attack's damage as
+the method's deficit. Four tests, including that one.
+
+662 tests pass, ruff clean.
