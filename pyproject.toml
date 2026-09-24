@@ -229,6 +229,9 @@ aco-gamma-dispersion = 1.0
 aco-gamma-entropy = 0.1
 aco-normalize-dispersion = true
 aco-fitness-mode = "data_free"
+# Phase 7, A1 -- "aco" (the real colony) or one of "random"/"coordinate_grid"/"pso"/"ga"
+# (equal-fitness-budget controls, fedswarm/aco/controls.py). See ablation_a1.yaml.
+aco-search-method = "aco"
 # The concentration penalty's shape: "entropy" (log K - H(alpha), the method as proposed)
 # or "gini" (sum_k p_k^2 - 1/K). Only the vertex value differs in practice -- log K vs
 # 1 - 1/K -- and that is what decides whether one `aco-gamma-entropy` can hold across K.

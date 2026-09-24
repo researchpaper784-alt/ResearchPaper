@@ -27,7 +27,14 @@ from flwr.serverapp.strategy import FedAvg
 from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig, run_colony
+from fedswarm.aco.controls import (
+    coordinate_grid_search,
+    genetic_algorithm_search,
+    pso_search,
+    random_search,
+)
 from fedswarm.aco.fitness import (
+    BudgetedFitness,
     DataFreeFitness,
     DataFreeFitnessConfig,
     ServerValFitness,
@@ -37,6 +44,13 @@ from fedswarm.aco.gram import apply_delta, flatten_state_dicts, precompute_gram
 from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix, desirability_scores
 from fedswarm.aco.pheromone import Pheromone, PheromoneConfig
 from fedswarm.aco.schedules import colony_budget, level_set
+
+_CONTROL_SEARCH_FNS = {
+    "random": random_search,
+    "coordinate_grid": coordinate_grid_search,
+    "pso": pso_search,
+    "ga": genetic_algorithm_search,
+}
 
 
 @dataclass
@@ -69,6 +83,14 @@ class FedACOConfig:
     # not selectable here: `ClientProbeFitness` implements the aggregation side only,
     # and its broadcast/collect round-trip is Phase 7 work -- see docs/OPEN_QUESTIONS.md.
     fitness_mode: str = "data_free"
+    # Phase 7, A1 (plan §7's "make-or-break experiment"): "aco" is the real colony;
+    # the other four are equal-fitness-budget controls (`aco/controls.py`) run against
+    # the identical `Fitness` object, capped at the identical evaluation count via
+    # `BudgetedFitness`, with pheromone left untouched (there is nothing for a
+    # non-colony control to deposit into). If "aco" doesn't beat all four here, the
+    # paper does not have an ACO story -- see docs/OPEN_QUESTIONS.md and
+    # configs/experiment/ablation_a1.yaml.
+    search_method: str = "aco"
     colony: ColonyConfig = field(default_factory=ColonyConfig)
     pheromone: PheromoneConfig = field(default_factory=PheromoneConfig)
     fitness: DataFreeFitnessConfig = field(default_factory=DataFreeFitnessConfig)
@@ -102,6 +124,11 @@ class FedACO(FedAvg):
         ):
             raise ValueError(
                 "fitness_mode='server_val' requires model, val_loader, and device"
+            )
+        if self.aco_config.search_method not in ("aco", *_CONTROL_SEARCH_FNS):
+            raise ValueError(
+                f"Unknown search_method {self.aco_config.search_method!r} "
+                f"(expected 'aco' or one of {sorted(_CONTROL_SEARCH_FNS)})"
             )
         self.model = model
         self.val_loader = val_loader
@@ -199,30 +226,65 @@ class FedACO(FedAvg):
             (int(self.aco_config.seed) & 0xFFFF_FFFF) * 1_000_003 + true_round
         )
 
-        colony_result = run_colony(
-            tau0,
-            eta,
-            self.levels,
-            base_weights,
-            fitness.evaluate,
-            num_ants,
-            num_iterations,
-            self.aco_config.colony,
-            target_sum=self.aco_config.target_sum,
-            generator=generator,
-        )
+        if self.aco_config.search_method == "aco":
+            colony_result = run_colony(
+                tau0,
+                eta,
+                self.levels,
+                base_weights,
+                fitness.evaluate,
+                num_ants,
+                num_iterations,
+                self.aco_config.colony,
+                target_sum=self.aco_config.target_sum,
+                generator=generator,
+            )
+            alpha_best = colony_result.alpha_best
+            best_fitness = colony_result.best_fitness
+            realized_ants = colony_result.realized_ants
+            realized_iterations = colony_result.realized_iterations
+        else:
+            # Phase 7, A1 -- the identical Fitness object, hard-capped at the identical
+            # number of evaluations the real colony would have spent this round
+            # (num_ants * num_iterations), so the comparison is about search strategy,
+            # not evaluation count. Pheromone is untouched: there is nothing for a
+            # non-colony control to deposit into (`end_round` below is skipped for this
+            # branch), so `tau0` just carries forward via `begin_round`'s own decay.
+            budget = num_ants * num_iterations
+            budgeted_fitness = BudgetedFitness(fitness, budget)
+            control_kwargs: dict = {"target_sum": self.aco_config.target_sum}
+            # coordinate_grid_search is exhaustive/deterministic and takes no RNG --
+            # the other three are stochastic and require one.
+            if self.aco_config.search_method != "coordinate_grid":
+                control_kwargs["generator"] = generator
+            control_result = _CONTROL_SEARCH_FNS[self.aco_config.search_method](
+                self.levels,
+                base_weights,
+                budgeted_fitness,
+                budget,
+                **control_kwargs,
+            )
+            alpha_best = control_result.alpha_best
+            best_fitness = control_result.best_fitness
+            # No ant/iteration structure to report for these controls; the evaluation
+            # count actually spent (<= budget, since BudgetedFitness can run dry before
+            # the nominal budget for e.g. PSO's per-particle loop) is the analogous
+            # "how much of the planned search actually happened" signal.
+            realized_ants = control_result.evaluations_used
+            realized_iterations = 1
 
         fedavg_alpha = base_weights * self.aco_config.target_sum
         fedavg_fitness = fitness.evaluate(fedavg_alpha)
 
-        fallback_used = self.aco_config.safety_fallback and colony_result.best_fitness <= fedavg_fitness
+        fallback_used = self.aco_config.safety_fallback and best_fitness <= fedavg_fitness
         if fallback_used:
             self.fallback_count += 1
             alpha_final = fedavg_alpha
         else:
-            alpha_final = colony_result.alpha_best
+            alpha_final = alpha_best
 
-        self.pheromone.end_round(client_ids, colony_result.tau_final)
+        if self.aco_config.search_method == "aco":
+            self.pheromone.end_round(client_ids, colony_result.tau_final)
         self.round_count += 1
 
         combined_delta = alpha_final @ deltas
@@ -237,8 +299,7 @@ class FedACO(FedAvg):
         # carries those and FedACO would not, which is exactly backwards. Folded in first
         # so the ACO-specific keys below still win on any name collision.
         aggregated = _weighted_client_metrics(client_metrics, num_examples)
-        metrics_out = MetricRecord(
-            {
+        metrics_dict = {
                 **aggregated,
                 "alpha_entropy": _entropy(alpha_final),
                 "alpha_max": float(alpha_final.max()),
@@ -250,9 +311,8 @@ class FedACO(FedAvg):
                 "fallback_count": self.fallback_count,
                 "aco_time_ms": aco_time_ms,
                 "gram_time_ms": gram_time_ms,
-                "best_fitness": colony_result.best_fitness,
+                "best_fitness": best_fitness,
                 "fedavg_fitness": fedavg_fitness,
-                "pheromone_entropy": self.pheromone.entropy(client_ids),
                 # trace(G)/K, the dispersion scale. Logged per round because a run whose
                 # client updates are far larger than the fitness terms assume is the
                 # failure mode the normalization in `DataFreeFitness` exists to prevent
@@ -274,15 +334,20 @@ class FedACO(FedAvg):
                 "corner_margin": corner_margin(
                     gram, base_weights, self.aco_config.fitness
                 ),
-                "realized_ants": colony_result.realized_ants,
-                "realized_iterations": colony_result.realized_iterations,
+                "realized_ants": realized_ants,
+                "realized_iterations": realized_iterations,
                 "alpha": alpha_final.tolist(),
                 # MetricRecord list values are int | float only (verified: no list[str]
                 # support) -- client_ids are numeric partition ids under the hood, so
                 # int(...) round-trips exactly; the str keys stay internal to Pheromone.
                 "participating_client_ids": [int(c) for c in client_ids],
-            }
-        )
+        }
+        if self.aco_config.search_method == "aco":
+            # Meaningless for the A1 controls -- they never touch pheromone, so this
+            # would just report begin_round's carried-forward state, not anything the
+            # search itself did. Omitted rather than logged as a misleading constant.
+            metrics_dict["pheromone_entropy"] = self.pheromone.entropy(client_ids)
+        metrics_out = MetricRecord(metrics_dict)
         return arrays_out, metrics_out
 
 

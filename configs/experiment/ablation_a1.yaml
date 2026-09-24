@@ -10,7 +10,7 @@
 # a fast go/no-go check. Full 5 seeds: this gate is exactly where seed noise matters
 # most.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a1.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a1.yaml
 
 base_overrides:
   num-clients: 20
@@ -32,15 +32,15 @@ base_overrides:
 
 strategies:
   - name: aco
-    overrides: {fedaco-search-method: aco}
+    overrides: {aco-search-method: aco}
   - name: random
-    overrides: {fedaco-search-method: random}
+    overrides: {aco-search-method: random}
   - name: coordinate_grid
-    overrides: {fedaco-search-method: coordinate_grid}
+    overrides: {aco-search-method: coordinate_grid}
   - name: pso
-    overrides: {fedaco-search-method: pso}
+    overrides: {aco-search-method: pso}
   - name: ga
-    overrides: {fedaco-search-method: ga}
+    overrides: {aco-search-method: ga}
 
 partitions:
   - name: iid

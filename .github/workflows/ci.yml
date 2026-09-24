@@ -51,6 +51,14 @@ jobs:
         run: |
           uv venv --python 3.12 .venv
           uv pip install -e ".[dev,simulation]" --python .venv/bin/python
+      - name: Put .venv/bin on PATH
+        # `flwr run` spawns `flower-superlink` as a child process by bare name (PATH
+        # lookup, not relative to the `flwr` binary it was invoked through), so calling
+        # `.venv/bin/flwr` directly without this step fails with "Unable to launch
+        # `flower-superlink`... No such file or directory" -- confirmed by a real CI
+        # run (2026-09-18), not a hypothetical. `$GITHUB_PATH` persists for every
+        # later step in this job, unlike `export PATH=...` in a single `run:` block.
+        run: echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Build a tiny synthetic dataset (no real MRI data / Kaggle creds in CI)
         run: .venv/bin/python scripts/ci_smoke_dataset.py --out-dir /tmp/fedswarm_ci_smoke
       - name: Run the FL smoke test against the synthetic dataset
