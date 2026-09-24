@@ -2193,3 +2193,59 @@ whose output goes nowhere cannot be checked, so every bug inside it is invisible
 construction.
 
 572 tests pass, ruff clean.
+
+## 2026-09-24 (the one that mattered) -- the fitness question, reproduced and answered locally
+
+Three Kaggle sessions were spent establishing that the data-free fitness has no usable optimum
+on heterogeneous data. Each one cost a GPU session to obtain one row of numbers. That was
+avoidable, and the reason it was not avoided is worth stating plainly: the repo's notes say the
+FL harness cannot run locally, and that is true of the **Intel-macOS dev machine** and false of
+every Linux container this project has used. `ray` and `flwr.simulation` were installed here the
+whole time.
+
+The missing piece was never compute. It was a fixture heterogeneous enough to fail the same way.
+`ci_smoke_dataset.py` cannot: 40 images, labels alternating by parity, pixel content unrelated
+to the label -- nothing there produces client disagreement, and a FedACO run on it reports
+`fedavg_fitness = +0.86` and a negative corner margin, which is the opposite of the regime under
+investigation.
+
+`scripts/synthetic_heterogeneous_dataset.py` gives each class a distinct low-frequency pattern,
+so a client holding {0,1} has a genuinely different local optimum from one holding {2,3} and its
+update points elsewhere. Difficulty is tunable, and it had to be: the first attempt
+(amplitude 0.35 / noise 0.18) was trivially separable, reached final macro-F1 **1.0000**, and
+reproduced the corner problem but not the zero-centred-fitness problem -- a fixture easier than
+the task it stands in for reproduces only the failures that do not depend on difficulty, and
+there is no way to know in advance which those are.
+
+At amplitude 0.15 / noise 0.45, K=10, dirichlet(0.3), 15 rounds, gamma_3=0.1, **about a minute
+per arm**:
+
+| | weighted_mean (local) | real Kaggle | aggregate (local) |
+|---|---|---|---|
+| F at the FedAvg point, mean | **-0.0033** | -0.0005 / -0.0212 | **+0.8141** |
+| negative in | 5/15 rounds | 7/15 rounds | **0/15** |
+| corner_margin, mean | **+0.6185** | +0.3136 / **+0.6184** | **-0.5283** |
+| corner wins in | **15/15** | **15/15** | **0/15** |
+| rounds that deposited nothing | 3/15 | 1-7/15 | **0/15** |
+| final test macro-F1 | 0.1000 | 0.1185 - 0.1381 | 0.1168 |
+
+The left column reproduces the real failure on every axis, including a corner margin that agrees
+with the Kaggle run to three decimals -- coincidence in the last digit, but the signature matches
+throughout. The right column shows `aggregate` removing both halves: the corner never wins, and
+F at the reference stops being zero-centred noise, so every round deposits. `alpha_max` is 0.207
+against uniform's 0.100, so the colony still has room -- this is not the gamma_3=0.6 failure
+where the landscape was repaired by flattening it.
+
+`make fitness-repro` runs all three modes and the health check on each.
+
+**What this does and does not establish.** A synthetic *signature* match is much weaker than a
+data match: it says the fixture fails the same way, not that the fix transfers. 15 rounds is far
+too short to read the macro-F1 column. The real gate is still the test that counts -- but it is
+now a confirmation rather than a discovery, and every further fitness change can be screened
+here for a minute instead of a GPU session.
+
+**The cost of the wrong belief.** Five GPU sessions, three of them spent obtaining numbers this
+box produces in three minutes. The belief was written down, inherited, and never retested after
+the platform changed.
+
+572 tests pass, ruff clean.

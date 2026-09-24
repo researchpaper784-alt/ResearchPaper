@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro clean
+.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro fitness-repro clean
 
 # Interpreter paths, overridable. The default is the local `uv` venv from `make setup`
 # (CLAUDE.md), but Colab and Kaggle install into the system Python and have no .venv at
@@ -175,6 +175,30 @@ tables-ablation:
 
 # Phase 10 -- runs the smoke config and checks final metrics against a recorded
 # tolerance band (scripts/verify_repro.py).
+# The project's blocking question, answerable locally in about a minute per arm.
+#
+# `ray`/`flwr[simulation]` DO run in this project's Linux containers and on Kaggle -- the
+# "cannot run locally" notes are about the Intel-macOS dev machine. So the fitness question
+# does not need a GPU session: it needs data heterogeneous enough to reproduce the failure,
+# which `scripts/synthetic_heterogeneous_dataset.py` provides and `ci_smoke_dataset.py`
+# (deliberately trivial, for CI speed) cannot.
+#
+# Reproduces, at gamma_3=0.1, K=10, dirichlet(0.3), 15 rounds:
+#   weighted_mean  corner_margin +0.6185, positive 15/15; F(FedAvg point) -0.0033, negative 5/15
+#   real Kaggle    corner_margin +0.6184, positive 15/15; F(FedAvg point) -0.0005, negative 7/15
+# and shows `aggregate` fixing both (corner -0.5283 positive 0/15; F(FedAvg) +0.8141).
+#
+# ⚠️ A synthetic *signature* match is much weaker than a data match. Confirm anything found
+# here on the real gate before it goes in the paper.
+fitness-repro:
+	$(PY) scripts/synthetic_heterogeneous_dataset.py --out-dir /tmp/fedswarm_het --num-images 600 --image-size 32
+	$(FLWR) federation simulation-config --num-supernodes 10 --client-resources-num-cpus 1
+	for mode in weighted_mean base aggregate; do \
+		echo "=== $$mode ==="; \
+		$(FLWR) run . --stream --run-config "strategy-name='fedaco' num-clients=10 min-client-size=3 min-train-nodes=10 min-evaluate-nodes=10 min-available-nodes=10 num-rounds=15 local-epochs=1 num-classes=4 image-size=32 local-batch-size=8 regime='dirichlet' alpha=0.3 seed=0 aco-dispersion-reference='$$mode' aco-gamma-entropy=0.1 cache-dir='/tmp/fedswarm_het/cache' manifest-path='/tmp/fedswarm_het/manifest.csv' partition-cache-dir='/tmp/fedswarm_het/parts' output-dir='/tmp/fedswarm_het/$$mode' checkpoint-dir='/tmp/fedswarm_het/ckpt_$$mode'" || exit 1; \
+		$(PY) scripts/check_fedaco_health.py --results-dir /tmp/fedswarm_het/$$mode; \
+	done
+
 verify-repro:
 	$(PY) scripts/verify_repro.py
 

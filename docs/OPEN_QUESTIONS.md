@@ -1185,7 +1185,38 @@ Measured on synthetic consensus deltas, K in {10, 20}, noise in {1.5, 3.0}, at t
 
 Surgical where `gamma_3=0.6` was not: the corner loses and nothing else moves.
 
-**What is open.** All of that is synthetic. Consensus deltas have high alignment and low
+**LOCALLY REPRODUCED AND ANSWERED, 2026-09-24 (`make fitness-repro`).** The claim below that
+only a GPU gate could settle this was wrong -- `ray`/`flwr[simulation]` run in this project's
+Linux containers, and the missing piece was never compute but a fixture heterogeneous enough
+to reproduce the failure. `scripts/synthetic_heterogeneous_dataset.py` gives one (class-correlated
+patterns, so dirichlet skew produces genuinely different local optima; `ci_smoke_dataset.py` is
+deliberately trivial for CI speed and cannot). At gamma_3=0.1, K=10, dirichlet(0.3), 15 rounds,
+about a minute per arm:
+
+| | weighted_mean (local) | real Kaggle | aggregate (local) |
+|---|---|---|---|
+| F at the FedAvg point, mean | **-0.0033** | -0.0005 / -0.0212 | **+0.8141** |
+| negative in | 5/15 rounds | 7/15 rounds | **0/15** |
+| corner_margin, mean | **+0.6185** | +0.3136 / **+0.6184** | **-0.5283** |
+| corner wins in | **15/15** | **15/15** | **0/15** |
+| rounds that deposited nothing | 3/15 | 1-7/15 | **0/15** |
+| final test macro-F1 | 0.1000 | 0.1185 - 0.1381 | 0.1168 |
+
+The left column reproduces the real failure on every axis. The right shows `aggregate` removing
+both halves of it: the corner never wins, and F at the reference point stops being zero-centred
+noise, so every round deposits.
+
+`alpha_max` under `aggregate` is 0.207 against uniform's 0.100, so the colony still has room --
+this is not the `gamma_3=0.6` failure where the landscape was repaired by flattening it.
+
+**What is still open.** A synthetic *signature* match is a much weaker claim than a data match:
+it says the fixture fails the same way, not that the fix transfers. 15 rounds is also far too
+short to read the macro-F1 column. The real gate remains the test that counts -- but it is now
+a confirmation rather than a discovery, and any further fitness change can be screened here
+first for the cost of a minute instead of a GPU session.
+
+**The original note, kept because its reasoning was the mistake worth remembering:** all of
+that is synthetic. Consensus deltas have high alignment and low
 dispersion, which is exactly the regime where this is easy, and real MRI deltas under
 dirichlet(0.3) are not that regime -- the level-set episode is precisely a case of synthetic
 evidence not transferring. The next gate run at `aco-dispersion-reference=base` and
