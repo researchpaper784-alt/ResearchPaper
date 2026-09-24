@@ -3,7 +3,7 @@
 # Isolates which signal actually drives any gain -- turns a hand-designed objective
 # into an evidence-backed one.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a4.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a4.yaml
 
 base_overrides:
   num-clients: 20

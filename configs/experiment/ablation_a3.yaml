@@ -11,7 +11,7 @@
 # the same budget. Report that budget difference alongside any results table built
 # from this ablation; do not present the two rows as apples-to-apples cost-wise.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a3.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a3.yaml
 
 base_overrides:
   num-clients: 20

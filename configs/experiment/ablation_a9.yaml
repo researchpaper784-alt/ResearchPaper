@@ -5,7 +5,7 @@
 # are included so the *interaction* (does the norm choice affect FedACO differently
 # than FedAvg?) is visible, not just each method's own norm sensitivity in isolation.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a9.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a9.yaml
 
 base_overrides:
   num-clients: 20

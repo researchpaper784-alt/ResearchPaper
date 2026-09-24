@@ -4,7 +4,7 @@
 # specifically -- a corrupted update should show up as an outlier in update
 # magnitude/direction relative to the median client.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness_r2_update_attack.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_update_attack.yaml
 
 base_overrides:
   num-clients: 20
@@ -30,7 +30,13 @@ strategies:
   - name: fedavg
     file: configs/strategy/fedavg.yaml
   - name: krum
-    overrides: {strategy-name: krum, num-malicious-nodes: 4}  # see robustness_r1's comment on this fixed assumption
+    # `num-malicious-nodes` is deliberately NOT set: the factory derives Krum's f from
+    # this cell's own `attack-fraction` via the same `attacks.malicious_ids` the clients
+    # use, so the number Krum assumes and the number that actually lie cannot drift.
+    # It was hardcoded to 4 (20% of 20), which tuned Krum correctly in one of the three
+    # attacker-fraction cells and mis-tuned it in the other two -- flattering FedACO in
+    # the comparison the paper's Byzantine-resilience claim rests on.
+    overrides: {strategy-name: krum}
   - name: trimmed_mean
     file: configs/strategy/trimmed_mean.yaml
   - name: fedaco

@@ -1869,3 +1869,73 @@ probing the real function; the first attempt assumed entropy alone decided it an
 test that asserted the opposite of what it set up.
 
 499 tests pass, ruff clean.
+
+## 2026-09-24 -- person C's workstream, and two real defects found preflighting it
+
+Built `notebooks/kaggle_ablations_robustness.ipynb` for Phases 7-8. It reuses person B's
+setup cells (clone/pin, pip, dataset probe, restore, cache) by reading them out of the built
+notebook rather than copying the text -- those five absorbed a dozen fixes and a second
+hand-maintained copy would drift.
+
+**C's workstream is larger than B's: 990 cells, 99,000 rounds, ~212 GPU-hours** (or ~420 if
+per-round cost scales with K; the gate measured K=10 and these run K=20).
+
+| family | cells | rounds |
+|---|---|---|
+| Ablations A2-A9 | 585 | 58,500 |
+| `ablation_all` | 60 | 6,000 |
+| Robustness R1-R5 | 270 | 27,000 |
+| `robustness` | 75 | 7,500 |
+
+### Two defects, both found before anyone spent a GPU-hour
+
+**1. Krum was mis-tuned in two thirds of the cells it appears in.** `robustness_r1` and
+`robustness_r2` hardcoded `num-malicious-nodes: 4` (20% of 20 clients) across attacker
+fractions of 10%, 20% and 30%, because a Cartesian-product grid cannot express "this
+strategy-specific value must track that partition-specific one". Krum was therefore correctly
+tuned in one cell per sweep and mis-tuned in the other two -- and Krum is the Byzantine
+baseline the paper's "resilience for free" claim is measured against, so a mis-tuned Krum
+flatters FedACO in a way no reader could detect from the tables.
+
+The coupling now lives in `strategies/factory.py`, which sees the whole resolved run_config.
+`f` comes from `attacks.malicious_ids` -- the same function the ClientApp uses to decide which
+partitions actually lie -- so the number Krum assumes and the number that lie cannot drift.
+Verified: f = 0/2/4/6 at fractions 0/10/20/30% at K=20, `attack="none"` gives 0 whatever the
+fraction (the clean arm), an explicit value still wins (`robustness.yaml` sets 2 and 6 per
+variant and keeps working), and Flower's `num_closest = max(1, n - f - 2)` is satisfied at
+every cell. This had been recorded in OPEN_QUESTIONS as an accepted simplification; it was
+fixable, and the fix is smaller than the note explaining why it wasn't.
+
+**2. Seventeen configs documented a runner that cannot load them.** There are two config
+shapes and two runners: `base_overrides`/`strategies`/`partitions` loads only in
+`run_sweep_granular.py`, `common`/`strategies`/`regimes`/`variants` only in `run_sweep.py`.
+Every granular config's `# Run:` line named `run_sweep.py`, which fails immediately with
+`ValueError: ... is missing required key 'regimes'`. Copy-pasteable, wrong, and only
+discoverable by someone with a session running. Fixed in all 17 and pinned by a test that
+checks the documented command against the config's own shape.
+
+Preflight that came back clean: all 15 of C's configs dry-run; every run-config key across all
+22 configs is declared in pyproject (an undeclared key is rejected with a bare `[code: 15]`
+naming nothing); all 1,646 assembled `--run-config` strings parse under `tomllib`, which is
+what flwr uses; and only R5 varies K, on the granular runner that reconfigures per cell.
+
+### The notebook splits C's work by prerequisite, which is the point of it
+
+*Section 4, no prerequisites (385 cells).* R1-R5 and A9 compare FedACO against Krum /
+Trimmed-Mean / Median / FedAvg under attack, DP noise and straggling, or control for a
+BatchNorm confound. Those comparisons mean what they say whatever the colony is doing
+internally, and R1-R2 are the paper's second contribution.
+
+*Section 5, gated (605 cells, ~130 GPU-hours).* A2, A4-A8 and `ablation_all` measure the
+colony's own machinery. On a fitness with no usable optimum they describe the failure rather
+than the method. The cell runs `check_fedaco_health.py --strict` and refuses on a DEGENERATE
+optimum or an INERT colony; UNDERPOWERED is inconclusive and does not block.
+
+**A3 is exempt and should run first.** 20 cells, ~4 GPU-hours, and it is the cheapest
+experiment that can localise the blocking problem: the same colony against `data_free` (the
+proposed surrogate) and `server_val` (real macro-F1 on a server-held split). If `server_val`
+works and `data_free` does not, the fault is the surrogate rather than the search -- a
+different paper-level conclusion to "ACO does not help", reached for 4 GPU-hours instead of
+A1's 33.
+
+527 tests pass, ruff clean.

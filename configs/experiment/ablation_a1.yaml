@@ -11,7 +11,7 @@
 # most, and it is the one comparison the paper cannot afford to report as "inconclusive
 # because the sample was too small" -- see the seed note further down.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a1.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a1.yaml
 
 base_overrides:
   num-clients: 20

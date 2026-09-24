@@ -22,6 +22,7 @@ from fedswarm.aco.fitness import (
     DataFreeFitnessConfig,
 )
 from fedswarm.aco.heuristics import HeuristicWeights
+from fedswarm.fl.attacks import attack_from_run_config, malicious_ids
 from fedswarm.aco.pheromone import PheromoneConfig
 from fedswarm.strategies.fedaco import FedACO, FedACOConfig
 from fedswarm.strategies.fedlaw import FedLAW
@@ -30,6 +31,40 @@ from fedswarm.strategies.lossbased import LossBasedWeighting
 from fedswarm.strategies.scaffold import Scaffold
 
 RunConfig = dict
+
+
+def _krum_malicious_count(run_config: RunConfig) -> int:
+    """How many Byzantine clients Krum should assume -- derived from the attack, not fixed.
+
+    `robustness_r1_label_flip.yaml` and `robustness_r2_update_attack.yaml` both hardcoded
+    `num-malicious-nodes: 4` (20% of 20 clients) across attacker fractions of 10%, 20% and
+    30%, because a Cartesian-product grid has no way to say "this strategy-specific value
+    must track that partition-specific one". Krum was therefore correctly tuned in exactly
+    one of the three cells per sweep and mis-tuned in the other two -- and Krum is the
+    headline Byzantine baseline the paper's "resilience for free" claim is measured against,
+    so a mis-tuned Krum flatters FedACO in a way no reader could detect from the tables.
+
+    The coupling belongs here, where the whole resolved run_config is visible. `f` is taken
+    from `attacks.malicious_ids` -- the same function the ClientApp uses to decide which
+    partitions actually lie -- so the number Krum assumes and the number of real attackers
+    cannot drift apart. `ceil`, at least one attacker for any nonzero fraction, identical
+    rule on both sides.
+
+    An explicit `num-malicious-nodes` still wins, so a deliberate "what if Krum
+    misjudges f" cell stays expressible. `attack="none"` yields 0 regardless of
+    `attack-fraction`, which is what the clean arm of every robustness sweep needs.
+
+    Safe at every cell C runs: Flower's MultiKrum uses
+    `num_closest = max(1, n - f - 2)`, so K=20 with f=6 (the 30% cell) leaves 12 neighbours
+    and no constraint is violated.
+    """
+    explicit = run_config.get("num-malicious-nodes")
+    if explicit is not None and int(explicit) > 0:
+        return int(explicit)
+    attack, fraction, _ = attack_from_run_config(run_config)
+    if attack == "none":
+        return 0
+    return len(malicious_ids(int(run_config.get("num-clients", 20)), fraction))
 
 
 def _with_server_round(strategy: Strategy) -> Strategy:
@@ -133,7 +168,7 @@ def _build_strategy(
         )
 
     if name in ("krum", "multikrum"):
-        return Krum(**common, num_malicious_nodes=int(run_config.get("num-malicious-nodes", 0)))
+        return Krum(**common, num_malicious_nodes=_krum_malicious_count(run_config))
 
     if name in ("trimmed-mean", "fedtrimmedavg"):
         return FedTrimmedAvg(**common, beta=float(run_config.get("trim-beta", 0.2)))

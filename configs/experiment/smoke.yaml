@@ -4,7 +4,7 @@
 # not "which one is better" -- that's configs/experiment/main.yaml's job. Cheap enough to
 # run before every main sweep and after any change touching fl/app.py or strategies/.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/smoke.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/smoke.yaml
 
 base_overrides:
   num-clients: 2

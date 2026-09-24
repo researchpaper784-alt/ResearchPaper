@@ -4,7 +4,7 @@
 # here against Krum / Trimmed-Mean / plain FedAvg, the standard robustness
 # reference set (plan §8's own framing).
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness_r1_label_flip.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_label_flip.yaml
 
 base_overrides:
   num-clients: 20
@@ -29,15 +29,14 @@ base_overrides:
 strategies:
   - name: fedavg
     file: configs/strategy/fedavg.yaml
-  # Krum's own num-malicious-nodes is a fixed assumption (4 = 20% of 20 clients, the
-  # middle test point below), not dynamically matched to each attack-fraction cell
-  # -- a real, deliberate simplification: this grid's "partitions" axis carries the
-  # attacker fraction, and a strategy-specific value that should co-vary with a
-  # partition-specific one doesn't have a clean expression in a plain Cartesian
-  # product. Krum is therefore mildly under/over-configured at the 10%/30% cells,
-  # not misconfigured at 20%. Flag this in any table built from this sweep.
   - name: krum
-    overrides: {strategy-name: krum, num-malicious-nodes: 4}
+    # `num-malicious-nodes` is deliberately NOT set: the factory derives Krum's f from
+    # this cell's own `attack-fraction` via the same `attacks.malicious_ids` the clients
+    # use, so the number Krum assumes and the number that actually lie cannot drift.
+    # It was hardcoded to 4 (20% of 20), which tuned Krum correctly in one of the three
+    # attacker-fraction cells and mis-tuned it in the other two -- flattering FedACO in
+    # the comparison the paper's Byzantine-resilience claim rests on.
+    overrides: {strategy-name: krum}
   - name: trimmed_mean
     file: configs/strategy/trimmed_mean.yaml
   - name: fedaco

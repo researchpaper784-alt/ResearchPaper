@@ -3,7 +3,7 @@
 # (a denser K sweep purpose-built for fitting/plotting the K^2 curve, plan §9.2's
 # figure 5); this file uses the plan's own R5 values for the robustness-suite table.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness_r5_client_scaling.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/robustness_r5_client_scaling.yaml
 
 base_overrides:
   min-client-size: 5

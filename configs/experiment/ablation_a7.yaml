@@ -8,7 +8,7 @@
 # that's the trigger to actually build the learned version -- not something to fake
 # here by re-running at several fixed values and calling it "learned."
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a7.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a7.yaml
 
 base_overrides:
   num-clients: 20

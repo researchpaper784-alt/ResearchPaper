@@ -5,7 +5,7 @@
 # effect, no extra code needed. Cross-round pheromone (plan §4.3) should shine
 # here: it remembers clients currently absent, unlike a memoryless method.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness_r3_stragglers.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/robustness_r3_stragglers.yaml
 
 base_overrides:
   num-clients: 20

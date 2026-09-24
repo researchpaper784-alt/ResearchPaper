@@ -10,7 +10,7 @@
 # the adaptive default's time-averaged budget over 100 rounds, for a fair total-
 # evaluations comparison across the run, not just any arbitrary constant.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a8.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a8.yaml
 
 base_overrides:
   num-clients: 20

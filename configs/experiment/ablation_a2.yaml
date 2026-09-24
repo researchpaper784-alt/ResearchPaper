@@ -3,7 +3,7 @@
 # paper's conceptual hook (plan §4.3): if "decayed"/"full" don't beat "none" here,
 # the "Adaptive" in FedACO/FedSwarm is decorative, and the paper needs to say so.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a2.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a2.yaml
 
 base_overrides:
   num-clients: 20

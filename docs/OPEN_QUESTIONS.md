@@ -432,14 +432,14 @@ execute, same blocker as everything else in Phase 3 onward.
   yaml` scopes it to FedACO vs. plain FedAvg only, IID partition only, 3 seeds --
   widen it later if the main sweep's results make a broader comparison worth the
   extra compute. Same reasoning duplicated in that file's own header comment.
-- **Robustness configs R1/R2's Krum arm** (`robustness_r1_label_flip.yaml`,
-  `robustness_r2_update_attack.yaml`) fixes `num-malicious-nodes=4` (20% of 20
-  clients) across all three tested attacker fractions (10%/20%/30%), rather than
-  co-varying it with each cell -- a plain Cartesian-product sweep grid doesn't have
-  a clean way to express "this strategy-specific value should track that
-  partition-specific value." Krum is therefore mildly mis-configured (not fatally)
-  at the 10%/30% cells. Flag this if Krum's numbers from these two sweeps are
-  compared against a hypothetical "properly tuned per attacker fraction" version.
+- ~~**Robustness configs R1/R2's Krum arm** fixes `num-malicious-nodes=4` across all
+  three attacker fractions.~~ **FIXED 2026-09-24.** The coupling moved into
+  `strategies/factory.py`, which sees the whole resolved run_config: `f` now comes from
+  `attacks.malicious_ids`, the same function the ClientApp uses to pick which partitions
+  lie, so the count Krum assumes and the count that lie cannot drift. It was recorded here
+  as an accepted simplification for days; the fix is smaller than the note explaining why
+  it wasn't made. Worth remembering as a pattern -- "a Cartesian product can't express
+  this" was true of the *config*, and false of the system.
 - **R6 (cold start: clients joining after round 20) has no config file here at
   all** -- a real gap, not an oversight. Which SuperNodes exist/connect at all is
   controlled by Flower's own Simulation Runtime (Ray actor lifecycle), not by

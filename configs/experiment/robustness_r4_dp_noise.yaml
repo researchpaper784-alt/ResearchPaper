@@ -4,7 +4,7 @@
 # method survive DP noise?" -- the standard rebuttal-killer question for any FL
 # paper that inspects raw updates.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness_r4_dp_noise.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/robustness_r4_dp_noise.yaml
 
 base_overrides:
   num-clients: 20

@@ -3,7 +3,7 @@
 # d_k (aco/heuristics.py). Shows the heuristic isn't cargo cult -- each term should
 # earn its place empirically.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a5.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a5.yaml
 
 base_overrides:
   num-clients: 20

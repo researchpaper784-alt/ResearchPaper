@@ -8,7 +8,7 @@
 # calls for a reduced seed count too). Widen this (more strategies, more seeds) if
 # main.yaml's results make a broader K-scaling comparison worth the extra compute.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/main_client_scale.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/main_client_scale.yaml
 
 base_overrides:
   min-client-size: 5

@@ -155,3 +155,36 @@ def test_every_config_key_is_declared_in_pyproject() -> None:
     assert not offenders, "configs use keys `flwr run` will reject:\n" + "\n".join(
         f"  {name}: {', '.join(keys)}" for name, keys in offenders.items()
     )
+
+
+def test_every_config_documents_the_runner_that_can_actually_load_it() -> None:
+    """Each config carries a `# Run:` line, and 17 of them named the wrong script.
+
+    There are two config shapes and two runners. `base_overrides`/`strategies`/`partitions`
+    is the granular shape, loaded only by `run_sweep_granular.py`;
+    `common`/`strategies`/`regimes`/`variants` is loaded only by `run_sweep.py`. Every
+    granular config's documented command said `run_sweep.py`, which fails immediately with
+    `ValueError: ... is missing required key 'regimes'`.
+
+    That is the exact shape of defect this project keeps paying for: a command that is
+    copy-pasteable, wrong, and only discovered by someone with a GPU session running.
+    """
+    import re
+
+    import yaml
+
+    wrong = []
+    for path in sorted((REPO_ROOT / "configs" / "experiment").glob("*.yaml")):
+        spec = yaml.safe_load(path.read_text())
+        match = re.search(r"^# Run: .*?(scripts/run_sweep(?:_granular)?\.py)", path.read_text(),
+                          re.MULTILINE)
+        if not match:
+            continue
+        expected = (
+            "scripts/run_sweep_granular.py" if "base_overrides" in spec
+            else "scripts/run_sweep.py"
+        )
+        if match.group(1) != expected:
+            wrong.append(f"{path.name}: documents {match.group(1)}, needs {expected}")
+
+    assert not wrong, "configs documenting a runner that cannot load them:\n  " + "\n  ".join(wrong)
