@@ -2249,3 +2249,32 @@ box produces in three minutes. The belief was written down, inherited, and never
 the platform changed.
 
 572 tests pass, ruff clean.
+
+## 2026-09-24 -- and the incomplete-cell warning would have fired on every correct sweep
+
+One commit after adding the LaTeX dagger for cells built from too few seeds, none of the three
+`make_tables.py` Makefile targets passed `--expected-seeds` at all -- so all three used the
+script's default of 8.
+
+`main.yaml` runs 8 seeds, so `make tables` was right by accident. The ablation and robustness
+families run **5 by design** -- a degradation curve carries its meaning through effect sizes,
+and the 8-seed floor exists only where a p-value is claimed (main.yaml's headline comparison
+and ablation_a1's control). So `make tables-ablation` and `make tables-robustness` would have
+daggered every cell of a correctly completed sweep and printed "Do not quote these numbers"
+beneath it.
+
+That is 855 of C's ~1,015 cells. A warning that fires on almost everything is wallpaper, which
+is the failure I wrote a test against in the same commit that created the condition for it.
+
+Fixed per target, and pinned by a test that reads the seed counts **out of the configs** rather
+than from a remembered number -- these counts have already changed twice (5 -> 8 for the two
+families a p-value comes from, then back to 5 for the rest), and a hardcoded assertion would
+have been the third thing to drift.
+
+The test also checks something the fix cannot: that every config writing to one results
+directory agrees on its seed count. `results/fl/ablation` is the exception -- A2-A9 write 5
+seeds there and ablation_a1 writes 8 -- so one `--expected-seeds` cannot be right for both, and
+the target takes 5 with the asymmetry written down rather than silently flagging 585 cells to
+avoid mis-marking 80.
+
+573 tests pass, ruff clean.

@@ -150,8 +150,15 @@ robustness-granular:
 overhead:
 	$(PY) scripts/run_sweep_granular.py --config configs/experiment/overhead.yaml
 
+# --expected-seeds 5, not the script's default of 8. The 8-seed floor exists only where a
+# p-value is actually claimed -- main.yaml's headline comparison and ablation_a1's
+# ACO-vs-random-search control -- and every robustness config runs 5 by design, because a
+# degradation curve carries its meaning through effect sizes rather than significance.
+# Leaving the default here would dagger every cell of a correctly completed sweep and print
+# "Do not quote these numbers" under it, which is both wrong and the fastest way to teach a
+# reader to ignore the marking.
 tables-robustness:
-	$(PY) scripts/make_tables.py --results-dir results/fl/robustness
+	$(PY) scripts/make_tables.py --results-dir results/fl/robustness --expected-seeds 5
 
 figures-data:
 	$(PY) scripts/make_partition_figures.py
@@ -168,10 +175,15 @@ figures-ablation:
 # nonzero when any cell has fewer seeds than expected, so an incomplete sweep cannot be
 # quoted from by accident.
 tables:
-	$(PY) scripts/make_tables.py --results-dir results/fl/main
+	$(PY) scripts/make_tables.py --results-dir results/fl/main --expected-seeds 8
 
+# 5 seeds for A2-A9 and ablation_all; ablation_a1 runs 8 because it is the one ablation a
+# p-value is claimed from, and it writes to the same directory. A single number cannot be
+# right for both, so this marks the 8-seed cells as complete and leaves A1's own power
+# reporting to `make tables` on its results -- flagging 5-seed ablations as incomplete would
+# be the worse error, since there are 585 of those cells and 80 of A1's.
 tables-ablation:
-	$(PY) scripts/make_tables.py --results-dir results/fl/ablation
+	$(PY) scripts/make_tables.py --results-dir results/fl/ablation --expected-seeds 5
 
 # Phase 10 -- runs the smoke config and checks final metrics against a recorded
 # tolerance band (scripts/verify_repro.py).

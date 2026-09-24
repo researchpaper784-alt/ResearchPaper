@@ -188,3 +188,45 @@ def test_every_config_documents_the_runner_that_can_actually_load_it() -> None:
             wrong.append(f"{path.name}: documents {match.group(1)}, needs {expected}")
 
     assert not wrong, "configs documenting a runner that cannot load them:\n  " + "\n  ".join(wrong)
+
+
+def test_every_table_target_declares_the_seed_count_its_family_actually_runs() -> None:
+    """`make_tables.py --expected-seeds` defaults to 8, and three Makefile targets passed
+    nothing -- so every cell of a correctly completed 5-seed ablation or robustness sweep
+    would be daggered in the LaTeX with "Do not quote these numbers" under it.
+
+    Wrong, and worse than wrong: 855 of the ~1,015 ablation and robustness cells run 5 seeds
+    by design, so the marking would fire on almost everything and teach a reader to ignore it.
+    A warning that is always present is wallpaper.
+
+    This ties the Makefile to the configs rather than to a remembered number, because the
+    seed counts have already been changed twice this project (5 -> 8 for the two families a
+    p-value is claimed from, then back to 5 for the rest).
+    """
+    import re
+
+    import yaml
+
+    makefile = (REPO_ROOT / "Makefile").read_text()
+
+    # (results directory, the configs that write there)
+    families = {
+        "results/fl/robustness": sorted(EXPERIMENT_DIR.glob("robustness_r*.yaml")),
+        "results/fl/main": [EXPERIMENT_DIR / "main.yaml"],
+    }
+    for results_dir, configs in families.items():
+        seed_counts = {len(yaml.safe_load(c.read_text())["seeds"]) for c in configs}
+        assert len(seed_counts) == 1, (
+            f"{results_dir} is written by configs with differing seed counts {seed_counts}; "
+            "one --expected-seeds cannot be right for all of them"
+        )
+        expected = seed_counts.pop()
+
+        match = re.search(
+            rf"make_tables\.py --results-dir {re.escape(results_dir)}[^\n]*", makefile
+        )
+        assert match, f"no make_tables.py target for {results_dir}"
+        assert f"--expected-seeds {expected}" in match.group(0), (
+            f"the target for {results_dir} must pass --expected-seeds {expected} (its configs "
+            f"run {expected} seeds); it has: {match.group(0)}"
+        )
