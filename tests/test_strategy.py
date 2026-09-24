@@ -70,7 +70,13 @@ def test_fedavg_recoverable(monkeypatch: pytest.MonkeyPatch) -> None:
 
     one_index = int(torch.argmin(torch.abs(fedaco_module.level_set(11, 0.0, 2.5) - 1.0)))
 
-    def _one_hot_eta(d_k: torch.Tensor, levels: torch.Tensor) -> torch.Tensor:
+    # `scaling` is accepted and ignored: this stub forces every client onto one level on
+    # purpose, which is the condition the test is constructed around, so how d_k would have
+    # been mapped is irrelevant here. It has to be in the signature because the real
+    # `desirability_matrix` takes it.
+    def _one_hot_eta(
+        d_k: torch.Tensor, levels: torch.Tensor, scaling: str = "absolute"
+    ) -> torch.Tensor:
         eta = torch.zeros(d_k.numel(), levels.numel())
         eta[:, one_index] = 1.0
         return eta

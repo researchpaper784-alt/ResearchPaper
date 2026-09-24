@@ -1518,3 +1518,79 @@ Every local screen in this document ran at `q0=0.9`, `gamma_2=1.0`, `rho_round=0
 from the embedded `config.run_config` in the result JSONs, not inferred. A1's screen is therefore
 a measurement of a configuration the paper does not document, and is being re-run at the
 corrected defaults. The Kaggle gate is in the same position: it used pyproject, so it ran at 0.9.
+
+## Phase 7, A1 -- the fallback rate is the measurement, and standardising `d_k` makes it worse
+
+Two results, from 3 real runs on the heterogeneous fixture at the corrected plan-§14 defaults,
+against the A1 controls already measured there.
+
+### 1. Standardising `d_k` is not the fix
+
+`aco-desirability-scaling='standardized'` z-scores `d_k` across clients before mapping it onto
+the level range, so the measured 0.04 span fills the grid instead of collapsing into one bin.
+It was the leading candidate fix for the anchoring problem. It makes things **worse**:
+
+| arm | mean gain | per-seed |
+|---|---|---|
+| aco, `absolute` (plan §4.2) | +0.0066 | `[+0.0088, +0.0025, +0.0085]` |
+| aco, `standardized` | **+0.0006** | `[+0.0040, -0.0006, -0.0018]` |
+
+An 11x degradation, and negative in 2 of 3 seeds. The diagnosis that the greedy branch
+reconstructs the FedAvg point was correct; the inference that it should therefore be made to
+construct something else does not follow, because what it then constructs is worse. **The
+FedAvg point was a good anchor, not a bad one.**
+
+### 2. The controls search the same space, so A1 is not confounded
+
+Worth stating because it was the next hypothesis and it is false. `aco/controls.py`:
+`random_search`, `coordinate_grid_search` and `genetic_algorithm_search` all construct alpha
+through `levels_to_alpha` -- the identical discretised construction the colony uses. Only
+`pso_search` is continuous, and PSO is not the winner. So ACO is not being beaten by searchers
+with a finer parameterisation; it loses on the same grid.
+
+### 3. What is actually happening: the safety fallback fires in 44% of rounds
+
+`fallback_used = safety_fallback and best_fitness <= fedavg_fitness` -- it records a round in
+which **the colony found nothing better than the FedAvg point**. Across the same fixture and
+budget:
+
+| arm | rounds the search failed to beat FedAvg | mean alpha entropy (max log 10 = 2.3026) | alpha_max |
+|---|---|---|---|
+| **coordinate_grid** | **0.0%** | 2.2507 | 0.1565 |
+| random | 17.8% | 2.1623 | 0.1897 |
+| **aco (`absolute`)** | **44.4%** | 2.1958 | 0.1930 |
+| aco (`standardized`) | 60.0% | 2.1850 | 0.1943 |
+
+A coordinate sweep improves on FedAvg in **every round**. Uniform random sampling over the
+same discrete space fails in about 1 round in 6. The ant colony fails in nearly **half**, and
+standardising `d_k` pushes that to 60%.
+
+This is the same ordering as the fitness-gain table, but it says something the gain does not:
+the colony is not making small improvements, it is **frequently making none at all** and being
+rescued by the safety net. `check_fedaco_health.py` has reported this number since it was
+written, and its docstring already anticipated the reading -- "a high fallback rate with a good
+final score means the score belongs to FedAvg". What had never been done was compare it across
+search methods, at which point it stops being a diagnostic and becomes the result.
+
+Note also that the winner is the **least** concentrated: coordinate_grid has the highest alpha
+entropy and the lowest alpha_max of any arm. Whatever this fitness rewards on heterogeneous
+data, it is not the concentrated weighting the method's story is built around.
+
+### What this leaves
+
+The candidate fixes are now measured rather than speculated:
+
+* lower `q0` -- real (22x), insufficient (still loses to every control)
+* standardise `d_k` -- **harmful** (11x worse, negative on 2 of 3 seeds)
+* widen the sigmoid -- unscreened, and now much less promising: both screened fixes worked by
+  moving the colony *away* from the FedAvg point, and both times that was the wrong direction
+
+The remaining explanation is the one the numbers point at directly: at this evaluation budget,
+`tau^a * eta^b` sampling is simply a worse search of this space than a coordinate sweep, and
+the pheromone adds nothing a uniform sample does not already have. That is a statement about
+claim C2, not a bug to fix, and it is the team's to act on. Plan §11's week-5 gate exists for
+exactly this decision.
+
+Confirming it on the real gate costs A1's 80 cells (17-33 GPU-h). Everything above is the local
+fixture, which has reproduced the real runs' fitness signature on every axis checked but is
+still a fixture.
