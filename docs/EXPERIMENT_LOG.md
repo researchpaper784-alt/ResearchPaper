@@ -2304,3 +2304,53 @@ fails. C's notebook uses only those runners, so it has no bare `flwr run` to fix
 Worth recording as a pattern, not just an incident: I documented this failure mode, wrote a
 guard for one narrow case of it, and then walked into the general case within the hour. The
 guard was scoped to where I was looking rather than to where the hazard was.
+
+## 2026-09-24 -- A1 screened locally: ACO loses to every control, and we know why
+
+The plan's make-or-break experiment for claim C2, run on the local fixture instead of 17-33
+Kaggle GPU-hours. 5 search methods x 3 seeds, equal budget, `aggregate` fitness.
+
+**ACO gains +0.0013 over the FedAvg point. coordinate_grid gains +0.0501, pso +0.0484, ga
++0.0312, random +0.0304. ACO beats every control on 0 of 3 seeds.** The plan's feared outcome
+was "ACO ties random search"; this is a loss to random by 23x.
+
+### The mechanism, which makes it fixable rather than fatal
+
+`eta_{k,l} = (1 + |lambda_l - d_hat_k|)^-1` with `d_hat_k` spreading the per-client score `d_k`
+over the level range. Across K in {10,20} x noise in {1.5,3,6}, **`d_k` spans ~0.04** against a
+level spacing of **0.25** -- so every client's argmax lands on the same level (identical in 3 of
+6 configurations, adjacent in the rest).
+
+And a uniform level assignment normalises back to `base_weights` exactly. So the greedy branch
+of the ACS rule constructs **the FedAvg point**, 70% of the time at `q0=0.7`. The colony is
+anchored to the reference it is supposed to improve on: best candidate +0.9559 against
+F(FedAvg) +0.9558.
+
+The controls have no such anchor and explore freely. That is the entire result -- not a
+statement about ant colony optimisation, but about a heuristic with 16% of a level's worth of
+dynamic range driving a rule that is greedy 70% of the time.
+
+### A fix I implemented and reverted
+
+The colony visits 82 distinct alphas per 210 evaluations; random search visits 210 of 210. So
+61% of the colony's budget buys answers it already has, and A1 was partly measuring which
+method repeats itself least. Memoizing within a round is exact -- fixed Gram matrix, so a
+repeated alpha has the same fitness by construction.
+
+It changes nothing. `run_colony` stops on its own ant/iteration schedule rather than on
+`remaining()`, so the freed budget is never spent: best fitness was **identical** across all 8
+configurations tested. It also broke four tests encoding "no method outspends the shared
+budget" and silently changed what the logged `evaluations_used` means. Reverted.
+
+Recording it because the temptation was to keep it -- it was written, it was correct, and it
+looked like progress. A change that breaks a real invariant's tests and improves nothing is
+churn regardless of who wrote it.
+
+### What the team has to decide
+
+Candidate heuristic fixes -- standardising `d_k` across clients before rescaling, widening the
+sigmoid, lowering `q0`, or letting the colony spend its freed budget -- are changes to the
+method §4.5 specifies, not bug fixes. Any of them can now be screened locally in minutes rather
+than a GPU session. That choice is not mine to make.
+
+573 tests pass, ruff clean.

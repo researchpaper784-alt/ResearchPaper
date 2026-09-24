@@ -1321,3 +1321,63 @@ A wrapper that bounded each `flwr run` with a timeout and treated "Waiting for n
 connect" in the log as fatal would close it -- worth doing if a session is ever lost to this,
 and not worth the complexity before then. If a run sits at round 0 or 1 with an idle machine,
 this is the first thing to check.
+
+## Phase 7, A1 -- LOCAL SCREEN: ACO loses to all four controls, and the mechanism is identified
+
+**Status: the paper's make-or-break result, screened locally 2026-09-24. Needs the real A1 to
+confirm, but the cause is diagnosed and it is a design flaw rather than a verdict on ACO.**
+
+A1 costs 80 cells and 17-33 GPU-hours on Kaggle. Screened on the local heterogeneous fixture
+(5 search methods x 3 seeds x 15 rounds, K=10, dirichlet(0.3), `aggregate` fitness so the
+landscape is not the degenerate one, equal evaluation budget enforced by `BudgetedFitness`):
+
+| method | mean gain over the FedAvg point | alpha_max | budget used |
+|---|---|---|---|
+| **aco** | **+0.0013** | 0.200 | 96.8% |
+| random | +0.0304 | 0.192 | 100% |
+| coordinate_grid | **+0.0501** | 0.158 | 100% |
+| pso | +0.0484 | 0.173 | 100% |
+| ga | +0.0312 | 0.185 | 100% |
+
+Per-seed ACO gain: `[-0.0002, +0.0002, +0.0039]`. **ACO beats every control on 0 of 3 seeds**,
+and loses to the weakest of them (random) by a factor of 23.
+
+The plan's stated failure mode for C2 was "ACO ties random search". This is worse than a tie.
+But it is not the verdict it looks like, because the cause is mechanical and fixable.
+
+### Why: the greedy rule constructs the FedAvg point
+
+`eta_{k,l} = (1 + |lambda_l - d_hat_k|)^-1`, where `d_hat_k` rescales the per-client sigmoid
+score `d_k` across the level range. Measured across K in {10, 20} and noise in {1.5, 3, 6},
+**`d_k` spans about 0.04** (e.g. 0.7685 - 0.8073) against a level spacing of **0.25**. So every
+client's `d_hat` lands in the same level bin, and `argmax_l eta_{k,l}` returns the same level
+for every client -- identical in 3 of the 6 configurations tested, adjacent levels in the rest.
+
+A uniform level assignment normalises back to `base_weights` **exactly**
+(`levels_to_alpha`: `tilde = levels[idx] * base_weights`, then scaled to `target_sum`). So when
+the argmax is client-invariant, the greedy branch of the ACS rule constructs **the FedAvg
+point** -- and at `q0=0.7` that is 70% of station decisions.
+
+The colony is therefore anchored at FedAvg by its own exploitation rule, and can only move via
+the 30% exploratory draws. Its best candidate came in at +0.9559 against F(FedAvg) = +0.9558:
+it finds the reference point and essentially nothing else. The controls, having no such anchor,
+explore and find better points. That is the whole result.
+
+### What this means and what it does not
+
+It does **not** mean ACO cannot help here. It means the heuristic as specified in §4.5 has
+almost no per-client dynamic range, so the pheromone-times-desirability rule degenerates to
+"everyone takes the same level". Candidate fixes -- standardising `d_k` across clients before
+rescaling, widening the sigmoid, or lowering `q0` -- are method changes for the team, not
+something to pick unilaterally. Any of them can now be screened locally in minutes.
+
+### Also measured, and deliberately NOT fixed
+
+The colony visits **82 distinct alphas out of 210 evaluations** (61% duplicates) where random
+search visits 210 of 210. Memoizing within a round is exact -- the Gram matrix is fixed, so a
+repeated alpha has the same fitness by construction -- and was implemented and reverted:
+`run_colony` stops on its own ant/iteration schedule rather than on `remaining()`, so the freed
+budget is never spent and the best fitness was **identical** in all 8 configurations tested. It
+also broke four tests encoding "no method outspends the shared budget" and changed the meaning
+of the logged `evaluations_used`. Spending the freed budget is a change to the colony's stopping
+rule, which belongs with the heuristic decision above.
