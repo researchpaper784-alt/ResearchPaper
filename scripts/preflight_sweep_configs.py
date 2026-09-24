@@ -84,6 +84,8 @@ def main() -> int:
     parser.add_argument("--configs", nargs="+", required=True)
     parser.add_argument("--out", default=None, help="scratch dir for results (default: temp)")
     parser.add_argument("--timeout", type=int, default=420, help="seconds per arm")
+    parser.add_argument("--force", action="store_true",
+                        help="re-run arms that already have a result")
     args = parser.parse_args()
 
     fixture = Path(args.fixture)
@@ -117,6 +119,14 @@ def main() -> int:
                 "output-dir": str(cell),
                 "checkpoint-dir": str(cell / "ckpt"),
             }
+            # Resume, for the same reason the sweep runners have it: this walks ~96 arms at
+            # about 40s each, and a container that reaps the process partway through should
+            # not mean starting over. An arm that already wrote a result is an arm that ran.
+            if not args.force and list(cell.glob("*.json")):
+                passed += 1
+                print(f"  skip    {label:34} (already ran)")
+                continue
+
             started = time.time()
             done = subprocess.run(
                 ["flwr", "run", ".", "--stream", "--run-config",
