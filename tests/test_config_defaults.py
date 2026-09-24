@@ -208,3 +208,37 @@ def test_fedaco_gets_identical_hyperparameters_by_either_runner_path() -> None:
         f"main.yaml and robustness_r1..r4 would run different FedACO: {differing}. "
         "The paper prints their tables as one method."
     )
+
+
+# ======================================================================================
+# A6 names its centre arms after the defaults
+# ======================================================================================
+
+
+def test_a6_arms_labelled_default_actually_are_the_default() -> None:
+    """A6 is a one-at-a-time sensitivity sweep, so each axis carries the default as its
+    centre arm, named `..._default`. If such an arm sets a value that is not the default,
+    the axis has two arms doing the same thing, no true centre, and every sensitivity curve
+    on it is read against the wrong reference point.
+
+    This is not hypothetical: before the defaults were reconciled, `pyproject.toml` had
+    `aco-q0 = 0.9`, so A6's `q0=0.7_default` arm was not the default and its `q0=0.9` arm
+    silently was -- 20 of A6's 270 cells measuring one point twice. A6 has not been run yet,
+    so nothing was lost; the check exists so that stays true.
+    """
+    defaults = _flwr_defaults()
+    spec = yaml.safe_load((ROOT / "configs/experiment/ablation_a6.yaml").read_text())
+
+    mismatched = {}
+    for entry in spec["strategies"]:
+        name = entry["name"] if isinstance(entry, dict) else str(entry)
+        if not name.endswith("_default") or not isinstance(entry, dict):
+            continue
+        for key, value in (entry.get("overrides") or {}).items():
+            if defaults.get(key) != value:
+                mismatched[f"{name}:{key}"] = (value, defaults.get(key))
+
+    assert not mismatched, (
+        f"A6 arms named `_default` that are not the default (arm value, real default): "
+        f"{mismatched}"
+    )
