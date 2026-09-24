@@ -15,6 +15,7 @@ PY ?= .venv/bin/python
 # finishes. The runners refuse to start when a GPU is present and this is empty; they name
 # the fraction to use (1/num-clients lets them all share one card). Leave it empty on CPU.
 #   make main GPUS=0.05
+EXPECTED_SEEDS ?= 5
 GPUS ?=
 GPUS_ARG = $(if $(GPUS),--gpus-per-client $(GPUS),)
 FLWR ?= .venv/bin/flwr
@@ -219,6 +220,15 @@ fitness-repro:
 		$(FLWR) run . --stream --run-config "strategy-name='fedaco' num-clients=10 min-client-size=3 min-train-nodes=10 min-evaluate-nodes=10 min-available-nodes=10 num-rounds=15 local-epochs=1 num-classes=4 image-size=32 local-batch-size=8 regime='dirichlet' alpha=0.3 seed=0 aco-dispersion-reference='$$mode' aco-gamma-entropy=0.1 cache-dir='/tmp/fedswarm_het/cache' manifest-path='/tmp/fedswarm_het/manifest.csv' partition-cache-dir='/tmp/fedswarm_het/parts' output-dir='/tmp/fedswarm_het/$$mode' checkpoint-dir='/tmp/fedswarm_het/ckpt_$$mode'" || exit 1; \
 		$(PY) scripts/check_fedaco_health.py --results-dir /tmp/fedswarm_het/$$mode; \
 	done
+
+# Plan §9.3's acceptance criterion: every figure and table regenerates from results/ with
+# no manual steps, byte-for-byte identically on a second pass. Nothing checked this until
+# 2026-09-24, and the first run found two faults no unit test could see -- both needed the
+# whole chain pointed at real result files. Set PARTITIONS to the labels your results carry.
+PARTITIONS ?= dirichlet_0.3 iid
+verify-phase9:
+	$(PY) scripts/verify_phase9_repro.py --results-dir results/fl \
+		--expected-seeds $(EXPECTED_SEEDS) --partitions $(PARTITIONS)
 
 verify-repro:
 	$(PY) scripts/verify_repro.py

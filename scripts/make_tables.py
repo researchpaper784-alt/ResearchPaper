@@ -30,6 +30,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import functools
 import csv
 import statistics
 import sys
@@ -82,24 +83,62 @@ def cell_key(result: dict) -> tuple[str, str, str]:
     return strategy, regime, _variant_of(run_config)
 
 
+@functools.lru_cache(maxsize=1)
+def _defaults() -> dict:
+    """pyproject's `[tool.flwr.app.config]`, read once.
+
+    `_variant_of` used to hardcode the default it compared each knob against, and on
+    2026-09-24 that broke: reconciling `aco-gamma-dispersion` to plan §14's 0.50 (it had
+    drifted to 1.0) made **every** FedACO run read as a `g2=0.5` variant. Since `add_deltas`
+    only computes a delta for rows whose variant is "default", every comparison column in
+    every table would have come out empty -- a fifth copy of a default, failing the same way
+    the other four did. Read the real thing instead.
+    """
+    import tomllib
+
+    path = REPO_ROOT / "pyproject.toml"
+    return tomllib.loads(path.read_text())["tool"]["flwr"]["app"]["config"]
+
+
 def _variant_of(run_config: dict) -> str:
     """Reconstruct the ablation variant from the run config.
 
     The sweep runner knows the variant name, but a result file records only the resolved
     config, so the variant has to be recovered from the knobs that differ from default.
     Anything unrecognised falls back to "default" rather than being guessed at.
+
+    Defaults come from `_defaults()`, never from a literal here: a knob whose default moves
+    would otherwise relabel every existing result as a variant.
     """
+    defaults = _defaults()
     marks = []
-    if str(run_config.get("aco-persistence", "decayed")) != "decayed":
+
+    def _differs(key: str, caster=str):
+        if key not in run_config:
+            return False
+        try:
+            return caster(run_config[key]) != caster(defaults[key])
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    if _differs("aco-persistence"):
         marks.append(f"persistence={run_config['aco-persistence']}")
-    if str(run_config.get("aco-fitness-mode", "data_free")) != "data_free":
+    if _differs("aco-fitness-mode"):
         marks.append(f"fitness={run_config['aco-fitness-mode']}")
-    if str(run_config.get("model-norm", "groupnorm")) != "groupnorm":
+    if _differs("model-norm"):
         marks.append(f"norm={run_config['model-norm']}")
-    if float(run_config.get("aco-target-sum", 1.0)) != 1.0:
+    if _differs("aco-target-sum", float):
         marks.append(f"s={run_config['aco-target-sum']}")
-    if float(run_config.get("aco-gamma-dispersion", 1.0)) != 1.0:
+    if _differs("aco-gamma-dispersion", float):
         marks.append(f"g2={run_config['aco-gamma-dispersion']}")
+    if _differs("aco-gamma-entropy", float):
+        marks.append(f"g3={run_config['aco-gamma-entropy']}")
+    if _differs("aco-q0", float):
+        marks.append(f"q0={run_config['aco-q0']}")
+    if _differs("aco-desirability-scaling"):
+        marks.append(f"scaling={run_config['aco-desirability-scaling']}")
+    if _differs("aco-dispersion-reference"):
+        marks.append(f"ref={run_config['aco-dispersion-reference']}")
     if run_config.get("aco-safety-fallback") is False:
         marks.append("no-fallback")
     # Phase 8. Without these every robustness variant collapses to "default": the 9
@@ -107,11 +146,11 @@ def _variant_of(run_config: dict) -> str:
     # file was read last would win, and the published table would average a clean control
     # together with a 30%-sign-flip run and report it as one number with n=5.
     attack = str(run_config.get("attack", "none"))
-    if attack != "none":
+    if attack != str(defaults.get("attack", "none")):
         marks.append(f"attack={attack}@{run_config.get('attack-fraction', 0)}")
-        if float(run_config.get("attack-scale", 1.0)) != 1.0:
+        if _differs("attack-scale", float):
             marks.append(f"x{run_config['attack-scale']}")
-    if float(run_config.get("fraction-train", 1.0)) != 1.0:
+    if _differs("fraction-train", float):
         marks.append(f"participation={run_config['fraction-train']}")
     return ",".join(marks) if marks else "default"
 

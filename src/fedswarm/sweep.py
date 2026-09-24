@@ -136,6 +136,45 @@ def predict_run_id(defaults: dict[str, Any], overrides: dict[str, Any]) -> str:
     return make_run_id(resolved_config, seed)
 
 
+DEFAULT_OUTPUT_DIR = "results/fl"
+
+
+def resolve_output_dir(
+    run: RunSpec, defaults: dict[str, Any], requested: str | Path
+) -> tuple[str, dict[str, Any]]:
+    """Where this run will *actually* write, and the overrides that make it do so.
+
+    `run_sweep` checked `is_completed(run_id, output_dir)` against its `--output-dir`
+    argument while `execute_run` never put `output-dir` in the run_config -- so the run wrote
+    to pyproject's `output-dir` and the runner looked somewhere else. With the default
+    (`results/fl` both sides) they coincided and nothing showed. Pass anything else -- and
+    `run_sweep.py`'s own docstring says "`output-dir` is routinely outside: a Colab run
+    writes to Drive, a Kaggle run to ..." -- and two things break at once:
+
+    * every cell is recorded `status: "unknown"`, which this module reserves for the
+      genuinely alarming case of `flwr run` exiting 0 while the round died;
+    * **resume stops working.** `is_completed` never finds anything, so a sweep restarted
+      after a Kaggle session timeout silently re-runs every cell it had already finished.
+      For 576 cells that is the whole point of the manifest, lost without a symptom.
+
+    The fix is to make the two agree by construction: whatever directory is returned here is
+    both injected into the run_config and used for the completion check. A value already in
+    the run's own overrides wins, since the experiment YAML is the more specific statement.
+
+    Note the run_id legitimately depends on this: `make_run_id` hashes the whole resolved
+    config, `output-dir` included. That is pre-existing and consistent -- `predict_run_id`
+    merges the same overrides the app receives -- but it does mean a cell's id changes if its
+    output directory does, which is why `run_sweep.py` matches results by config while
+    ignoring path keys rather than by predicted id.
+    """
+    if "output-dir" in run.overrides:
+        return str(run.overrides["output-dir"]), dict(run.overrides)
+    requested = str(requested)
+    if requested == str(defaults.get("output-dir", DEFAULT_OUTPUT_DIR)):
+        return requested, dict(run.overrides)
+    return requested, {**run.overrides, "output-dir": requested}
+
+
 def is_completed(run_id: str, output_dir: str | Path) -> bool:
     path = Path(output_dir) / f"{run_id}.json"
     if not path.exists():
@@ -318,7 +357,7 @@ def append_manifest(manifest_path: str | Path, entry: dict[str, Any]) -> None:
 def run_sweep(
     runs: list[RunSpec],
     pyproject_path: str | Path,
-    output_dir: str | Path = "results/fl",
+    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     manifest_path: str | Path = "results/manifest.jsonl",
     lock_dir: str | Path = "results/fl/_locks",
     lock_timeout_s: float = DEFAULT_LOCK_TIMEOUT_S,
@@ -344,9 +383,12 @@ def run_sweep(
     configured_supernodes: int | None = None
 
     for run in runs:
+        # Resolved before the id, because the id hashes the config this returns.
+        cell_output_dir, overrides = resolve_output_dir(run, defaults, output_dir)
+        run = RunSpec(label=run.label, group=run.group, overrides=overrides)
         run_id = predict_run_id(defaults, run.overrides)
 
-        if is_completed(run_id, output_dir):
+        if is_completed(run_id, cell_output_dir):
             entry = {"run_id": run_id, "label": run.label, "group": run.group, "status": "skipped_completed"}
             entries.append(entry)
             if not dry_run:
@@ -384,7 +426,7 @@ def run_sweep(
 
         try:
             return_code = execute_run(run, runner=runner)
-            completed = is_completed(run_id, output_dir)
+            completed = is_completed(run_id, cell_output_dir)
             if completed:
                 status = "completed"
             elif return_code != 0:

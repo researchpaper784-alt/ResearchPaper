@@ -2498,3 +2498,71 @@ Confirming the constant on the real hardware is still worth `overhead.yaml`'s 7 
 GPU-h) -- the cheapest sweep in the project.
 
 637 tests pass, ruff clean.
+
+## 2026-09-24 (end of day) -- running the Phase 9 chain for the first time found four faults
+
+Plan §9.3's acceptance criterion is "`make figures tables` regenerates every artifact from
+`results/` with no manual steps. Deleting `paper/figures/` and `paper/tables/` and re-running
+restores them byte-for-byte identical." Nothing had ever run it. An 8-cell local sweep
+(fedavg/fedaco x dirichlet(0.3)/iid x 2 seeds, 6 rounds on the synthetic fixture) put real
+result files through `run_sweep_granular.py -> aggregate_results -> make_tables -> make_figures`
+and every one of the following needed the whole chain to be visible. None is catchable by a
+unit test on a fixture.
+
+### 1. `_variant_of` compared each knob against a hardcoded default
+
+The worst of the four, and self-inflicted: reconciling `aco-gamma-dispersion` to plan §14's
+0.50 made **every** run read as a `g2=0.5` variant -- FedAvg included, because pyproject
+supplies the key to every resolved config. `figure_convergence` and `figure_comparison`, the
+paper's two headline figures, filter to `variant == "default"`, so **both silently skipped
+with a complete set of valid results present**, and `add_deltas` (which also keys on
+"default") left every comparison column empty. A correct change to a value, made in the right
+place, broke the two figures that matter most, and the only symptom was a "skipped (no data)"
+line that looks exactly like a sweep that has not run yet.
+
+`_variant_of` now reads `pyproject.toml` instead of literals, and covers the keys added since
+it was written (`aco-q0`, `aco-gamma-entropy`, `aco-desirability-scaling`,
+`aco-dispersion-reference`). Five tests, including one that moves a default and asserts the
+label follows.
+
+### 2. `aggregate_results.py` accepted names that matched nothing
+
+`--partitions totally_bogus --baselines nonexistent` printed "(no overlapping-seed comparisons
+found)", wrote both CSVs and exited **0**. This one is not cosmetic: **Holm-Bonferroni corrects
+each p-value by the size of the comparison family**, so a name that matches nothing shrinks the
+family and every surviving p-value is corrected *less* aggressively -- results come out looking
+**more** significant. Plan §9.1's warning ("with 5 seeds and a dozen comparisons, uncorrected
+p-values manufacture significance; a reviewer who checks will find it") arriving through a typo.
+
+The label spelling invites it: the config says `regime: dirichlet`, the analysis frame says
+`dirichlet_0.3`, so `--partitions dirichlet` matches nothing. Now fatal, listing what is
+present.
+
+### 3. The granular runner checked a directory it never told the run about
+
+`run_sweep` tested `is_completed(run_id, output_dir)` against its `--output-dir` argument while
+`execute_run` never put `output-dir` in the run_config. With both at the default `results/fl`
+they coincided; pass anything else -- and `run_sweep.py`'s own docstring says "`output-dir` is
+routinely outside: a Colab run writes to Drive, a Kaggle run to ..." -- and every cell records
+`status: "unknown"` (the status this module reserves for `flwr run` exiting 0 while the round
+died), **and resume stops working**: a sweep restarted after a session timeout silently re-runs
+every cell it had already finished. All 8 cells here recorded "unknown" with the results sitting
+in `results/fl`. `resolve_output_dir` now returns one directory used for both sides.
+
+### 4. `partition_stats` proved itself
+
+Not a fault -- the fix from earlier today, confirmed on real runs: js_divergence 0.4238 for
+dirichlet(0.3) against 0.0238 for iid, the right ordering and the right magnitudes, and
+`gain_vs_heterogeneity.png` rendered for the first time.
+
+### The criterion now holds, and is a command
+
+    make verify-phase9
+
+10 artifacts (3 tables, 5 figures, 2 CSVs) generated twice and compared byte-for-byte: all
+identical. Byte-for-byte is the right bar, not a tolerance -- both passes read the same JSON
+with the same code on one machine, so any difference is non-determinism in the artifact
+pipeline itself (an unsorted glob, dict iteration order, an embedded timestamp), and each of
+those makes "did this number change?" unanswerable across a re-run.
+
+658 tests pass, ruff clean.

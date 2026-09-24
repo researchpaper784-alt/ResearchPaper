@@ -534,3 +534,84 @@ def test_both_runners_expose_the_gpu_fraction(script: str) -> None:
 
     assert "--gpus-per-client" in source, "the flag must be declared on the CLI"
     assert "gpus_per_client" in source, "and forwarded, not just parsed"
+
+
+# ======================================================================================
+# The output directory the runner checks must be the one the run writes to
+# ======================================================================================
+
+
+def test_a_custom_output_dir_is_injected_into_the_run_config() -> None:
+    """`run_sweep` checked `is_completed(run_id, output_dir)` while `execute_run` never put
+    `output-dir` in the run_config, so the run wrote to pyproject's directory and the runner
+    looked in the one it was passed. With both at the default `results/fl` they coincided and
+    nothing showed.
+    """
+    from fedswarm.sweep import RunSpec, resolve_output_dir
+
+    run = RunSpec(label="x", group="g", overrides={"seed": 0})
+    defaults = {"output-dir": "results/fl"}
+
+    resolved, overrides = resolve_output_dir(run, defaults, "/kaggle/working/out")
+    assert resolved == "/kaggle/working/out"
+    assert overrides["output-dir"] == "/kaggle/working/out", (
+        "without this the run writes to results/fl and the completion check looks at "
+        "/kaggle/working/out -- every cell records status 'unknown' and resume re-runs "
+        "everything"
+    )
+
+
+def test_the_default_output_dir_is_not_injected() -> None:
+    """Injecting it unnecessarily would change every existing run_id -- `make_run_id` hashes
+    the whole resolved config -- and invalidate every result already on disk."""
+    from fedswarm.sweep import RunSpec, resolve_output_dir
+
+    run = RunSpec(label="x", group="g", overrides={"seed": 0})
+    resolved, overrides = resolve_output_dir(run, {"output-dir": "results/fl"}, "results/fl")
+
+    assert resolved == "results/fl"
+    assert "output-dir" not in overrides
+
+
+def test_an_output_dir_in_the_experiment_config_wins() -> None:
+    """The experiment YAML is the more specific statement, and it is the one whose value is
+    already in the hash."""
+    from fedswarm.sweep import RunSpec, resolve_output_dir
+
+    run = RunSpec(label="x", group="g", overrides={"output-dir": "/from/yaml"})
+    resolved, overrides = resolve_output_dir(run, {"output-dir": "results/fl"}, "/from/cli")
+
+    assert resolved == "/from/yaml"
+    assert overrides["output-dir"] == "/from/yaml"
+
+
+def test_resume_works_across_a_custom_output_dir(tmp_path) -> None:
+    """The failure this guards, end to end: a sweep restarted after a session timeout must
+    skip the cells it already finished, not silently repeat them."""
+    import json
+
+    from fedswarm.sweep import RunSpec, predict_run_id, run_sweep
+
+    out = tmp_path / "elsewhere"
+    out.mkdir()
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[tool.flwr.app.config]\noutput-dir = "results/fl"\nseed = 0\n'
+        'strategy-name = "fedavg"\nnum-clients = 2\n'
+    )
+
+    runs = [RunSpec(label="a", group="g", overrides={"seed": 0, "output-dir": str(out)})]
+    defaults = {"output-dir": "results/fl", "seed": 0, "strategy-name": "fedavg", "num-clients": 2}
+    run_id = predict_run_id(defaults, runs[0].overrides)
+    (out / f"{run_id}.json").write_text(json.dumps({"status": "completed"}))
+
+    entries = run_sweep(
+        runs,
+        pyproject_path=pyproject,
+        output_dir=str(out),
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: pytest.fail(f"should not have run anything: {cmd}"),
+    )
+
+    assert [e["status"] for e in entries] == ["skipped_completed"]

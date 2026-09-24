@@ -449,3 +449,75 @@ def test_both_power_notes_agree_about_whether_a_table_is_underpowered() -> None:
             f"at n={n} the markdown and LaTeX disagree about whether this table is "
             f"underpowered: markdown={markdown is not None}, latex={latex is not None}"
         )
+
+
+# ======================================================================================
+# The variant label must be derived from the real defaults, never from a literal
+# ======================================================================================
+
+
+def test_a_run_at_the_shipped_defaults_is_labelled_default() -> None:
+    """`_variant_of` used to hardcode the default it compared each knob against. On
+    2026-09-24 `aco-gamma-dispersion` was reconciled to plan §14's 0.50 (it had drifted to
+    1.0 in pyproject) and every FedACO run promptly read as a `g2=0.5` variant.
+
+    That is not cosmetic: `add_deltas` computes a delta only for rows whose variant is
+    "default", so every comparison column in every table would have come out empty -- from a
+    correct change to a value, made in the right place.
+    """
+    import tomllib
+    from pathlib import Path
+
+    import make_tables
+
+    defaults = tomllib.loads(
+        (Path(make_tables.__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    )["tool"]["flwr"]["app"]["config"]
+
+    make_tables._defaults.cache_clear()
+    assert make_tables._variant_of(dict(defaults)) == "default"
+
+
+def test_each_knob_off_default_is_named() -> None:
+    import tomllib
+    from pathlib import Path
+
+    import make_tables
+
+    root = Path(make_tables.__file__).resolve().parents[1]
+    defaults = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["flwr"]["app"]["config"]
+    make_tables._defaults.cache_clear()
+
+    for key, value, expected in [
+        ("aco-persistence", "none", "persistence=none"),
+        ("aco-fitness-mode", "server_val", "fitness=server_val"),
+        ("model-norm", "batchnorm", "norm=batchnorm"),
+        ("aco-q0", 0.9, "q0=0.9"),
+        ("aco-desirability-scaling", "standardized", "scaling=standardized"),
+        ("aco-dispersion-reference", "aggregate", "ref=aggregate"),
+    ]:
+        assert defaults[key] != value, f"{key} test value equals the default; pick another"
+        assert make_tables._variant_of({**defaults, key: value}) == expected
+
+
+def test_the_variant_label_tracks_a_default_that_moves() -> None:
+    """The property that failed: change a default and a run *at* that new default must still
+    be "default", while a run at the old value becomes the variant."""
+    import make_tables
+
+    real = make_tables._defaults
+    try:
+        make_tables._defaults = lambda: {"aco-q0": 0.5}
+        assert make_tables._variant_of({"aco-q0": 0.5}) == "default"
+        assert make_tables._variant_of({"aco-q0": 0.7}) == "q0=0.7"
+    finally:
+        make_tables._defaults = real
+
+
+def test_an_unknown_key_in_the_config_does_not_become_a_variant() -> None:
+    """A key absent from pyproject cannot be compared, and guessing would turn any new
+    run_config key into a spurious variant across every existing result."""
+    import make_tables
+
+    make_tables._defaults.cache_clear()
+    assert make_tables._variant_of({"some-future-key": 42}) == "default"
