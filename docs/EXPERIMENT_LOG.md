@@ -2582,3 +2582,46 @@ row at 30% sign-flip would read -0.35 rather than +0.05 -- reporting the attack'
 the method's deficit. Four tests, including that one.
 
 662 tests pass, ruff clean.
+
+## 2026-09-24 (end) -- every arm of every sweep C owns executes; 96/96, nothing failed
+
+`strategy_from_run_config` accepting a config is necessary and not sufficient: it builds the
+strategy, not the round. `scripts/preflight_sweep_configs.py` runs one cell of every declared
+arm at 2 rounds, K=6, image-size 32 against the synthetic fixture, so the strategy, attack,
+cold-start and aggregation paths all execute with real Flower messages. Judged by whether a
+result JSON appeared, not by the exit code, since `flwr run` exits 0 when the simulation dies.
+
+    96 arms, 0 failed
+
+    robustness_r1_label_flip         4    ablation_a1    5    ablation_a6      27
+    robustness_r2_update_attack      4    ablation_a2    3    ablation_a7       4
+    robustness_r3_stragglers         2    ablation_a3    2    ablation_a8       2
+    robustness_r4_dp_noise           2    ablation_a4    4    ablation_a9       4
+    robustness_r5_client_scaling     4    ablation_a5    5    ablation_all      4
+    robustness_r6_cold_start         5    robustness    15
+
+**R6's five arms matter most**: it is the newest config, written today, and its failure mode is
+a silent infinite hang rather than an error -- Flower's `sample_nodes` waits in a
+`while ...: sleep(1)` loop that never gives up, so a cold start hiding one node too many
+consumes a whole Kaggle session and writes nothing. That path now has a real run behind it.
+
+A6's 27 arms all executing is the second most useful result: at 200 distinct cells and 42-83
+GPU-h it is the largest single sweep in the project, and a config error in arm 27 would have
+been found three-quarters of the way through a session.
+
+This says the code paths run. It says **nothing** about whether the numbers mean anything --
+rounds, K and image size are all cut, and the fixture is synthetic. It is 70 minutes of CPU
+standing between C and 214-427 GPU-hours.
+
+### Two bugs in the preflight itself, both found by running it
+
+* It globbed only patterns containing `*`, so `configs/experiment/ablation_a[0-9].yaml` -- the
+  natural way to name A1-A9, and the pattern in the Makefile target -- was treated as a literal
+  filename and died on FileNotFoundError after 36 arms had passed. Now globs on any
+  metacharacter, refuses a pattern matching nothing, and checks `flwr` is on PATH before
+  reconfiguring the federation.
+* No resume. This container reaped the detached process three times; each restart redid every
+  arm already checked, so the walk never reached the ablations. An arm that wrote a result is
+  an arm that ran -- the same test `sweep.is_completed` applies per cell.
+
+670 tests pass, ruff clean.
