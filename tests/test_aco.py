@@ -740,3 +740,126 @@ def test_base_mode_flattens_the_landscape_as_well_as_failing_on_the_corner() -> 
     curving it, so the corner is charged and the interior is levelled. The colony finds an
     order of magnitude less improvement than under `aggregate`."""
     assert _colony_under("aggregate")["improvement"] > 5 * _colony_under("base")["improvement"]
+
+
+# ======================================================================================
+# `aco-desirability-scaling` -- the screenable candidate fix for the anchoring problem
+# ======================================================================================
+
+
+def test_absolute_scaling_collapses_a_realistic_d_k_spread_into_one_level() -> None:
+    """This is the bug, stated as a test rather than as prose.
+
+    The measured `d_k` span across K in {10, 20} and noise in {1.5, 3, 6} is about 0.04.
+    Against a level spacing of 0.25, every client's argmax lands on the same level -- and a
+    uniform level assignment normalises back to `base_weights` exactly, so the ACS greedy
+    branch reconstructs the FedAvg point. The test pins the mechanism so a future change to
+    the level grid or the sigmoid cannot quietly stop reproducing it.
+    """
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    d_k = torch.tensor([0.7685, 0.7823, 0.7901, 0.7955, 0.8073])
+
+    eta = desirability_matrix(d_k, levels, "absolute")
+    chosen = eta.argmax(dim=1)
+
+    assert len(set(chosen.tolist())) == 1, (
+        "the premise of the anchoring diagnosis no longer holds -- absolute scaling used to "
+        "map a 0.04-wide d_k onto a single level"
+    )
+
+
+def test_standardized_scaling_separates_the_same_spread() -> None:
+    """The candidate fix, on the identical input."""
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    d_k = torch.tensor([0.7685, 0.7823, 0.7901, 0.7955, 0.8073])
+
+    chosen = desirability_matrix(d_k, levels, "standardized").argmax(dim=1)
+
+    assert len(set(chosen.tolist())) > 1
+    # Ranking must survive: standardizing may rescale, never reorder.
+    assert chosen.tolist() == sorted(chosen.tolist())
+
+
+def test_standardized_scaling_preserves_the_ranking_of_d_k() -> None:
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    d_k = torch.tensor([0.9, 0.1, 0.5, 0.7, 0.3])
+
+    d_hat_order = desirability_matrix(d_k, levels, "standardized").argmax(dim=1).tolist()
+    for i in range(len(d_k)):
+        for j in range(len(d_k)):
+            if d_k[i] > d_k[j]:
+                assert d_hat_order[i] >= d_hat_order[j]
+
+
+def test_standardized_scaling_falls_back_to_the_midpoint_with_no_spread() -> None:
+    """K identical scores carry no ranking information. Standardizing by ~0 would amplify
+    floating-point dust into confident level assignments, which is worse than the anchoring
+    this option exists to fix -- so it returns the uniform midpoint instead."""
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    identical = torch.full((6,), 0.8)
+
+    chosen = desirability_matrix(identical, levels, "standardized").argmax(dim=1)
+    assert len(set(chosen.tolist())) == 1
+
+
+def test_standardized_scaling_stays_inside_the_level_grid() -> None:
+    """What the +/-2 sigma clamp actually buys: d_hat never lands outside
+    [lambda_1, lambda_L], so no client is scored against an extrapolated level."""
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    spread_wide = torch.tensor([0.01, 0.2, 0.5, 0.8, 0.99, 40.0])
+
+    eta = desirability_matrix(spread_wide, levels, "standardized")
+    chosen = eta.argmax(dim=1)
+    assert chosen.min() >= 0 and chosen.max() <= len(levels) - 1
+
+
+def test_standardized_scaling_is_outlier_sensitive() -> None:
+    """A documented limitation, not a bug, and pinned so it is not mistaken for one.
+
+    The clamp bounds an outlier's own position but does not stop it inflating sigma. With
+    one client at 50 against four near 0.5, the four span 0.0009 in d_hat against a level
+    spacing of 0.25 -- they collapse into a single bin exactly as under "absolute". Fixing
+    that needs a robust centre and scale (median/MAD), a third variant and a further
+    departure from plan §4.2, which is not worth adding before a screen asks for it.
+    """
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    with_outlier = torch.tensor([0.50, 0.51, 0.52, 0.53, 50.0])
+
+    chosen = desirability_matrix(with_outlier, levels, "standardized").argmax(dim=1)
+    assert len(set(chosen[:4].tolist())) == 1, (
+        "if the four ordinary clients now separate, `standardized` has gained robustness "
+        "that the docstring says it lacks -- update both together"
+    )
+
+
+def test_an_unknown_scaling_is_refused() -> None:
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    with pytest.raises(ValueError, match="not one of"):
+        desirability_matrix(torch.tensor([0.5]), torch.linspace(0.0, 2.5, 11), "zscore")
+
+
+def test_absolute_is_the_default_so_the_spec_is_what_runs() -> None:
+    """`standardized` discards absolute scale by construction: an iid federation of equally
+    good clients gets forced apart. That is a modelling decision for the team, so the flag
+    must default to plan §4.2."""
+    from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix
+
+    assert HeuristicWeights.scaling == "absolute"
+    levels = torch.linspace(0.0, 2.5, 11)
+    d_k = torch.tensor([0.30, 0.55, 0.80])
+    assert torch.allclose(
+        desirability_matrix(d_k, levels), desirability_matrix(d_k, levels, "absolute")
+    )

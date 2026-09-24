@@ -219,7 +219,7 @@ class FedACO(FedAvg):
         gram_time_ms = (time.perf_counter() - gram_start) * 1000.0
 
         d_k = desirability_scores(gram, num_examples, val_improvement, self.aco_config.heuristics)
-        eta = desirability_matrix(d_k, self.levels)
+        eta = desirability_matrix(d_k, self.levels, self.aco_config.heuristics.scaling)
 
         num_ants, num_iterations = colony_budget(
             # True round, not a process-local counter: on a resumed run `round_count`

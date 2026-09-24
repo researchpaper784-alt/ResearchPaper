@@ -294,6 +294,13 @@ aco-beta-alignment = 2.0
 aco-beta-drift = 1.0
 aco-beta-val-improvement = 1.0
 aco-beta-data-size = 0.5
+# How d_k maps onto the level range: "absolute" is plan §4.2 as written, "standardized"
+# z-scores d_k across clients first. The measured d_k span is ~0.04 against a level spacing
+# of 0.25, so under "absolute" every client lands in one bin and the ACS greedy branch
+# reconstructs the FedAvg point -- see docs/OPEN_QUESTIONS.md. "standardized" is a method
+# change, not a bug fix (it discards absolute scale, so an iid federation of equally good
+# clients is forced apart), and is here to be screened, not switched on.
+aco-desirability-scaling = "absolute"
 aco-trim-fraction = 0.2
 aco-safety-fallback = true
 

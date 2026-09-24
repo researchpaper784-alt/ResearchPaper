@@ -21,7 +21,7 @@ from fedswarm.aco.fitness import (
     DISPERSION_REFERENCES,
     DataFreeFitnessConfig,
 )
-from fedswarm.aco.heuristics import HeuristicWeights
+from fedswarm.aco.heuristics import DESIRABILITY_SCALINGS, HeuristicWeights
 from fedswarm.fl.attacks import attack_from_run_config, malicious_ids
 from fedswarm.fl.cold_start import cold_start_from_run_config, with_cold_start
 from fedswarm.aco.pheromone import PheromoneConfig
@@ -32,6 +32,21 @@ from fedswarm.strategies.lossbased import LossBasedWeighting
 from fedswarm.strategies.scaffold import Scaffold
 
 RunConfig = dict
+
+
+def _desirability_scaling(run_config: RunConfig) -> str:
+    """Validated at construction rather than at first use, like `dispersion_reference`.
+
+    A typo'd value here would otherwise surface as a `ValueError` from inside
+    `desirability_matrix` during round 1 of a GPU run, after the data has loaded and the
+    clients have trained -- which on Kaggle costs a session to learn a spelling.
+    """
+    value = str(run_config.get("aco-desirability-scaling", HeuristicWeights.scaling))
+    if value not in DESIRABILITY_SCALINGS:
+        raise ValueError(
+            f"aco-desirability-scaling={value!r} is not one of {DESIRABILITY_SCALINGS}"
+        )
+    return value
 
 
 def _krum_malicious_count(run_config: RunConfig) -> int:
@@ -332,6 +347,7 @@ def _build_fedaco(
             run_config.get("aco-beta-val-improvement", HeuristicWeights.beta_val_improvement)
         ),
         beta_data_size=float(run_config.get("aco-beta-data-size", HeuristicWeights.beta_data_size)),
+        scaling=_desirability_scaling(run_config),
     )
     aco_config = FedACOConfig(
         num_levels=int(run_config.get("aco-num-levels", FedACOConfig.num_levels)),
