@@ -1,15 +1,34 @@
-"""Phase 9, Step 9.2 -- figures (plan §9.2). Every function here returns a
-matplotlib `Figure` built from plain, minimal, documented inputs (arrays/DataFrames)
-rather than reading `results/` itself -- `scripts/make_figures.py` is the thin CLI
-that loads real results (via `fedswarm.analysis`) and calls these; that split is
-what makes "does this run and produce a well-formed figure" testable against
-synthetic data without needing any real experiment output to exist yet.
+"""Phase 9, Step 9.2 -- figures (plan §9.2). Every function here returns a matplotlib
+`Figure` built from plain, minimal, documented inputs (arrays/DataFrames) rather than
+reading `results/` itself; `scripts/make_figures.py` is the CLI that loads real results and
+calls these. That split is what makes "does this produce a well-formed figure" testable
+against synthetic data without any real experiment output existing yet.
 
-All vector output (`savefig(..., format="pdf")`), colorblind-safe palette
-(matplotlib's own "tab10" -- not a from-scratch palette choice, a well-established
-colorblind-tested default), >=10pt fonts. Figure 8 (partition diagnostic heatmaps)
-is produced separately by the existing `scripts/make_partition_figures.py`
-(Phase 1), not duplicated here.
+⚠️ **This module was imported by nothing until 2026-09-24.** All nine plan §9.2 plot
+functions were written and working, `scripts/make_figures.py` had independently
+reimplemented four of them, and nobody noticed -- so five paper figures were missing for want
+of extractors, not plotting code. Nothing fails when a subsystem's output goes nowhere, which
+is why this was invisible; `tests/test_figures_wiring.py` now covers the extractors and every
+function below is reachable from the CLI.
+
+What remains here is the five that `make_figures.py` does *not* reimplement:
+
+    plot_alpha_heatmap          figure 3   <- make_figures.figure_alpha_heatmap
+    plot_overhead_vs_k          figure 5   <- make_figures.figure_overhead
+    plot_robustness             figure 6   <- make_figures.figure_robustness
+    plot_sensitivity_heatmap    figure 7   <- make_figures.figure_sensitivity
+    plot_gain_vs_heterogeneity  figure 9   <- make_figures.figure_gain_vs_heterogeneity
+
+`plot_convergence_curves`, `plot_final_bar_chart`, `plot_entropy_vs_round` and
+`save_figure` were removed on the same date: `make_figures.py` carries better versions of
+the first three (faceted per regime, the documented emphasis palette, a log(L) threshold
+rule on the entropy panel), and keeping simpler duplicates beside them is how someone edits
+one and wonders why the figure does not change. Figure 4's alpha-entropy half now lives in
+`make_figures.figure_alpha_entropy`; figure 8 (partition diagnostics) is
+`scripts/make_partition_figures.py`, from Phase 1.
+
+Colorblind-safe palette (matplotlib's "tab10" -- an established colorblind-tested default,
+not a from-scratch choice), >=10pt fonts.
 """
 
 from __future__ import annotations
@@ -17,61 +36,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from matplotlib.figure import Figure
-
-
-def plot_convergence_curves(
-    df: pd.DataFrame, metric: str = "test_macro_f1", partitions: list[str] | None = None
-) -> Figure:
-    """Figure 1: metric vs. round, mean +/- 95% CI band across seeds, one panel per
-    partition. `df` columns: strategy, partition, seed, round, <metric>."""
-    partitions = partitions or sorted(df["partition"].unique())
-    fig = Figure(figsize=(4.5 * len(partitions), 4.0))
-    axes = fig.subplots(1, len(partitions), sharey=True)
-    if len(partitions) == 1:
-        axes = [axes]
-
-    for ax, partition in zip(axes, partitions):
-        subset = df[df["partition"] == partition]
-        for strategy in sorted(subset["strategy"].unique()):
-            strategy_df = subset[subset["strategy"] == strategy]
-            grouped = strategy_df.groupby("round")[metric]
-            mean = grouped.mean()
-            sem = grouped.sem()
-            ci95 = 1.96 * sem.fillna(0.0)
-            ax.plot(mean.index, mean.values, label=strategy)
-            ax.fill_between(mean.index, (mean - ci95).values, (mean + ci95).values, alpha=0.2)
-        ax.set_title(partition)
-        ax.set_xlabel("round")
-    axes[0].set_ylabel(metric)
-    axes[-1].legend(loc="lower right", fontsize=9)
-    fig.tight_layout()
-    return fig
-
-
-def plot_final_bar_chart(summary_df: pd.DataFrame) -> Figure:
-    """Figure 2: final metric bar chart with error bars, grouped by partition.
-    `summary_df` columns: strategy, partition, mean, std (fedswarm.analysis.summarize's
-    own output shape)."""
-    partitions = sorted(summary_df["partition"].unique())
-    strategies = sorted(summary_df["strategy"].unique())
-    fig = Figure(figsize=(max(6.0, 1.2 * len(partitions) * len(strategies)), 4.0))
-    ax = fig.add_subplot(111)
-
-    width = 0.8 / max(len(strategies), 1)
-    x = np.arange(len(partitions))
-    for i, strategy in enumerate(strategies):
-        means, stds = [], []
-        for partition in partitions:
-            row = summary_df[(summary_df["strategy"] == strategy) & (summary_df["partition"] == partition)]
-            means.append(float(row["mean"].iloc[0]) if not row.empty else np.nan)
-            stds.append(float(row["std"].iloc[0]) if not row.empty else 0.0)
-        ax.bar(x + i * width, means, width=width, yerr=stds, label=strategy, capsize=3)
-
-    ax.set_xticks(x + width * (len(strategies) - 1) / 2)
-    ax.set_xticklabels(partitions, rotation=20, ha="right")
-    ax.legend(fontsize=9)
-    fig.tight_layout()
-    return fig
 
 
 def plot_alpha_heatmap(
@@ -94,23 +58,6 @@ def plot_alpha_heatmap(
         for client_idx, quality in enumerate(client_quality):
             ax.annotate(f"{quality:.2f}", xy=(num_rounds - 1, client_idx), xytext=(4, 0),
                         textcoords="offset points", fontsize=8, va="center")
-    fig.tight_layout()
-    return fig
-
-
-def plot_entropy_vs_round(
-    rounds: list[int], alpha_entropy: list[float], pheromone_entropy: list[float] | None = None
-) -> Figure:
-    """Figure 4: alpha entropy (and, if FedACO's own aco search method, pheromone
-    entropy) vs. round -- a search-convergence diagnostic."""
-    fig = Figure(figsize=(6.0, 4.0))
-    ax = fig.add_subplot(111)
-    ax.plot(rounds, alpha_entropy, label="alpha entropy", marker="o", markersize=3)
-    if pheromone_entropy is not None:
-        ax.plot(rounds, pheromone_entropy, label="pheromone entropy", marker="s", markersize=3)
-    ax.set_xlabel("round")
-    ax.set_ylabel("entropy")
-    ax.legend(fontsize=9)
     fig.tight_layout()
     return fig
 
@@ -213,7 +160,3 @@ def plot_gain_vs_heterogeneity(js_divergence: np.ndarray, gain: np.ndarray) -> F
     ax.set_ylabel("gain over best baseline")
     fig.tight_layout()
     return fig
-
-
-def save_figure(fig: Figure, path: str, dpi: int = 300) -> None:
-    fig.savefig(path, format="pdf", dpi=dpi, bbox_inches="tight")

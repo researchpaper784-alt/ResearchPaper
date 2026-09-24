@@ -745,6 +745,53 @@ def figure_gain_vs_heterogeneity(results: list[dict], out: Path) -> Path | None:
     return out
 
 
+def figure_alpha_entropy(results: list[dict], out: Path) -> Path | None:
+    """Plan §9.2 figure 4's other half: alpha entropy per round, with pheromone entropy
+    alongside it where the run is FedACO's own colony.
+
+    `figure_colony_health` already plots pheromone entropy against its log(L) ceiling, which
+    answers "did tau move". This answers a different question -- did the *weights* actually
+    concentrate -- and the two can disagree: the local screens found the winning search
+    method was also the least concentrated arm (highest alpha entropy, lowest alpha_max), so
+    whatever this fitness rewards on heterogeneous data, it is not concentration.
+
+    Averaged across seeds per strategy, because a single run's curve is noise at these
+    scales and the plan asks for a diagnostic, not an anecdote.
+    """
+    by_strategy: dict[str, list[list[float]]] = defaultdict(list)
+    pheromone: dict[str, list[list[float]]] = defaultdict(list)
+    for result in results:
+        strategy = str((result.get("config") or {}).get("run_config", {}).get("strategy-name", "?"))
+        alpha = _round_series(result, "train_alpha_entropy")
+        if alpha:
+            by_strategy[strategy].append(alpha)
+        tau = _round_series(result, "train_pheromone_entropy")
+        if tau:
+            pheromone[strategy].append(tau)
+
+    if not by_strategy:
+        return None
+
+    fig, ax = plt.subplots(figsize=(6.4, 4.0))
+    for strategy in sorted(by_strategy):
+        curves = by_strategy[strategy]
+        mean = _mean_curve(curves)
+        ax.plot(_rounds(mean), mean, marker="o", markersize=3, label=f"{strategy} alpha")
+        if pheromone.get(strategy):
+            tau_mean = _mean_curve(pheromone[strategy])
+            ax.plot(_rounds(tau_mean), tau_mean, marker="s", markersize=3,
+                    linestyle=":", label=f"{strategy} pheromone")
+    ax.set_xlabel("round")
+    ax.set_ylabel("entropy (nats)")
+    _integer_rounds(ax)
+    _despine(ax)
+    ax.legend(fontsize=8, frameon=False)
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-dir", default="results/fl/main")
@@ -754,7 +801,7 @@ def main() -> int:
     parser.add_argument(
         "--only",
         default=None,
-        help="comma-separated: convergence,comparison,ablation,health,alpha,overhead,robustness,sensitivity,heterogeneity",
+        help="comma-separated: convergence,comparison,ablation,health,alpha,overhead,robustness,sensitivity,heterogeneity,entropy",
     )
     args = parser.parse_args()
 
@@ -785,6 +832,7 @@ def main() -> int:
             results, out_dir / "colony_health.png", args.num_levels
         ),
         "alpha": lambda: figure_alpha_heatmap(results, out_dir / "alpha_heatmap.png"),
+        "entropy": lambda: figure_alpha_entropy(results, out_dir / "alpha_entropy.png"),
         "overhead": lambda: figure_overhead(results, out_dir / "overhead_vs_k.png"),
         "robustness": lambda: figure_robustness(results, out_dir / "robustness.png"),
         "sensitivity": lambda: figure_sensitivity(results, out_dir / "sensitivity.png"),
