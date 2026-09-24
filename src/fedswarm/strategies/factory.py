@@ -23,6 +23,7 @@ from fedswarm.aco.fitness import (
 )
 from fedswarm.aco.heuristics import HeuristicWeights
 from fedswarm.fl.attacks import attack_from_run_config, malicious_ids
+from fedswarm.fl.cold_start import cold_start_from_run_config, with_cold_start
 from fedswarm.aco.pheromone import PheromoneConfig
 from fedswarm.strategies.fedaco import FedACO, FedACOConfig
 from fedswarm.strategies.fedlaw import FedLAW
@@ -119,8 +120,16 @@ def strategy_from_run_config(
     alphas against the same server-held set). Every other strategy -- including FedACO
     in its default `data_free` mode, which is the whole point of the method -- ignores
     them, so callers not using those two can omit them."""
-    return _with_server_round(
+    strategy = _with_server_round(
         _build_strategy(run_config, model=model, val_loader=val_loader, device=device)
+    )
+    # Phase 8, R6. Off unless `cold-start-round` is set, so every other sweep is untouched.
+    # Applied outside `_with_server_round` so the round number still reaches clients on the
+    # rounds the late joiners are hidden -- they are absent from the aggregation, not from the
+    # protocol.
+    join_round, cold_fraction = cold_start_from_run_config(run_config)
+    return with_cold_start(
+        strategy, join_round, cold_fraction, int(run_config.get("num-clients", 20))
     )
 
 

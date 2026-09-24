@@ -1975,3 +1975,55 @@ Still synthetic. But this is the skewed high-noise regime that reproduces the re
 F(fedavg) < 0, so it is the closest proxy available -- and the gate run is what settles it.
 
 529 tests pass, ruff clean.
+
+## 2026-09-24 (later still) -- R6 exists: cold start, via a filtered Grid
+
+R6 (clients joining after round 20) was the one entry in the plan's robustness table with no
+config file at all, and `docs/OPEN_QUESTIONS.md` explained why: which SuperNodes exist is
+Flower's Simulation Runtime's business, and no `run_config` key says "partition 15 must not
+participate before round 20".
+
+Both true, and neither closes the door. **A strategy never asks the runtime for nodes -- it
+asks the `Grid` it is handed.** So every client starts at round 1 and a filtered Grid keeps a
+deterministic subset out of the strategy's view until the join round. The clients exist; the
+aggregation does not see them, which is precisely the condition R6 is about: does the pheromone
+initialise sensibly for a client id it meets at round 21 when every other id has twenty rounds
+of deposit behind it?
+
+`fl/cold_start.py`, `configs/experiment/robustness_r6_cold_start.yaml` (25 cells, 2,500
+rounds, ~5 GPU-h). Late joiners are the **highest** node ids, deliberately disjoint from
+`attacks.malicious_ids`' lowest, so a cell combining an attack with a cold start delays
+different clients than it compromises instead of quietly testing one thing twice.
+
+### The hazard was a hang, not an error
+
+Flower's own sampler:
+
+    while len(all_nodes := list(grid.get_node_ids())) < min_available_nodes:
+        sleep(1)
+
+No give-up. Hide one node too many and the run does not fail -- it logs a line a second
+forever, which on Kaggle consumes the whole nine-hour budget and writes nothing. Nothing
+downstream can catch it, because nothing is raised. So `with_cold_start` checks the visible
+count against the strategy's own `min_available_nodes` / `min_train_nodes` /
+`min_evaluate_nodes` / `ceil(visible * fraction_train)` and raises at construction, and a test
+builds every strategy the shipped config declares to prove that config passes its own guard.
+That is also why the config sets `min-train-nodes: 10` rather than 20, with the reason written
+above the key.
+
+Evaluation is filtered too. Leaving it unfiltered would report a late joiner's local-val
+metrics on a model its data never touched, for twenty rounds.
+
+### What R6 can and cannot settle
+
+It sits in the **gated** half of person C's notebook, not the free half, and that placement is
+the honest one: the plan says "cross-round pheromone should shine here", and that claim needs a
+pheromone that moves. The two FedAvg arms are not gated -- they establish what a late joiner
+costs a memoryless aggregator, which is a paper number whatever the colony is doing, and
+without them a FedACO gap cannot be told apart from "fifteen clients for twenty rounds is
+simply less data". The `fedaco_cold_no_persistence` arm is the third leg: if the gap survives
+with persistence off, it was never about stigmergy.
+
+Person C's workstream is now 1,015 cells / 101,500 rounds / ~217 GPU-hours.
+
+547 tests pass, ruff clean.

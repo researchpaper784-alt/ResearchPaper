@@ -440,18 +440,29 @@ execute, same blocker as everything else in Phase 3 onward.
   as an accepted simplification for days; the fix is smaller than the note explaining why
   it wasn't made. Worth remembering as a pattern -- "a Cartesian product can't express
   this" was true of the *config*, and false of the system.
-- **R6 (cold start: clients joining after round 20) has no config file here at
-  all** -- a real gap, not an oversight. Which SuperNodes exist/connect at all is
-  controlled by Flower's own Simulation Runtime (Ray actor lifecycle), not by
-  anything `run_config` can express; there is no clean way from application code to
-  say "partition-id 15 must not participate before round 20." What IS built and
-  tested (Phase 4): `Pheromone.begin_round` correctly initializes a fresh row for
-  any client id it has never seen, whenever it first shows up
-  (`test_pheromone_persists`) -- so the *mechanism* R6 wants to stress-test is
-  already correct, but actually engineering controlled late-arrival timing to
-  exercise it on purpose is not implemented. Would need a custom Strategy-level
-  node-filtering wrapper (override `configure_train` to restrict `grid.
-  get_node_ids()`'s candidates by round number) if this becomes a priority.
+- ~~**R6 (cold start) has no config file here at all.**~~ **BUILT 2026-09-24**
+  (`fl/cold_start.py`, `configs/experiment/robustness_r6_cold_start.yaml`). The note
+  below was right that the Simulation Runtime's actor lifecycle is out of reach and that
+  no `run_config` key holds a partition back -- and wrong that this closed the door. A
+  strategy never asks the runtime for nodes; it asks the `Grid` it is handed. Every client
+  starts at round 1 and a filtered Grid keeps a deterministic subset (the highest node ids,
+  disjoint from `malicious_ids`' lowest) out of the strategy's view until the join round.
+  The clients exist; the aggregation does not see them, which is exactly the condition R6
+  is about.
+
+  The real hazard turned out to be a hang rather than an error: Flower's `sample_nodes` is
+  `while len(grid.get_node_ids()) < min_available_nodes: sleep(1)` with no give-up, so
+  hiding one node too many burns a whole Kaggle session silently. `with_cold_start`
+  therefore validates the visible count against the strategy's own minimums and raises at
+  construction, and a test builds every strategy the shipped config declares to prove it
+  passes. That is also why the config sets `min-train-nodes: 10`, not 20.
+
+  Still open, and only a real run can answer it: whether `Pheromone.begin_round`'s fresh
+  row for an unseen client is initialised at a sensible level. Too high over-trusts a
+  newcomer, too low freezes it out however good its updates are, and the unit test only
+  establishes that a row appears -- not that its value is right. The config's
+  `fedaco_cold_no_persistence` arm is what separates "the gap is stigmergy" from "the gap
+  is fifteen clients for twenty rounds".
 - **A10 (layer-wise alpha vs. model-wise), the plan's own explicitly optional,
   "time-box it" ablation, is not implemented and has no config file.** It needs a
   real redesign (the construction graph would need K x num_layer_groups stations,

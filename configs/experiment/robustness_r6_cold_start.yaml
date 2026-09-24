@@ -1,0 +1,76 @@
+# Phase 8, R6 -- cold start: clients joining after round 20.
+#
+# The one entry in the plan's robustness table (§8) that had no config at all until
+# 2026-09-24, and the reason was real: which SuperNodes exist is Flower's Simulation Runtime's
+# business, and nothing `run_config` can say holds a partition back. The way in is that a
+# strategy never asks the runtime for nodes -- it asks the `Grid` it is handed. Every client
+# starts at round 1 and a filtered Grid keeps a deterministic subset out of the strategy's
+# view until `cold-start-round` (fl/cold_start.py).
+#
+# What it tests: `Pheromone.begin_round` initialises a fresh row for any client id it has not
+# seen. That is built and unit-tested, but it had never happened on purpose mid-run -- so this
+# is the first time a late joiner meets a pheromone table where every other id has twenty
+# rounds of deposit behind it. If the fresh row is initialised too high the newcomer is
+# over-trusted; too low and it is frozen out however good its updates are. Either way the
+# cost shows up as a gap against the `all_from_round_1` control below.
+#
+# ⚠️ `min-train-nodes` and `min-available-nodes` are 10, not 20, and that is load-bearing.
+# Flower's `sample_nodes` waits for enough nodes in a `while ...: sleep(1)` loop that never
+# gives up, so a minimum above the 15 visible before round 21 would not fail -- it would hang
+# the run for the whole Kaggle session and produce nothing. `with_cold_start` refuses such a
+# configuration at construction, but the right value belongs here.
+#
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/robustness_r6_cold_start.yaml
+
+base_overrides:
+  num-clients: 20
+  min-client-size: 5
+  fraction-train: 1.0
+  # See the warning above: must be <= the visible count before the join round.
+  min-train-nodes: 10
+  min-evaluate-nodes: 10
+  min-available-nodes: 10
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-epochs: 1
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  regime: dirichlet
+  alpha: 0.3
+
+strategies:
+  # FedACO with cross-round pheromone, which is the mechanism under test, against FedAvg
+  # (memoryless -- a late joiner costs it nothing but data) as the reference for how much of
+  # any gap is the pheromone rather than just less data for twenty rounds.
+  - name: fedaco_cold
+    overrides: {strategy-name: fedaco, cold-start-round: 21, cold-start-fraction: 0.25}
+  - name: fedavg_cold
+    overrides: {strategy-name: fedavg, cold-start-round: 21, cold-start-fraction: 0.25}
+  # The controls. Without these a gap is uninterpretable: "FedACO does worse with late
+  # joiners" could just be "FedACO does worse with 15 clients for twenty rounds".
+  - name: fedaco_all_from_round_1
+    overrides: {strategy-name: fedaco}
+  - name: fedavg_all_from_round_1
+    overrides: {strategy-name: fedavg}
+  # Pheromone persistence off, with the same cold start. If the gap survives here it was
+  # never about stigmergy, and the paper's conceptual hook is not what R6 is measuring.
+  - name: fedaco_cold_no_persistence
+    overrides:
+      strategy-name: fedaco
+      cold-start-round: 21
+      cold-start-fraction: 0.25
+      aco-persistence: none
+
+partitions:
+  - name: dirichlet_0.3
+    overrides: {regime: dirichlet, alpha: 0.3}
+
+# 5 seeds, matching the other robustness sweeps. This is read as a degradation curve
+# ("how much does a late joiner cost, and does the pheromone explain it"), and an effect size
+# carries that without a significance test. The 8-seed floor is reserved for main.yaml's
+# headline comparison and ablation_a1's control, the two places a p-value is claimed.
+seeds: [0, 1, 2, 3, 4]

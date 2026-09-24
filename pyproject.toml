@@ -273,6 +273,15 @@ aco-concentration-penalty = "entropy"
 # Default stays "weighted_mean": it is the method as proposed and every result so far used it.
 # A6 measures all three.
 aco-dispersion-reference = "weighted_mean"
+# Phase 8, R6 -- clients joining partway through a run. `cold-start-round` is the first round
+# at which the late joiners participate (0 = off, which is every sweep but R6);
+# `cold-start-fraction` is how many are held back, taken as the HIGHEST node ids so a cell
+# combining an attack with a cold start delays different clients than it compromises
+# (`attacks.malicious_ids` takes the lowest). The clients exist from round 1 -- a filtered
+# Grid keeps them out of the strategy's view, which is what makes the pheromone meet an
+# unseen client id at the join round with every other id twenty rounds ahead of it.
+cold-start-round = 0
+cold-start-fraction = 0.0
 # Heuristic desirability weights (aco/heuristics.py).
 aco-beta-alignment = 2.0
 aco-beta-drift = 1.0
