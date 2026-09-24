@@ -2354,3 +2354,36 @@ method §4.5 specifies, not bug fixes. Any of them can now be screened locally i
 than a GPU session. That choice is not mine to make.
 
 573 tests pass, ruff clean.
+
+## 2026-09-24 -- the isolated colony probe cannot screen A1's fixes, and saying so is the finding
+
+Having diagnosed why ACO loses A1 (the greedy branch constructs the FedAvg point), the obvious
+next step was to screen candidate fixes cheaply with an isolated colony probe -- synthetic Gram
+matrix, one round, no FL -- rather than 12 more real runs.
+
+**It does not work, and the reason is worth recording.** In the probe, over 6 (K, noise) cases
+x 3 seeds at budget 300:
+
+    control: coordinate_grid    +0.0000 gain over F(base)
+    control: random             -0.0243
+    aco q0=0.9                  +0.0002   (beats grid on 15/18)
+
+Nothing finds anything better than the FedAvg point. But the real A1 run has
+coordinate_grid at **+0.0501** and pso at **+0.0484** -- the probe does not reproduce the
+phenomenon it was built to screen. Three differences, and any of them is enough: uniform base
+weights where the real runs use num-examples weights under dirichlet(0.3) skew; synthetic
+consensus deltas where the real ones come from actual training; and one isolated round where the
+real runs carry pheromone across fifteen.
+
+On that landscape the FedAvg point is already near-optimal, so every method's gain is ~0 by
+construction and the probe ranks noise. It also reported "standardizing d_k makes things worse"
+(-0.05) -- a conclusion with no support, on a fixture that cannot express the effect.
+
+**The general lesson, third time this session:** a cheap proxy has to be validated against the
+phenomenon before its rankings mean anything. The heterogeneous *dataset* fixture earned trust
+by reproducing the real failure signature on every axis first. This probe skipped that step, and
+its numbers looked precise enough to act on.
+
+Screening the candidate fixes therefore needs real runs. `aco-q0` is already a config key so it
+needs no code change; standardizing `d_k` would need a flag, and is only worth adding if q0
+alone does not account for the anchoring.
