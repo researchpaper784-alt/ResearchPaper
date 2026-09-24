@@ -15,6 +15,9 @@ Every check here is a bug this repository actually shipped:
   config, so every reply recorded `-1`, and R4's DP noise (seeded partly from it) drew the
   same values every round.
 * **per-round metrics exist at all** -- a run can finish having aggregated nothing.
+* **partition_stats is populated** -- `write_result` accepted it from the day the Phase 6
+  schema was written and no caller ever passed it, so every result file recorded `null` for
+  the measured heterogeneity of its own partition.
 * **reproducibility** (`--compare-against`) -- `seed_everything` ran in `server_app.main()`
   only, and a ClientApp is a separate Ray actor process, so every client's train loader
   shuffled from OS entropy. Two runs of the identical config and seed returned 0.1363 and
@@ -83,6 +86,22 @@ def check_complete(payload: dict) -> list[str]:
             f"train_server_round is {server_round}, so the ServerApp is not putting the round "
             "number in the train config. Anything seeded from it (R4's DP noise) draws "
             "identically every round"
+        )
+
+    stats = payload.get("partition_stats")
+    if not stats:
+        failures.append(
+            "partition_stats is empty. It was a `write_result` parameter that nothing ever "
+            "passed, so the field was null in every result file ever written -- which "
+            "silently removed plan §9.2's figure 9 (gain vs measured Jensen-Shannon "
+            "divergence), because its x-axis had no source"
+        )
+    elif "error" in stats:
+        failures.append(f"partition_stats could not be computed: {stats['error']}")
+    elif stats.get("js_divergence") is None:
+        failures.append(
+            "partition_stats has no js_divergence -- `alpha` in the config is the dirichlet "
+            "parameter, not the skew the draw actually produced"
         )
 
     final = payload.get("final") or {}

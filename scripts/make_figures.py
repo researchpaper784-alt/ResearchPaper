@@ -50,11 +50,25 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 # Reused rather than reimplemented: the figures and the tables must group, label and
 # judge completeness identically, or a figure and its table will disagree about what a
 # cell is.
 from make_tables import add_deltas, cell_key, load_results, summarize  # noqa: E402
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+
+# The nine plot functions plan §9.2 specifies already exist here. Four were reimplemented
+# in this file before anyone noticed; these five are wired by the extractors below.
+from fedswarm.figures import (  # noqa: E402
+    plot_alpha_heatmap,
+    plot_gain_vs_heterogeneity,
+    plot_overhead_vs_k,
+    plot_robustness,
+    plot_sensitivity_heatmap,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -498,6 +512,239 @@ def figure_colony_health(results: list[dict], out: Path, num_levels: int) -> Pat
 # ======================================================================================
 
 
+# ======================================================================================
+# Plan §9.2 figures 3, 5, 6, 7 and 9 -- src/fedswarm/figures.py had them all along
+# ======================================================================================
+#
+# Those five plot functions were written, complete, and imported by nothing: not this
+# script, not any test. This script independently reimplemented the other four. So the
+# module was dead code and the paper was five figures short for want of the extractors
+# below -- result JSON in, the arrays each function already accepts out.
+#
+# Each returns None when the results present cannot feed it, so `main`'s existing
+# "skipped (no data)" line names it rather than the figure vanishing silently.
+
+
+def _aco_runs(results: list[dict]) -> list[dict]:
+    return [r for r in results
+            if str((r.get("config") or {}).get("run_config", {}).get("strategy-name", "")) == "fedaco"]
+
+
+def _round_series(result: dict, key: str) -> list:
+    return [r[key] for r in result.get("rounds", []) if r.get(key) is not None]
+
+
+def figure_alpha_heatmap(results: list[dict], out: Path) -> Path | None:
+    """Figure 3 -- alpha over (clients x rounds) for one representative run.
+
+    The plan calls this "the figure that shows the method doing something interpretable"
+    and "the one reviewers remember". Representative is defined as the FedACO run whose
+    final macro-F1 is closest to the median of all FedACO runs -- deliberately not the best
+    one, since picking the best run for the interpretability figure is how a method looks
+    more consistent than it is.
+    """
+    runs = [r for r in _aco_runs(results) if _round_series(r, "train_alpha")]
+    if not runs:
+        return None
+
+    scored = sorted(
+        (r for r in runs if r["final"].get("final_test_macro_f1") is not None),
+        key=lambda r: r["final"]["final_test_macro_f1"],
+    )
+    chosen = scored[len(scored) // 2] if scored else runs[0]
+
+    rows = _round_series(chosen, "train_alpha")
+    width = len(rows[0])
+    if any(len(row) != width for row in rows):
+        # K changed mid-run (a cold-start or straggler config). A ragged matrix cannot be
+        # imaged, and padding it would draw clients that were not there.
+        return None
+
+    alpha = np.asarray(rows, dtype=float)
+    fig = plot_alpha_heatmap(alpha)
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def figure_overhead(results: list[dict], out: Path) -> Path | None:
+    """Figure 5 -- ACO + Gram time against K, with the fitted c*K^2 overlaid.
+
+    The empirical half of claim C3. Needs at least three distinct K to be worth plotting a
+    quadratic through; `overhead.yaml` supplies them.
+    """
+    by_k: dict[int, list[float]] = defaultdict(list)
+    for result in _aco_runs(results):
+        k = (result.get("config") or {}).get("run_config", {}).get("num-clients")
+        if k is None:
+            continue
+        aco = _round_series(result, "train_aco_time_ms")
+        gram = _round_series(result, "train_gram_time_ms")
+        if not aco:
+            continue
+        # Total aggregation overhead: the colony plus the Gram build it depends on. Timing
+        # only the colony would understate the K^2 term, which lives in the Gram matrix.
+        per_round = [a + g for a, g in zip(aco, gram)] if gram else aco
+        by_k[int(k)].append(sum(per_round) / len(per_round))
+
+    if len(by_k) < 3:
+        return None
+
+    ks = np.array(sorted(by_k), dtype=float)
+    overhead = np.array([sum(by_k[int(k)]) / len(by_k[int(k)]) for k in ks], dtype=float)
+    fig = plot_overhead_vs_k(ks, overhead)
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def figure_robustness(results: list[dict], out: Path) -> Path | None:
+    """Figure 6 -- macro-F1 against attacker fraction, one line per strategy.
+
+    Reads `attack-fraction` from the run config, so a sweep whose cells differ only by
+    attack type (R2's gaussian vs sign_flip at one fraction each) yields one point per
+    strategy and is not plotted -- a line through one x value says nothing.
+    """
+    points: dict[tuple[str, float], list[float]] = defaultdict(list)
+    for result in results:
+        run_config = (result.get("config") or {}).get("run_config", {})
+        score = result["final"].get("final_test_macro_f1")
+        if score is None:
+            continue
+        strategy = str(run_config.get("strategy-name", "unknown"))
+        # A clean cell is attacker fraction 0, which is the anchor every line needs.
+        fraction = 0.0 if str(run_config.get("attack", "none")) == "none" else float(
+            run_config.get("attack-fraction", 0.0)
+        )
+        points[(strategy, fraction)].append(float(score))
+
+    fractions = {f for _, f in points}
+    if len(fractions) < 2:
+        return None
+
+    frame = pd.DataFrame(
+        [{"strategy": s, "attacker_fraction": f,
+          "final_test_macro_f1": sum(v) / len(v)} for (s, f), v in sorted(points.items())]
+    )
+    fig = plot_robustness(frame)
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+# The ACO knobs A6 varies, in the flat run_config spelling. Used to find a pair that was
+# actually crossed rather than assuming which two the sweep chose.
+SENSITIVITY_KEYS = (
+    "aco-q0", "aco-rho", "aco-pheromone-exp", "aco-heuristic-exp",
+    "aco-gamma-entropy", "aco-num-levels", "aco-ants-start", "aco-iters-start",
+)
+
+
+def figure_sensitivity(results: list[dict], out: Path) -> Path | None:
+    """Figure 7 -- sensitivity over the two most-varied ACO hyperparameters.
+
+    ⚠️ `ablation_a6.yaml` is a **one-at-a-time** sweep: it moves one knob per arm around a
+    shared centre, so its 270 cells contain no filled 2-D grid. This function therefore
+    finds the two keys that were genuinely crossed and returns None when none were, rather
+    than imaging a grid that is one row and one column of real cells around a hole.
+    Producing that figure needs a factorial sweep A6 does not currently declare.
+    """
+    varied: dict[str, set] = {}
+    for key in SENSITIVITY_KEYS:
+        values = {(r.get("config") or {}).get("run_config", {}).get(key) for r in results}
+        values.discard(None)
+        if len(values) > 1:
+            varied[key] = values
+
+    if len(varied) < 2:
+        return None
+
+    key_y, key_x = sorted(varied, key=lambda k: (-len(varied[k]), k))[:2]
+    values_y = sorted(varied[key_y])
+    values_x = sorted(varied[key_x])
+
+    cells: dict[tuple, list[float]] = defaultdict(list)
+    for result in results:
+        run_config = (result.get("config") or {}).get("run_config", {})
+        score = result["final"].get("final_test_macro_f1")
+        if score is None:
+            continue
+        cells[(run_config.get(key_y), run_config.get(key_x))].append(float(score))
+
+    grid = np.full((len(values_y), len(values_x)), np.nan)
+    for i, vy in enumerate(values_y):
+        for j, vx in enumerate(values_x):
+            got = cells.get((vy, vx))
+            if got:
+                grid[i, j] = sum(got) / len(got)
+
+    # Distinguishing a factorial grid from a one-at-a-time cross is structural, not a
+    # matter of how full the grid is. A KxK cross fills 2K-1 cells, which is 56% at K=3 and
+    # 44% at K=4 -- so any fixed fill threshold accepts the cross at some K and rejects a
+    # partly-resumed factorial at another. The signature of a cross is that every filled
+    # cell shares a coordinate with the centre; a factorial sweep has cells that differ
+    # from the centre in *both* coordinates.
+    centre_y = max(values_y, key=lambda v: sum(1 for (y, _) in cells if y == v))
+    centre_x = max(values_x, key=lambda v: sum(1 for (_, x) in cells if x == v))
+    off_cross = sum(
+        1
+        for i, vy in enumerate(values_y)
+        for j, vx in enumerate(values_x)
+        if vy != centre_y and vx != centre_x and not np.isnan(grid[i, j])
+    )
+    if off_cross == 0:
+        return None
+
+    filled = int(np.count_nonzero(~np.isnan(grid)))
+    if filled < grid.size * 0.8:
+        # Enough of the grid is missing that the colour scale would be read across holes.
+        return None
+
+    fig = plot_sensitivity_heatmap(np.array(values_x), np.array(values_y), grid, key_x, key_y)
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
+def figure_gain_vs_heterogeneity(results: list[dict], out: Path) -> Path | None:
+    """Figure 9 -- FedACO's gain over the best baseline against measured JS divergence.
+
+    The x-axis is each run's own `partition_stats["js_divergence"]`, not the dirichlet
+    `alpha` that was requested: alpha is the parameter, js_divergence is the skew the draw
+    actually produced, and the plan's claim is about the latter. That field was null in
+    every result file until `fl/app.py` started passing it, which is why this figure had no
+    source and could not be wired.
+    """
+    by_regime_seed: dict[tuple[str, int], dict[str, float]] = defaultdict(dict)
+    js: dict[tuple[str, int], float] = {}
+    for result in results:
+        run_config = (result.get("config") or {}).get("run_config", {})
+        score = result["final"].get("final_test_macro_f1")
+        stats = result.get("partition_stats") or {}
+        divergence = stats.get("js_divergence")
+        if score is None or divergence is None:
+            continue
+        key = (str(run_config.get("regime", "unknown")), int((result.get("config") or {}).get("seed", 0)))
+        by_regime_seed[key][str(run_config.get("strategy-name", "unknown"))] = float(score)
+        js[key] = float(divergence)
+
+    xs, gains = [], []
+    for key, scores in by_regime_seed.items():
+        if "fedaco" not in scores or len(scores) < 2:
+            continue
+        best_baseline = max(v for s, v in scores.items() if s != "fedaco")
+        xs.append(js[key])
+        gains.append(scores["fedaco"] - best_baseline)
+
+    if len(xs) < 3:
+        return None
+
+    fig = plot_gain_vs_heterogeneity(np.array(xs), np.array(gains))
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results-dir", default="results/fl/main")
@@ -507,7 +754,7 @@ def main() -> int:
     parser.add_argument(
         "--only",
         default=None,
-        help="comma-separated: convergence,comparison,ablation,health",
+        help="comma-separated: convergence,comparison,ablation,health,alpha,overhead,robustness,sensitivity,heterogeneity",
     )
     args = parser.parse_args()
 
@@ -536,6 +783,13 @@ def main() -> int:
         "ablation": lambda: figure_ablations(rows, out_dir / "ablations.png"),
         "health": lambda: figure_colony_health(
             results, out_dir / "colony_health.png", args.num_levels
+        ),
+        "alpha": lambda: figure_alpha_heatmap(results, out_dir / "alpha_heatmap.png"),
+        "overhead": lambda: figure_overhead(results, out_dir / "overhead_vs_k.png"),
+        "robustness": lambda: figure_robustness(results, out_dir / "robustness.png"),
+        "sensitivity": lambda: figure_sensitivity(results, out_dir / "sensitivity.png"),
+        "heterogeneity": lambda: figure_gain_vs_heterogeneity(
+            results, out_dir / "gain_vs_heterogeneity.png"
         ),
     }
 

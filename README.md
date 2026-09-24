@@ -66,8 +66,24 @@ what is missing.
 | `paper/tables/ablation.{md,csv}` | `make tables-ablation` | 9 |
 | `convergence.png`, `comparison.png`, `colony_health.png` | `make figures` | 9 |
 | `ablations.png` | `make figures-ablation` | 9 |
+| `alpha_heatmap.png` (plan §9.2 fig 3) | `make figures` | 9 |
+| `overhead_vs_k.png` (fig 5) | `make overhead` then `make figures` | 8 |
+| `robustness.png` (fig 6) | `make robustness-granular` then `make figures` | 8 |
+| `sensitivity.png` (fig 7) | needs a factorial sweep — see note below | 7 |
+| `gain_vs_heterogeneity.png` (fig 9) | `make main` then `make figures` | 9 |
 | Robustness sweep (attacks, dropout) | `make robustness` (`make robustness-plan` first) | 8 |
 | `paper/tables/robustness.{md,csv}` | `make tables-robustness` | 8 |
+
+`make figures` writes whichever of the nine it has data for and names the rest on a
+`skipped (no data)` line, so a missing figure says which sweep it is waiting on rather than
+disappearing.
+
+**`sensitivity.png` has no sweep yet.** Plan §9.2 asks for a heatmap over two ACO
+hyperparameters, but `ablation_a6.yaml` is a *one-at-a-time* sweep: each arm moves one knob
+off a shared centre, so its cells form a cross, not a grid, and `figure_sensitivity` refuses
+to image it (a KxK cross fills only 2K-1 cells, and the colour scale would be read across
+the holes). Producing that figure needs a small factorial sweep over the two knobs A6 shows
+to matter most — worth declaring only after A6 has run and identified them.
 
 ### Before the sweep
 

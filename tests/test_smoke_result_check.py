@@ -27,6 +27,11 @@ def _healthy() -> dict:
         ],
         "final": {"final_test_macro_f1": 0.3, "final_val_macro_f1": 0.3,
                   "num_rounds_completed": 2},
+        # Populated because `write_result` accepted this field from the day the Phase 6
+        # schema was written and no caller ever passed it, so it was null in every result
+        # file ever produced -- which removed plan §9.2's figure 9 for want of an x-axis.
+        "partition_stats": {"js_divergence": 0.32, "size_gini": 0.17,
+                            "client_sizes": [113, 72, 121, 54]},
     }
 
 
@@ -112,3 +117,32 @@ def test_ci_actually_invokes_this_checker() -> None:
 
     assert "scripts/check_smoke_result.py" in workflow
     assert "--compare-against" in workflow, "the determinism half must run too"
+
+
+def test_a_null_partition_stats_is_caught() -> None:
+    """`write_result` has taken a `partition_stats` argument since the Phase 6 schema was
+    written and nothing ever passed it. Every result file recorded `null` for the measured
+    heterogeneity of its own partition, and plan §9.2's figure 9 -- gain against measured
+    Jensen-Shannon divergence -- had no x-axis as a result. Nothing failed; the figure was
+    simply never wired, which is how a missing field costs a figure."""
+    payload = _healthy()
+    payload["partition_stats"] = None
+    failures = check_complete(payload)
+    assert any("partition_stats" in f for f in failures)
+
+
+def test_a_partition_stats_error_is_reported_rather_than_accepted() -> None:
+    """The collector is wrapped so a diagnostics failure cannot lose a completed run, which
+    means it can return an error marker instead. Treating that as present would restore the
+    silence this check exists to break."""
+    payload = _healthy()
+    payload["partition_stats"] = {"error": "FileNotFoundError: manifest.csv"}
+    assert any("could not be computed" in f for f in check_complete(payload))
+
+
+def test_partition_stats_without_js_divergence_is_caught() -> None:
+    """`alpha` in the config is the dirichlet parameter; js_divergence is the skew the draw
+    actually produced. Only the second one can be the x-axis of figure 9."""
+    payload = _healthy()
+    payload["partition_stats"] = {"size_gini": 0.17}
+    assert any("js_divergence" in f for f in check_complete(payload))

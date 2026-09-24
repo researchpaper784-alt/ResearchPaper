@@ -891,6 +891,40 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
     return evaluate_fn
 
 
+def partition_stats_for_result(run_config: RunConfig) -> dict | None:
+    """The measured heterogeneity of this run's partition, for the result JSON.
+
+    `write_result` has had a `partition_stats` parameter since the Phase 6 schema was
+    written and **nothing ever passed it**, so the field was `None` in every result file
+    ever produced. That silently removed plan §9.2's figure 9 -- gain against measured
+    Jensen-Shannon divergence, the scatter meant to show the gain growing with real
+    heterogeneity -- because the x-axis had no source. `alpha=0.3` in the config is the
+    dirichlet *parameter*, not the skew that particular draw actually produced.
+
+    Reading it here is cheap: the partition is content-addressed by `spec.key()` and the
+    clients have already built it, so this is a cache hit. `class_matrix` is deliberately
+    left out -- it is K x num_classes per run and the partition figures rebuild partitions
+    directly rather than reading results.
+    """
+    try:
+        manifest_path = str(_repo_path(str(run_config.get("manifest-path", str(MANIFEST_CSV)))))
+        num_clients = int(run_config.get("num-clients", 20))
+        spec = partition_spec_from_run_config(run_config, num_clients)
+        cache_dir = _repo_path(str(run_config.get("partition-cache-dir", "data/processed/partitions")))
+        partition = load_or_build(load_manifest(manifest_path), spec, cache_dir)
+    except Exception as exc:  # pragma: no cover - diagnostics must never fail a run
+        # A run that completed is worth writing even if its heterogeneity cannot be
+        # described. Losing the whole result to a diagnostics error would be a far worse
+        # trade than a null field, which is what this function exists to stop being the
+        # default.
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+    diagnostics = dict(partition.diagnostics or {})
+    diagnostics.pop("class_matrix", None)
+    diagnostics.pop("classes", None)
+    return diagnostics or None
+
+
 @server_app.main()
 def main(grid: Grid, context: Context) -> None:
     run_config = context.run_config
@@ -965,6 +999,7 @@ def main(grid: Grid, context: Context) -> None:
     write_result(
         output_dir / f"{run_id}.json",
         config=resolved_config,
+        partition_stats=partition_stats_for_result(run_config),
         rounds=rounds_log,
         final={
             "wall_clock_s": wall_clock_s,
