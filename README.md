@@ -101,7 +101,31 @@ nothing. A minute per arm on CPU against several hundred GPU-hours.
 
 ### Which sweeps are worth running right now
 
-The sweeps do not all have the same prerequisites, and two different questions decide it:
+Two answers, depending on the deadline.
+
+**If you have 7–9 days**, the full set does not fit and no ordering of it does: it is
+351–701 GPU-hours, which at Kaggle's ~30 GPU-h per week per account is 12–23 weeks on one
+account and 4–8 across three. Run the reduced set — **342 cells, ~70 GPU-h**, in this order:
+
+| order | make target | cells | GPU-h | who |
+|---|---|---|---|---|
+| 1 | `gate-fitness` | 8 | 0.25 | B — which fitness fix closes the corner, ~15 min |
+| 2 | `a1-reduced` | 80 | 16.7 | B — the go/no-go on claim C2 |
+| 3 | `main-reduced` | 144 | 30.0 | C — the headline table |
+| 4 | `r1-reduced` | 40 | 8.3 | C — **before** `r2-reduced`, see below |
+| 5 | `r2-reduced` | 40 | 8.3 | C |
+| 6 | `a2-reduced` | 30 | 6.2 | C |
+| | `b-all`, `c-all` | **342** | **~70** | |
+
+Every cut is named in the config header it belongs to, so the paper states them rather than
+a reviewer finding them. `r1-reduced` must run before `r2-reduced`: R2 ships with no
+unattacked arm and uses the `clean` arm R1 writes to the same `results/fl/robustness`, so
+trimming R1 leaves every R2 delta `None` — which renders as the same "—" as a cell with no
+paired seeds. A1 keeps all 80 cells deliberately; its five search methods, two partitions
+and eight seeds are the experiment, and only its per-cell cost was cut.
+
+**If the deadline moves**, the full sweeps are still the right thing to run, and they do not
+all have the same prerequisites:
 
 | tier | sweeps | cells | GPU-h | condition |
 |---|---|---|---|---|
@@ -114,9 +138,6 @@ Tier 2 is the distinction worth being careful about: those three ablate the *fit
 fallback currently fires in 44% of rounds, where a coordinate sweep improves in every one) then
 every arm collapses toward the same behaviour and the ablation measures noise rather than the
 term it names. `scripts/check_fedaco_health.py --strict` is the gate on that.
-
-A1 (80 cells) is not in this table: it is the main sweep's own go/no-go on claim C2, and
-`docs/OPEN_QUESTIONS.md` records what three local screens already say about it.
 
 ### On a GPU box, set `GPUS` before any sweep
 
