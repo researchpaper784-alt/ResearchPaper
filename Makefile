@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro fitness-repro clean main-reduced main-reduced-plan preflight-configs verify-phase9 c-reduced-plan r1-reduced r2-reduced a2-reduced c-all gate-fitness a1-reduced b-all
+.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro fitness-repro clean main-reduced main-reduced-plan preflight-configs verify-phase9 c-reduced-plan r1-reduced r2-reduced a2-reduced c-all gate-fitness a1-reduced b-all day1
 
 # Interpreter paths, overridable. The default is the local `uv` venv from `make setup`
 # (CLAUDE.md), but Colab and Kaggle install into the system Python and have no .venv at
@@ -239,6 +239,13 @@ FIXTURE ?= /tmp/fedswarm_fixture
 CONFIGS ?= configs/experiment/robustness_r*.yaml configs/experiment/ablation_a[0-9].yaml
 preflight-configs:
 	$(PY) scripts/preflight_sweep_configs.py --fixture $(FIXTURE) --configs $(CONFIGS)
+
+# DAY 1, as notebooks/kaggle_day1_gate_and_a2.ipynb runs it: settle which fitness fix closes
+# the degenerate corner, apply it, then ask whether cross-round persistence does anything.
+# ~6.25 GPU-h, and it answers both questions the paper's structure depends on.
+day1: gate-fitness
+	$(PY) scripts/apply_gate_fix.py --from-results results/fl/gate --apply-verdict
+	$(MAKE) a2-reduced
 
 # Person B's day 1-2, and the critical path for the whole 9 days: the gate re-run that
 # decides which fitness fix to use, then A1 which decides the paper's framing.
