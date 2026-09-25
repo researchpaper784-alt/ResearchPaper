@@ -251,7 +251,12 @@ def test_a6_arms_labelled_default_actually_are_the_default() -> None:
 
 @pytest.mark.parametrize(
     ("pattern", "expected"),
-    [("ablation_a[0-9].yaml", "results/fl/ablation"),
+    # `ablation_a[0-9]*` rather than `ablation_a[0-9]`: the reduced variants added on
+    # 2026-09-25 are named `ablation_a2_reduced.yaml`, which the exact-length pattern did
+    # not match -- so the newest configs were the ones this check did not cover.
+    # `ablation_all.yaml` still falls outside it (it is an aggregate config using `common:`)
+    # and sets its own output-dir.
+    [("ablation_a[0-9]*.yaml", "results/fl/ablation"),
      ("robustness_r*.yaml", "results/fl/robustness")],
 )
 def test_every_granular_config_sets_its_output_dir(pattern: str, expected: str) -> None:
@@ -357,3 +362,118 @@ def test_the_reduced_sweep_keeps_a_monotone_heterogeneity_ladder() -> None:
         f"only {len(dirichlet_alphas)} dirichlet alpha(s): {dirichlet_alphas} -- figure 9 "
         "needs a spread of measured heterogeneity, not a single point plus iid"
     )
+
+
+# --------------------------------------------------------------------------------------
+# C's 9-day reduced set (2026-09-25). R1/R2/A2 full are 240 cells and 100-200 GPU-h; the
+# reduced trio is 110 cells / ~23 GPU-h. The trim introduced one coupling that no result
+# file would reveal: `robustness_r2_reduced.yaml` has NO clean arm, because
+# `robustness_r1_reduced.yaml` writes one to the same directory. Trim R1's clean arm away
+# and R2 loses its baseline -- `add_deltas` leaves every delta None, which renders as the
+# same "—" as a cell with no paired seeds.
+
+_REDUCED = ("robustness_r1_reduced.yaml", "robustness_r2_reduced.yaml",
+            "ablation_a2_reduced.yaml")
+
+
+def _granular(name: str) -> dict:
+    return yaml.safe_load((ROOT / "configs/experiment" / name).read_text()) or {}
+
+
+def _cells(spec: dict) -> int:
+    return len(spec["strategies"]) * len(spec["partitions"]) * len(spec["seeds"])
+
+
+def test_r1_reduced_keeps_the_clean_arm_that_r2_reduced_depends_on() -> None:
+    r1 = _granular("robustness_r1_reduced.yaml")
+    unattacked = [
+        p["name"] for p in r1["partitions"]
+        if (p.get("overrides") or {}).get("attack") in (None, "none")
+    ]
+    assert unattacked, (
+        "robustness_r1_reduced has no unattacked arm. robustness_r2_reduced deliberately "
+        "ships without one and relies on this; removing it leaves both sweeps with no "
+        "0%-attacker baseline in results/fl/robustness and every delta empty."
+    )
+
+
+def test_r2_reduced_does_not_duplicate_r1_reduced_clean_arm() -> None:
+    """Two arms resolving to the same config in one output directory is the resume bug
+    this project hit in September: a control handed a sibling's result file."""
+    r2 = _granular("robustness_r2_reduced.yaml")
+    clean = [p["name"] for p in r2["partitions"]
+             if (p.get("overrides") or {}).get("attack") in (None, "none")]
+    assert not clean, f"r2_reduced adds its own clean arm(s) {clean}; r1_reduced already has one"
+
+
+def test_the_two_reduced_robustness_configs_differ_only_in_the_attack() -> None:
+    """R1's clean arm is only a valid baseline for R2's rows if everything except the
+    attack matches. They ran at different local-epochs before the trim."""
+    r1 = _granular("robustness_r1_reduced.yaml")["base_overrides"]
+    r2 = _granular("robustness_r2_reduced.yaml")["base_overrides"]
+    attack_keys = {"attack", "attack-fraction", "attack-scale"}
+    differing = {
+        k for k in set(r1) | set(r2)
+        if k not in attack_keys and r1.get(k) != r2.get(k)
+    }
+    assert not differing, (
+        f"r1_reduced and r2_reduced disagree on {sorted(differing)} -- r1's clean arm is "
+        "not a valid baseline for r2's rows"
+    )
+
+
+def test_r2_reduced_keeps_both_update_attack_mechanisms() -> None:
+    """`gaussian` inflates the update norm; `sign_flip` preserves it and reverses the
+    direction. R2 exists to test the norm-ratio heuristic r_k, so dropping either type
+    tests the heuristic against half of what it claims to detect. The trim cut attacker
+    *fractions* for exactly this reason."""
+    attacks = {(p.get("overrides") or {}).get("attack")
+               for p in _granular("robustness_r2_reduced.yaml")["partitions"]}
+    assert {"gaussian", "sign_flip"} <= attacks, f"r2_reduced only attacks with {attacks}"
+
+
+def test_a2_reduced_keeps_all_three_persistence_modes() -> None:
+    """A2 asks whether cross-round stigmergy helps at all. `decayed` is pyproject's
+    default so main_reduced already runs it -- but into results/fl/main, which
+    `make tables-ablation` does not read. Two arms and no middle is not an ablation."""
+    modes = {(s.get("overrides") or {})["aco-persistence"]
+             for s in _granular("ablation_a2_reduced.yaml")["strategies"]}
+    assert modes == {"none", "decayed", "full"}, f"a2_reduced runs only {modes}"
+
+
+@pytest.mark.parametrize(
+    ("reduced", "full"),
+    [("robustness_r1_reduced.yaml", "robustness_r1_label_flip.yaml"),
+     ("robustness_r2_reduced.yaml", "robustness_r2_update_attack.yaml"),
+     ("ablation_a2_reduced.yaml", "ablation_a2.yaml")],
+)
+def test_each_reduced_config_is_cheaper_than_the_one_it_replaces(
+    reduced: str, full: str
+) -> None:
+    r, f = _granular(reduced), _granular(full)
+    r_cost = _cells(r) * r["base_overrides"]["num-rounds"] * r["base_overrides"]["num-clients"]
+    f_cost = _cells(f) * f["base_overrides"]["num-rounds"] * f["base_overrides"]["num-clients"]
+    assert r_cost < f_cost / 2, (
+        f"{reduced} is {r_cost:,} client-rounds against {full}'s {f_cost:,} -- not the "
+        "saving the 9-day budget needs"
+    )
+
+
+@pytest.mark.parametrize("name", _REDUCED)
+def test_reduced_configs_match_main_reduced_where_the_comparison_depends_on_it(
+    name: str,
+) -> None:
+    """Every reduced config's header claims its rows are comparable to main_reduced's.
+    That claim is only true if the local work per round is identical -- before the trim,
+    main.yaml ran K=20 at 1 local epoch and R1/R2/A2 ran K=20 at 2, so "FedACO under
+    attack" and "FedACO clean" differed in training as well as in the attack."""
+    main = yaml.safe_load(
+        (ROOT / "configs/experiment/main_reduced.yaml").read_text()
+    )["common"]
+    block = _granular(name)["base_overrides"]
+    for key in ("num-clients", "local-epochs", "num-rounds", "image-size",
+                "local-lr", "local-batch-size", "model-name", "model-norm"):
+        assert block[key] == main[key], (
+            f"{name} sets {key}={block[key]!r}, main_reduced uses {main[key]!r} -- the "
+            "comparison its header claims does not hold"
+        )

@@ -1,0 +1,85 @@
+# Phase 8, R1 -- label-flipping attackers, trimmed to the 9-day / ~100 GPU-h budget.
+#
+# `robustness_r1_label_flip.yaml` is 60 cells at K=20 / 2 local epochs / 3 attacker
+# fractions. At the one measured GPU number this project has (7.5s/round at K=10 on a
+# T4) that is 25-50 GPU-h for one of six robustness sweeps. This is the same experiment
+# at 40 cells / ~8 GPU-h.
+#
+# FOUR CUTS:
+#
+# 1. K=20 -> 10 and 2 local epochs -> 1. Not only cheaper: it makes this sweep's rows
+#    directly comparable to `main_reduced.yaml`, which no pairing of the full configs
+#    was -- main.yaml runs K=20/1 epoch and R1 ran K=20/2 epochs, so "FedACO under
+#    attack" and "FedACO clean" differed in local work as well as in the attack.
+#
+# 2. Three attacker fractions -> one, at 30%. The strongest setting, where the
+#    dispersion term either down-weights flipped clients or does not. What this costs is
+#    the degradation *curve* (plan figure 6 is macro-F1 vs attacker fraction); with two
+#    points it is a bar comparison. Stated as a limitation, not hidden: 20% is the first
+#    thing to add back if hours free up.
+#
+# 3. An explicit `clean` arm replaces the attacker-fraction sweep's implicit baseline.
+#    This is deliberate and it is the reason this config does not simply borrow
+#    main_reduced's unattacked cells: those live in `results/fl/main` and this sweep's
+#    tables read `results/fl/robustness`. A baseline in the other directory is one
+#    `make tables-robustness` cannot see, and `add_deltas` would leave every delta None
+#    -- which renders as the same "—" as a cell with no paired seeds. The clean arm also
+#    serves as the 0%-attacker baseline for `robustness_r2_reduced.yaml`, which writes
+#    to this same directory and therefore needs none of its own.
+#
+# 4. Five seeds, unchanged. These rows are read as a description -- which strategy
+#    degrades least -- and effect sizes carry that.
+#    ⚠️ If the paper's Byzantine-resilience claim becomes a headline contribution (the
+#    reframe of plan §12's risk register), this needs 8 seeds like main_reduced: a
+#    signed-rank test over 5 pairs floors at p = 0.0625 and cannot clear alpha = 0.05.
+#    That is 64 cells / ~13 GPU-h. `make tables` prints the requirement for whatever
+#    family the table actually contains; believe it over this comment.
+#
+# Cost: 4 x 2 x 5 = 40 cells x 100 rounds = 4,000 rounds, ~8 GPU-h at 7.5s/round.
+#
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_reduced.yaml
+
+base_overrides:
+  output-dir: results/fl/robustness
+  # K=10 and 1 local epoch: matches main_reduced.yaml exactly, so its rows are a valid
+  # unattacked reference for these.
+  num-clients: 10
+  local-epochs: 1
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  regime: dirichlet
+  alpha: 0.3
+
+strategies:
+  - name: fedavg
+    file: configs/strategy/fedavg.yaml
+  - name: krum
+    # `num-malicious-nodes` is deliberately NOT set: the factory derives Krum's f from
+    # this cell's own `attack-fraction`, via the same `attacks.malicious_ids` the clients
+    # use, so the number Krum assumes and the number that actually lie cannot drift.
+    overrides: {strategy-name: krum}
+  - name: trimmed_mean
+    file: configs/strategy/trimmed_mean.yaml
+  - name: fedaco
+    file: configs/strategy/fedaco.yaml
+
+partitions:
+  # `attack: none` is pyproject's default, so this arm resolves to the default variant --
+  # which is what `add_deltas` falls back to when no within-variant baseline exists.
+  - name: clean
+    overrides: {attack: none, attack-fraction: 0.0}
+  - name: label_flip_30pct
+    overrides: {attack: label_flip, attack-fraction: 0.30}
+
+seeds: [0, 1, 2, 3, 4]

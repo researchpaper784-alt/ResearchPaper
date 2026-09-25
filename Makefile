@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro fitness-repro clean main-reduced main-reduced-plan preflight-configs verify-phase9
+.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro fitness-repro clean main-reduced main-reduced-plan preflight-configs verify-phase9 c-reduced-plan r1-reduced r2-reduced a2-reduced c-all
 
 # Interpreter paths, overridable. The default is the local `uv` venv from `make setup`
 # (CLAUDE.md), but Colab and Kaggle install into the system Python and have no .venv at
@@ -239,6 +239,27 @@ FIXTURE ?= /tmp/fedswarm_fixture
 CONFIGS ?= configs/experiment/robustness_r*.yaml configs/experiment/ablation_a[0-9].yaml
 preflight-configs:
 	$(PY) scripts/preflight_sweep_configs.py --fixture $(FIXTURE) --configs $(CONFIGS)
+
+# Person C's 9-day set (2026-09-25). The full R1/R2/A2 configs are 240 cells and
+# 100-200 GPU-h; these three are 110 cells / ~23 GPU-h and each names its cuts in its
+# own header. R1-reduced carries the `clean` arm that R2-reduced's deltas are measured
+# against, so run r1-reduced before r2-reduced and do not trim it further.
+c-reduced-plan:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_reduced.yaml --dry-run
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_reduced.yaml --dry-run
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/ablation_a2_reduced.yaml --dry-run
+
+r1-reduced:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_reduced.yaml $(GPUS_ARG)
+
+r2-reduced:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_reduced.yaml $(GPUS_ARG)
+
+a2-reduced:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/ablation_a2_reduced.yaml $(GPUS_ARG)
+
+# Everything C runs in the 9-day plan, in dependency order: 254 cells, ~53 GPU-h.
+c-all: main-reduced r1-reduced r2-reduced a2-reduced
 
 # Plan §9.3's acceptance criterion: every figure and table regenerates from results/ with
 # no manual steps, byte-for-byte identically on a second pass. Nothing checked this until
