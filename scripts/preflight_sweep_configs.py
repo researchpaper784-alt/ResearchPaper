@@ -106,22 +106,10 @@ def arms(path: Path) -> list[tuple[str, dict]]:
     return out
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--fixture", required=True, help="dir holding manifest.csv and cache/")
-    parser.add_argument("--configs", nargs="+", required=True)
-    parser.add_argument("--out", default=None, help="scratch dir for results (default: temp)")
-    parser.add_argument("--timeout", type=int, default=420, help="seconds per arm")
-    parser.add_argument("--force", action="store_true",
-                        help="re-run arms that already have a result")
-    args = parser.parse_args()
-
-    fixture = Path(args.fixture)
-    out = Path(args.out) if args.out else Path("/tmp/preflight-sweeps")
-    out.mkdir(parents=True, exist_ok=True)
-
-    paths = []
-    for pattern in args.configs:
+def resolve_config_paths(patterns: list[str]) -> list[Path]:
+    """Expand `--configs` into an ordered, deduplicated list of existing config files."""
+    paths: list[Path] = []
+    for pattern in patterns:
         # Any glob metacharacter, not just `*`. Checking for `*` alone silently treated
         # `configs/experiment/ablation_a[0-9].yaml` as a literal filename and died on
         # FileNotFoundError after 36 arms had already passed -- and a character class is the
@@ -138,6 +126,31 @@ def main() -> int:
             if not path.exists():
                 raise SystemExit(f"no such config: {path}")
             paths.append(path)
+
+    # Dedupe, order-preserving. A caller who names a config explicitly and then also matches
+    # it with a glob -- `robustness_r1_reduced.yaml ... robustness_r*.yaml`, which is the
+    # natural way to say "these two first, then the rest" -- had it walked twice. The second
+    # pass is correctly skipped by resume, but every skip counts toward `passed`, so the
+    # headline read "147 arms ran" for 137 distinct arms. An inflated pass count is the same
+    # kind of untrue-but-green number this script exists to catch.
+    return list(dict.fromkeys(paths))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--fixture", required=True, help="dir holding manifest.csv and cache/")
+    parser.add_argument("--configs", nargs="+", required=True)
+    parser.add_argument("--out", default=None, help="scratch dir for results (default: temp)")
+    parser.add_argument("--timeout", type=int, default=420, help="seconds per arm")
+    parser.add_argument("--force", action="store_true",
+                        help="re-run arms that already have a result")
+    args = parser.parse_args()
+
+    fixture = Path(args.fixture)
+    out = Path(args.out) if args.out else Path("/tmp/preflight-sweeps")
+    out.mkdir(parents=True, exist_ok=True)
+
+    paths = resolve_config_paths(args.configs)
 
     if shutil.which("flwr") is None:
         raise SystemExit(

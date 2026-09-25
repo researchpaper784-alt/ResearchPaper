@@ -2725,3 +2725,38 @@ that runs, passes, and means nothing.** The count is now eleven instances. What 
 that one of them was introduced by me yesterday and caught today only because an unrelated
 config edit happened to expose it -- a resume that silently accepts stale work fails in exactly
 the direction that looks like success.
+
+### The 137-arm result: every arm of every sweep in the project executes
+
+    137 arms ran, 0 failed
+
+    robustness_r1_reduced      5    ablation_a1        6    ablation_a6      28
+    robustness_r2_reduced      5    ablation_a2        6    ablation_a7       5
+    ablation_a2_reduced        4    ablation_a3        3    ablation_a8       3
+    robustness_r1_label_flip   6    ablation_a4        6    ablation_a9       5
+    robustness_r2_update       9    ablation_a5        7    ablation_all      6
+    robustness_r3_stragglers   4    robustness        15
+    robustness_r4_dp_noise     5
+    robustness_r5_scaling      4
+    robustness_r6_cold_start   5
+
+41 of those 137 had never run before today, because they are the partitions the old
+`parts[0]` rule skipped. The newly covered ones that matter: `robustness_r2_update`'s
+`sign_flip_10/20/30pct` (the norm-ratio heuristic's second failure mode), R4's higher DP
+sigmas, R3's larger straggler fractions, and the non-first regimes of `robustness.yaml`,
+`ablation_all` and every A-config.
+
+**A third reporting bug, found in this run's own output.** The summary printed "147 arms ran"
+against 137 distinct arms. `robustness_r1_reduced` and `robustness_r2_reduced` were named
+explicitly *and* matched again by the `robustness_r*.yaml` glob later in the same argument
+list -- the natural way to say "these two first, then the rest". The second walk was
+correctly skipped by resume, but skips count toward `passed`, so the headline overstated
+coverage by ten. Path resolution is now an order-preserving dedupe in its own tested
+function. A pass count that overstates coverage is this script's own failure mode, which
+makes it the third instance today of the same shape.
+
+**What this does and does not establish**, restated because the number is easy to misread:
+2 rounds, K=6, image-size 32, synthetic fixture. It says every declared arm's strategy,
+attack, cold-start, persistence and aggregation path executes with real Flower messages. It
+says nothing about whether any number means anything. It is ~100 minutes of CPU standing in
+front of ~70 GPU-hours.

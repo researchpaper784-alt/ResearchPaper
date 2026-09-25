@@ -152,3 +152,27 @@ def test_every_arm_of_a_config_gets_a_distinct_resume_key(preflight) -> None:
                 f"{name}: arms {keys.get(key)!r} and {label!r} share resume key {key}"
             )
             keys[key] = label
+
+
+def test_a_config_named_twice_is_walked_once(preflight) -> None:
+    """Naming a config explicitly and then also matching it with a glob is the natural way
+    to say "these first, then the rest". Walked twice, the second pass is skipped by resume
+    -- but skips count toward `passed`, so the summary read "147 arms ran" for 137 distinct
+    arms. A pass count that overstates coverage is this script's own failure mode."""
+    overlapping = [
+        "configs/experiment/robustness_r1_reduced.yaml",
+        "configs/experiment/robustness_r2_reduced.yaml",
+        "configs/experiment/robustness_r*.yaml",
+    ]
+    paths = preflight.resolve_config_paths(overlapping)
+    assert len(paths) == len(set(paths)), "the same config is walked more than once"
+    # And the explicitly named ones still come first, which is the point of naming them.
+    assert paths[0].name == "robustness_r1_reduced.yaml"
+    assert paths[1].name == "robustness_r2_reduced.yaml"
+
+
+def test_resolve_config_paths_refuses_a_pattern_matching_nothing(preflight) -> None:
+    with pytest.raises(SystemExit):
+        preflight.resolve_config_paths(["configs/experiment/no_such_thing_*.yaml"])
+    with pytest.raises(SystemExit):
+        preflight.resolve_config_paths(["configs/experiment/no_such_thing.yaml"])
