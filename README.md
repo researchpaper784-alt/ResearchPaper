@@ -1,5 +1,10 @@
 # FedSwarm
 
+> ### 👋 New to this project? Read [`HANDOVER.md`](HANDOVER.md) first.
+> It covers current status, the three decisions already taken and how to reverse them,
+> exactly what to run in what order, and the landmines that have each already cost
+> someone a day.
+
 **FedSwarm: Adaptive Aggregation Optimization in Federated Learning using Swarm Intelligence for Brain Tumor Diagnosis**
 
 > Renamed from the original working title "FedACO" to avoid a naming collision with a
