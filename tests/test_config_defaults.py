@@ -294,3 +294,66 @@ def test_no_sweep_config_silently_inherits_the_smoke_round_count() -> None:
     assert [m for m in missing if m != "smoke.yaml"] == [], (
         f"configs that would run {smoke_rounds} rounds per cell: {missing}"
     )
+
+
+# --------------------------------------------------------------------------------------
+# The reduced main sweep (2026-09-25). `main_reduced.yaml` exists because main.yaml is
+# 120-240 GPU-h and the project has ~100. Trimming a sweep is legitimate; trimming it
+# below the point where its headline claim is *arithmetically* obtainable is not, and the
+# difference is invisible in a result file -- every cell says `completed` either way.
+
+
+def _sweep_spec(name: str) -> dict:
+    return yaml.safe_load((ROOT / "configs/experiment" / name).read_text()) or {}
+
+
+@pytest.mark.parametrize("name", ["main.yaml", "main_reduced.yaml"])
+def test_headline_sweeps_keep_the_eight_seed_significance_floor(name: str) -> None:
+    """The signed-rank test's p-value floor is set by the pair count alone: 5 seeds floors
+    at 0.0625 and cannot clear alpha=0.05 under any data. Both main sweeps print the
+    paper's headline comparison, so both need 8."""
+    seeds = _sweep_spec(name)["seeds"]
+    assert len(seeds) >= 8, (
+        f"{name} has {len(seeds)} seeds; the headline comparison needs 8 to be able to "
+        "reach p < 0.05 at all (5 seeds floors at p = 0.0625)"
+    )
+
+
+@pytest.mark.parametrize("name", ["main.yaml", "main_reduced.yaml"])
+def test_headline_sweeps_keep_fedavg_and_fedaco(name: str) -> None:
+    """FedAvg is the reference every claim is stated relative to, and `add_deltas` has
+    nothing to subtract without it -- the delta column silently renders as "—", which is
+    also what a cell with no paired seeds renders as. FedACO is the method."""
+    strategies = _sweep_spec(name)["strategies"]
+    names = {s if isinstance(s, str) else s["name"] for s in strategies}
+    assert "fedavg" in names, f"{name} dropped the reference strategy"
+    assert "fedaco" in names, f"{name} dropped the method under test"
+
+
+def test_the_reduced_sweep_is_actually_cheaper_than_the_one_it_replaces() -> None:
+    """A "reduced" config that is not smaller is a naming trap: someone runs it believing
+    they bought headroom. Compares cells x rounds, which is what a GPU-hour buys."""
+    def cost(name: str) -> int:
+        spec = _sweep_spec(name)
+        cells = len(spec["strategies"]) * len(spec["regimes"]) * len(spec["seeds"])
+        return cells * spec["common"]["num-rounds"]
+
+    full, reduced = cost("main.yaml"), cost("main_reduced.yaml")
+    assert reduced < full / 2, (
+        f"main_reduced is {reduced:,} rounds against main's {full:,} -- not the order-of-"
+        "magnitude saving the 9-day budget needs"
+    )
+
+
+def test_the_reduced_sweep_keeps_a_monotone_heterogeneity_ladder() -> None:
+    """Plan figure 9 (gain vs measured Jensen-Shannon heterogeneity) and claim C1 both
+    need more than one point on the heterogeneity axis. A trim that kept three regimes at
+    the same heterogeneity would still be three regimes, and would carry neither."""
+    regimes = _sweep_spec("main_reduced.yaml")["regimes"]
+    kinds = [r["regime"] for r in regimes]
+    assert "iid" in kinds, "no low-heterogeneity control"
+    dirichlet_alphas = sorted(r["alpha"] for r in regimes if r["regime"] == "dirichlet")
+    assert len(dirichlet_alphas) >= 2, (
+        f"only {len(dirichlet_alphas)} dirichlet alpha(s): {dirichlet_alphas} -- figure 9 "
+        "needs a spread of measured heterogeneity, not a single point plus iid"
+    )

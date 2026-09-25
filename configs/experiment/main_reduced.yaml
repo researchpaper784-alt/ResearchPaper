@@ -1,0 +1,79 @@
+# Phase 6 -- the main sweep, trimmed to a 9-day / ~100 GPU-hour budget.
+#
+# `main.yaml` is 576 cells and 120-240 GPU-h extrapolated from the one measured GPU
+# number this project has (7.5s/round at K=10 on a T4, 2026-09-19). That is 5-9 weeks
+# at Kaggle's ~30 GPU-h/week per account. This config is the same experiment at a size
+# that fits ~30 GPU-h, and it names every cut so the paper can state them rather than
+# have a reviewer find them.
+#
+# THREE CUTS, in the order main.yaml's own header says to make them:
+#
+# 1. K=20 -> K=10. The largest single saving and the only one backed by a measurement:
+#    7.5s/round was measured at K=10, so this config is the one size this project can
+#    quote rather than extrapolate. It costs the "20 clients" setting, not a claim --
+#    R5 (client-count scaling, K in {10,20,50,100}) is where client count is a variable,
+#    and it carries the K=20 point the main table no longer has.
+#
+# 2. Six regimes -> three. `iid`, `dirichlet_0.3`, `dirichlet_0.1` are kept because they
+#    form a monotone heterogeneity ladder (measured JS divergence rises across them),
+#    which is exactly what plan figure 9 (gain vs measured heterogeneity) needs and what
+#    claim C1 is about. Dropped: `pathological_2`, `quantity_skew`, `source_shift`.
+#    ⚠️ `quantity_skew` is the regime that attacks FedAvg's n_k weighting directly -- the
+#    thing FedSwarm replaces -- so it is the most costly of the three to drop and the
+#    first to add back if hours free up.
+#
+# 3. Twelve strategies -> six. Kept: `fedavg` (the reference every claim is relative to,
+#    never droppable), `fedprox` (the standard heterogeneity baseline), `krum` and
+#    `trimmed-mean` (the Byzantine-robust pair R1/R2 compare against, so they are needed
+#    twice over), `fedlaw` (the adaptive-aggregation-weight competitor -- the closest
+#    prior work, so dropping it would leave the contribution uncontested), `fedaco`.
+#    Dropped: fedadam, fedyogi, median, fednova, loss-based, scaffold.
+#
+# WHAT IS NOT CUT: 8 seeds. That is not a preference, it is the signed-rank test's
+# p-value floor. At 5 seeds the smallest two-sided p obtainable is 0.0625, so a 5-seed
+# sweep cannot produce a significant result at alpha=0.05 under any data whatsoever
+# (measured: Cohen's d = 7.9 reported as p = 0.25). 8 seeds moves the floor to 0.0078.
+#
+# The comparison family this supports: FedACO vs FedAvg in each of 3 regimes = 3
+# comparisons, which 8 seeds clears after Holm-Bonferroni. Comparisons against the other
+# four baselines are reported descriptively, NOT as significance claims -- 6 strategies x
+# 3 regimes would be a 15-comparison family and 8 seeds does not clear it. `make tables`
+# prints the requirement for whatever family the table actually contains; believe it over
+# this comment.
+#
+# Cost: 6 x 3 x 8 = 144 cells x 100 rounds = 14,400 rounds. At the measured 7.5s/round
+# at K=10 that is ~30 GPU-h. Confirm with --dry-run on the GPU box before committing a
+# session; the CPU-measured basis printed here is not a GPU quote.
+
+name: main_reduced
+
+strategies:
+  - fedavg
+  - fedprox
+  - krum
+  - trimmed-mean
+  - fedlaw
+  - fedaco
+
+regimes:
+  - name: iid
+    regime: iid
+  - name: dirichlet_0.3
+    regime: dirichlet
+    alpha: 0.3
+  - name: dirichlet_0.1
+    regime: dirichlet
+    alpha: 0.1
+
+seeds: [0, 1, 2, 3, 4, 5, 6, 7]
+
+common:
+  num-clients: 10
+  num-rounds: 100
+  local-epochs: 1
+  local-lr: 0.01
+  local-batch-size: 32
+  model-name: simple_cnn
+  model-norm: groupnorm
+  image-size: 112
+  output-dir: results/fl/main

@@ -1,4 +1,4 @@
-.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro fitness-repro clean
+.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro fitness-repro clean main-reduced main-reduced-plan preflight-configs verify-phase9
 
 # Interpreter paths, overridable. The default is the local `uv` venv from `make setup`
 # (CLAUDE.md), but Colab and Kaggle install into the system Python and have no .venv at
@@ -117,6 +117,14 @@ main-plan:
 
 main:
 	$(PY) scripts/run_sweep.py --config configs/experiment/main.yaml $(GPUS_ARG)
+
+# The 9-day / ~100 GPU-h budget version of the main sweep: K=10, 3 regimes, 6
+# strategies, 8 seeds = 144 cells / ~30 GPU-h. Every cut is named in the config header.
+main-reduced-plan:
+	$(PY) scripts/run_sweep.py --config configs/experiment/main_reduced.yaml --dry-run
+
+main-reduced:
+	$(PY) scripts/run_sweep.py --config configs/experiment/main_reduced.yaml $(GPUS_ARG)
 
 main-client-scale:
 	$(PY) scripts/run_sweep_granular.py --config configs/experiment/main_client_scale.yaml $(GPUS_ARG)
