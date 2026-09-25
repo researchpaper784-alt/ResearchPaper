@@ -2760,3 +2760,41 @@ makes it the third instance today of the same shape.
 attack, cold-start, persistence and aggregation path executes with real Flower messages. It
 says nothing about whether any number means anything. It is ~100 minutes of CPU standing in
 front of ~70 GPU-hours.
+
+### The 9-day set itself: 18 arms, 0 failed
+
+The 137-arm walk covered the full-size configs. The six the 9-day plan actually runs had
+verified *cell counts* and nothing else -- `main_reduced`, `gate_fitness` and
+`ablation_a1_reduced` had never executed at all.
+
+    18 arms ran, 0 failed
+
+    gate_fitness           4    default, gamma_entropy_0.45, dispersion_aggregate, fedavg
+    ablation_a1_reduced    6    aco, random, coordinate_grid, pso, ga, + dirichlet_0.3
+    main_reduced           8    fedavg, fedprox, krum, trimmed-mean, fedlaw, fedaco, + 2 regimes
+
+**Both candidate fitness fixes execute**, which is the result worth having here: `gamma_3 =
+0.45` and `aco-dispersion-reference: aggregate` are the two things `gate_fitness.yaml` exists
+to compare, and a config error in either would have been found on a Kaggle GPU with the gate's
+whole purpose being to be cheap. `main_reduced`'s `fedlaw` arm also runs -- it is the closest
+prior work and the one baseline whose absence would leave the contribution uncontested.
+
+155 arms across every sweep config in the project, 0 failed. Still 2 rounds, K=6,
+image-size 32, synthetic fixture: the code paths run, the numbers mean nothing.
+
+### Where this leaves the project
+
+Everything that can be built without a GPU or the real images is built. What remains:
+
+| | work | GPU-h | owner |
+|---|---|---|---|
+| 1 | **The framing decision** -- diagnostic paper or reframe | 0 | the team |
+| 2 | **The dataset-variant decision** (§"DECISION NEEDED", open since 2026-09-14) | 0 | the team |
+| 3 | `gate-fitness`, then `a1-reduced` | 17 | B |
+| 4 | `main-reduced`, `r1-reduced`, `r2-reduced`, `a2-reduced` | 53 | C |
+| 5 | Phase 9 on the first real results | 0 | A |
+| 6 | **The paper** -- `paper/` holds only ALGORITHM.md; 4 of §13's 8 sections have no file | 0 | unassigned |
+
+Items 1, 2 and 6 need no compute and none of them is assigned. Item 6 is the one to worry
+about: 70 GPU-hours is a config change, and eight pages with two related-work sections is
+nine days of somebody's attention.
