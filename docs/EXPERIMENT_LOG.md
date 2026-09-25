@@ -2798,3 +2798,72 @@ Everything that can be built without a GPU or the real images is built. What rem
 Items 1, 2 and 6 need no compute and none of them is assigned. Item 6 is the one to worry
 about: 70 GPU-hours is a config change, and eight pages with two related-work sections is
 nine days of somebody's attention.
+
+## 2026-09-25 (later) -- the paper, and the dataset question closed by its own diagnostic
+
+`paper/` held `ALGORITHM.md` and nothing else; four of plan §13's eight sections had no file and
+no owner. The paper, not the 70 GPU-hours, is the binding constraint on a 9-day deadline -- a
+config change buys the compute, and eight pages with two related-work sections does not.
+
+Written: `01_INTRODUCTION`, `02_RELATED_WORK`, `04_EXPERIMENTAL_SETUP`, `06_LIMITATIONS`,
+`07_REPRODUCIBILITY`, plus `00_ABSTRACT` and `05_RESULTS` as scaffolds that name the command
+filling each slot, and a `README` mapping every section and figure to its producer. §4, §6 and
+§7 are framing-independent by construction, so they stand whichever way A1 goes.
+
+**Citations are the one thing that could not be finished.** The plan names FedAAW, FedLAW,
+FedNolowe and DaWa with no bibliographic detail and this container has no literature access.
+Eighteen `[CITE: ...]` markers say exactly what each one needs. A test asserts they still exist,
+because silently deleting one ships an unsourced claim about prior work -- and inventing an
+author or venue is the fastest possible desk reject.
+
+### The dataset-variant question, open since 2026-09-14, closed by the diagnostic it asked for
+
+That entry asked for "per-class redundancy rate (images per pseudo-patient, broken down by
+class)" as the test of whether the archive's perfect balance was manufactured. Computed:
+
+| class | images | pseudo-patients | images/pp | redundancy | de-dup share |
+|---|---|---|---|---|---|
+| glioma | 1,800 | 1,476 | 1.220 | 18.0% | 30.87% |
+| meningioma | 1,800 | 1,403 | 1.283 | 22.1% | 29.34% |
+| pituitary | 1,800 | 1,326 | 1.357 | 26.3% | 27.73% |
+| **notumor** | 1,800 | **577** | **3.120** | **67.9%** | **12.07%** |
+
+Imbalance ratio **1.00 raw, 2.56 de-duplicated**. `notumor` carries 2.3-2.6x the redundancy of
+every tumour class -- not a gradient but one class holding nearly all of it.
+
+**This closes the question in the useful direction.** The concern was that plan §6.3 justifies
+macro-F1 because "the dataset is class-imbalanced", which is false of the archive. It is **true
+of the data actually trained on**: 2.56:1 with `notumor` at 12.07%. The metric was never the
+problem; the stated reason was attached to the archive instead of to the de-duplicated split.
+Decision recorded as option (a) -- keep this variant, document it precisely, restate the reason.
+Options (b) and (c) need Kaggle credentials this environment lacks against a blocked host, and
+would cost the entire compute budget a second time.
+
+`docs/IMPLEMENTATION_PLAN.md:559` now carries the correction inline, because a spec sentence
+known to be false about the data in use is exactly the stale source-of-truth this project keeps
+getting caught by.
+
+### A prose section cannot be generated, so it gets a test instead
+
+Plan §9.3 forbids hand-typing a number into the paper, and generated tables obey it. §4.1-4.3
+are prose quoting measured counts from `manifest.csv` and `leakage_report.json`, and nothing
+connected the two -- re-running the audit at a different pHash threshold would leave the paper
+asserting the old figures with no test failing.
+
+`tests/test_paper_numbers.py` re-derives every quoted dataset number from its source and asserts
+the paper still states it, including the derived 28.2% leakage figure and the *comparative*
+claims (notumor duplicated at >2x every tumour class; the de-duplicated data still materially
+imbalanced) rather than only the values -- a value check passes while the argument built on it
+stops holding. It also asserts `05_RESULTS.md` contains no four-decimal metric value, which is
+the rule the whole file exists to protect.
+
+### The framing decision, taken rather than left open
+
+Recorded in full in `docs/OPEN_QUESTIONS.md`. The paper is written under framing A (the
+degenerate optimum and the equal-budget loss as the findings) because three screens say C2 fails
+and the work could not proceed without a choice. The alternative framing is written out at the
+end of `paper/01_INTRODUCTION.md`, so if A1 reverses the result the switch is deleting one
+section and pasting another. **It is a methodological call the team can overturn**; it was taken
+because the writing was blocked on it, not because it belongs to the agent.
+
+724 tests pass, ruff clean.

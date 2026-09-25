@@ -91,7 +91,7 @@ Kaggle API before downloading):
 [Br35H](https://www.kaggle.com/datasets/ahmedhamada0/brain-tumor-detection),
 [Figshare](https://figshare.com/articles/dataset/brain_tumor_dataset/1512427).
 
-## ⚠️ Dataset variant is class-balanced, not the canonical release — DECISION NEEDED
+## Dataset variant is class-balanced, not the canonical release — RESOLVED 2026-09-25 (option a)
 
 The archive obtained on 2026-09-14 is **perfectly class-balanced**: exactly 1400 images per
 class in `Training/` and 400 per class in `Testing/` (7,200 total). The widely-cited
@@ -123,6 +123,51 @@ before the main sweep (Phase 6) commits GPU-weeks to one variant.
 **Next diagnostic to run:** per-class redundancy rate (images per pseudo-patient, broken
 down by class). If one class is markedly more redundant, that is evidence of
 augmentation-based balancing and pushes toward option (b) or (c).
+
+### RESOLUTION 2026-09-25 — option (a), and the macro-F1 rationale survives with a corrected reason
+
+The diagnostic this entry asked for ("per-class redundancy rate, images per pseudo-patient,
+broken down by class") is now computed over the full manifest:
+
+| class | images | pseudo-patients | images/pp | redundancy | raw share | de-dup share |
+|---|---|---|---|---|---|---|
+| glioma | 1,800 | 1,476 | 1.220 | 18.0% | 25.00% | 30.87% |
+| meningioma | 1,800 | 1,403 | 1.283 | 22.1% | 25.00% | 29.34% |
+| pituitary | 1,800 | 1,326 | 1.357 | 26.3% | 25.00% | 27.73% |
+| **notumor** | 1,800 | **577** | **3.120** | **67.9%** | 25.00% | **12.07%** |
+
+Overall redundancy 34.0%. Imbalance ratio: **1.00 raw, 2.56 after de-duplication.**
+
+`notumor` is duplicated at 2.3-2.6x the rate of every tumour class. That is not a gradient, it
+is one class carrying nearly all the redundancy -- the signature the 2026-09-14 entry named as
+evidence of augmentation-based balancing, now quantified.
+
+**Decision: option (a) -- keep this variant, document it precisely, restate the macro-F1
+rationale.** Three reasons, in order of weight:
+
+1. **The rationale does not need rescuing, it needs restating.** This entry's concern was that
+   §6.3 justifies macro-F1 because "the dataset is class-imbalanced", which is false of the
+   archive. It is **true of the data actually trained on**: after pseudo-patient de-duplication
+   the distribution is 2.56:1 with `notumor` at 12.07%. The paper states it in that form
+   (`paper/04_EXPERIMENTAL_SETUP.md` §4.1). The metric choice was never wrong; the stated reason
+   was attached to the wrong object.
+2. **Option (b)/(c) are not available.** Fetching the canonical release needs Kaggle
+   credentials this environment does not have, and `www.kaggle.com` is blocked by the egress
+   proxy. Under the 7-9 day deadline it is also not affordable: re-running the audit, the split,
+   the centralized ceiling and every sweep on a second dataset is the whole compute budget again.
+3. **The finding is worth more than the comparability it costs.** "The published balance of this
+   widely used archive is manufactured by duplicating one class, and 28.2% of its images leak
+   across its own published train/test split" is a contribution to the data section. Papers
+   reporting on this variant without de-duplication are reporting on 34%-redundant data with
+   two-thirds of the redundancy in a single class.
+
+**What this costs, recorded rather than buried:** numbers here are not directly comparable to
+published results on the canonical release (~7,023 images). The paper says so in §4.1 and §6.4.
+The pipeline is dataset-agnostic, so running the canonical release later is a config change --
+it is listed as the first thing to add if the deadline moves.
+
+Pinned by `tests/test_paper_numbers.py`, which re-derives every one of these numbers from
+`manifest.csv` and `leakage_report.json` and fails if the paper stops matching them.
 
 ### Diagnostic result (2026-09-14) — the balance is manufactured by duplicating `notumor`
 
@@ -1594,3 +1639,46 @@ exactly this decision.
 Confirming it on the real gate costs A1's 80 cells (17-33 GPU-h). Everything above is the local
 fixture, which has reproduced the real runs' fitness signature on every axis checked but is
 still a fixture.
+
+## The reframe decision — TAKEN 2026-09-25, framing A, and reversible by one experiment
+
+Plan §11's week-5 gate says: "If A1 shows ACO ties random search at equal budget, stop and
+reframe before investing weeks 6-12 in a claim that won't survive review." §12 rates it
+Medium-High likelihood and **fatal to the framing**.
+
+**Status of the evidence.** Three independent local screens on the heterogeneous fixture, at
+both the drifted and the documented defaults, and with a `q0` sweep down to 0.0:
+
+| method | gain over the FedAvg point |
+|---|---|
+| coordinate_grid | +0.0501 |
+| pso | +0.0484 |
+| ga | +0.0312 |
+| random | +0.0304 |
+| **aco** | **+0.0013 → +0.0066** after a config-scoping fix |
+
+ACO beat every control on **0 of 3 seeds**. The plan's stated failure condition was a *tie*;
+this is a loss by 5.9x to the weakest control. The mechanism is identified and is not about ant
+colony optimisation (greedy anchoring to the FedAvg point; see the 2026-09-24 log entry).
+
+**Decision, taken because the work could not proceed without one.** The paper is written under
+**framing A**: the degenerate fitness optimum and the equal-budget result are the findings, and
+the reusable contributions are the `corner_margin` diagnostic, its closed-form penalty
+threshold, the equal-budget protocol, and the de-duplicated split. `paper/01_INTRODUCTION.md`
+§1.3 is written this way.
+
+**This is not a claim that A1 will confirm it, and it is cheap to reverse.** The alternative
+framing is written out in full at the end of `paper/01_INTRODUCTION.md`: if A1 separates ACO
+from all four controls on real data at 8 seeds, §1.3 is deleted and replaced by that block, the
+degeneracy becomes a method subsection rather than a finding, and §5.2 becomes an ablation
+rather than the result. Nothing else in the paper changes -- §4 (setup), §6 (limitations) and §7
+(reproducibility) are framing-independent by construction.
+
+**Why take it now rather than wait for A1.** A1 is 17 GPU-h and cannot run in this environment.
+Waiting leaves the paper unwritten, and the paper is the binding constraint on a 9-day deadline
+far more than 70 GPU-hours is. Writing under the framing the evidence supports, with the switch
+prepared, costs one section if the evidence turns out wrong and saves nine days if it does not.
+
+**⚠️ This is a methodological call and the team can overturn it.** It was taken by the agent
+because the work was blocked on it, not because it is the agent's to make. Everything needed to
+reverse it is in one file.
