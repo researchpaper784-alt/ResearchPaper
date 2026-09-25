@@ -143,7 +143,7 @@ is one class carrying nearly all the redundancy -- the signature the 2026-09-14 
 evidence of augmentation-based balancing, now quantified.
 
 **Decision: option (a) -- keep this variant, document it precisely, restate the macro-F1
-rationale.** Three reasons, in order of weight:
+rationale. CONFIRMED by the project owner 2026-09-25.** Three reasons, in order of weight:
 
 1. **The rationale does not need rescuing, it needs restating.** This entry's concern was that
    §6.3 justifies macro-F1 because "the dataset is class-imbalanced", which is false of the
@@ -1679,6 +1679,8 @@ Waiting leaves the paper unwritten, and the paper is the binding constraint on a
 far more than 70 GPU-hours is. Writing under the framing the evidence supports, with the switch
 prepared, costs one section if the evidence turns out wrong and saves nine days if it does not.
 
-**⚠️ This is a methodological call and the team can overturn it.** It was taken by the agent
-because the work was blocked on it, not because it is the agent's to make. Everything needed to
-reverse it is in one file.
+**CONFIRMED by the project owner, 2026-09-25.** This is no longer a provisional agent call: the
+person now owning the project reviewed the evidence and chose framing A. The reversal path stays
+documented (the alternative framing at the end of `paper/01_INTRODUCTION.md`) because A1 on real
+data can still overturn the *evidence* — but the decision itself is made, and §1.3 should be
+written as the paper's actual position rather than hedged.

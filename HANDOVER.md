@@ -68,16 +68,16 @@ memory, and you must not fill the remaining `[CITE]` markers from memory either.
 **Therefore A2 is the most important experiment in the project.** It is 30 cells, ~6 GPU-hours,
 and it was written as a routine ablation before anyone realised it carries the contribution.
 
-## 3. Three decisions already taken — each reversible, each yours to overturn
+## 3. Three decisions — all confirmed by the project owner on 2026-09-25
 
-| decision | what was chosen | where, and how to reverse |
+| decision | chosen | if the evidence changes |
 |---|---|---|
-| **Framing** | Framing A: the degenerate optimum and the equal-budget loss are the findings | `docs/OPEN_QUESTIONS.md` "The reframe decision". The alternative is written out in full at the end of `paper/01_INTRODUCTION.md` — if A1 reverses the result, delete §1.3 and paste that block. Nothing else in the paper changes. |
-| **Dataset variant** | Option (a): keep this archive, document it precisely | `docs/OPEN_QUESTIONS.md` "Dataset variant … RESOLVED". Reversing means fetching the canonical release, which needs Kaggle credentials and costs the compute budget twice. |
-| **Scope** | 342 cells / ~70 GPU-h instead of 351–701 | every `*_reduced.yaml` header names its own cuts. The full-size configs are untouched and still runnable. |
+| **Framing** | **A** — the degenerate optimum and the equal-budget loss are the findings | The alternative framing is written out in full at the end of `paper/01_INTRODUCTION.md`. If A1 on real data reverses the result, delete §1.3 and paste that block. Nothing else in the paper changes — §4, §6 and §7 are framing-independent by construction. |
+| **Dataset variant** | **(a)** — keep this archive, document it precisely, restate the macro-F1 rationale against the de-duplicated distribution | `docs/OPEN_QUESTIONS.md` "Dataset variant … RESOLVED". Reversing means fetching the canonical release: Kaggle credentials, and the compute budget spent twice. |
+| **Scope** | **342 cells / ~70 GPU-h** instead of 351–701 | Every `*_reduced.yaml` header names its own cuts. The full-size configs are untouched and still runnable if the deadline moves. |
 
-These were taken by an agent because work was blocked on them, **not** because they belong to
-an agent. If you disagree with any, the reversal path is written down.
+These are settled. Write the paper as though they are true, not hedged. What can still change is
+the *evidence* (A1, A2), not the decisions.
 
 ## 4. What to run, in order
 
@@ -91,11 +91,11 @@ make test                       # 724 tests, ~50s
 make gate-fitness GPUS=0.1      # 8 cells, ~15 min. Decides WHICH fitness fix to use.
 make a1-reduced   GPUS=0.1      # 80 cells, ~17 GPU-h. The go/no-go on the framing.
 
-# Person C — 254 cells, ~53 GPU-h. r1 MUST precede r2 (see §6).
+# Person C — 254 cells, ~53 GPU-h, in DECISION order. r1 MUST precede r2 (see §6).
+make a2-reduced   GPUS=0.1      # 30 cells,  ~6 GPU-h  <-- FIRST: carries the contribution
 make main-reduced GPUS=0.1      # 144 cells, ~30 GPU-h
-make r1-reduced   GPUS=0.1      # 40 cells, ~8 GPU-h
-make r2-reduced   GPUS=0.1      # 40 cells, ~8 GPU-h
-make a2-reduced   GPUS=0.1      # 30 cells, ~6 GPU-h  <-- carries the contribution
+make r1-reduced   GPUS=0.1      # 40 cells,  ~8 GPU-h
+make r2-reduced   GPUS=0.1      # 40 cells,  ~8 GPU-h
 
 # Person A — after any results exist
 make tables tables-ablation tables-robustness figures figures-data

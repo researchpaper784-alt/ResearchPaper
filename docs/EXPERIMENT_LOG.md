@@ -2930,3 +2930,28 @@ dataset's originating publication, and the client-drift analysis). The search ra
 may be filled from memory.
 
 724 tests pass, ruff clean.
+
+## 2026-09-25 (handover) -- the three decisions confirmed, and A2 moved to the front
+
+The project owner confirmed all three provisional decisions: **framing A**, **dataset option
+(a)**, and the **342-cell / ~70 GPU-h scope**. They are no longer agent calls pending review;
+`docs/OPEN_QUESTIONS.md` records both as CONFIRMED and the paper should be written as though they
+hold rather than hedged. What can still move is the evidence -- A1 and A2 -- not the decisions.
+
+**`make c-all` reordered so `a2-reduced` runs first.** This follows from the citation work rather
+than from preference. FedAWA (CVPR 2025), Adp-FL-PSO and FedPSO all optimise aggregation weights,
+and all three are stateless between rounds, so cross-round pheromone persistence is the only
+structural novelty left in the project. A2 -- persistence none / decayed / full -- is the only
+experiment that tests it, at 30 cells and ~6 GPU-h.
+
+Spending 30 GPU-h on `main_reduced`'s headline table before knowing whether the one remaining
+novelty exists is the wrong order. If A2 says persistence buys nothing, the paper's contribution
+reduces to the equal-budget comparison and the `corner_margin` diagnostic, and the main table
+becomes supporting evidence for a methods note rather than the centrepiece -- which changes what
+is worth running next.
+
+New order: `gate_fitness` (0.25 GPU-h, which fix) -> `a2_reduced` (6, is there a contribution)
+-> `a1_reduced` (17, is the framing right) -> `main_reduced` (30) -> `r1` (8) -> `r2` (8).
+The first three are 23 GPU-h and settle every open question the paper's structure depends on.
+
+724 tests pass, ruff clean.

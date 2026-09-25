@@ -270,8 +270,18 @@ r2-reduced:
 a2-reduced:
 	$(PY) scripts/run_sweep_granular.py --config configs/experiment/ablation_a2_reduced.yaml $(GPUS_ARG)
 
-# Everything C runs in the 9-day plan, in dependency order: 254 cells, ~53 GPU-h.
-c-all: main-reduced r1-reduced r2-reduced a2-reduced
+# Everything C runs in the 9-day plan, 254 cells / ~53 GPU-h, in DECISION order rather than
+# in the order the sweeps were written.
+#
+# a2-reduced runs FIRST, and that changed on 2026-09-25 when resolving the paper's citations
+# showed the novelty claim was already occupied: FedAWA (CVPR 2025), Adp-FL-PSO and FedPSO all
+# optimise aggregation weights, and all three are STATELESS between rounds. Cross-round
+# pheromone persistence is the only structural novelty left, and A2 -- none / decayed / full --
+# is the only experiment that tests it. 30 cells and ~6 GPU-h decide whether the paper has a
+# contribution at all, so they come before main_reduced's 30 GPU-h of headline table.
+#
+# r1-reduced still precedes r2-reduced: r2 has no unattacked arm and uses r1's `clean` arm.
+c-all: a2-reduced main-reduced r1-reduced r2-reduced
 
 # Plan §9.3's acceptance criterion: every figure and table regenerates from results/ with
 # no manual steps, byte-for-byte identically on a second pass. Nothing checked this until
