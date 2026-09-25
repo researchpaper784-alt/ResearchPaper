@@ -110,3 +110,45 @@ def test_the_probe_strategy_is_the_method_where_there_is_one(preflight) -> None:
     for label, cfg in extra:
         assert label.startswith("fedaco/"), f"{label} probes a partition without FedACO"
         assert cfg.get("strategy-name") == "fedaco", f"{label} resolved to {cfg.get('strategy-name')}"
+
+
+# --------------------------------------------------------------------------------------
+# The resume key. Added 2026-09-25 after the resume added the day before reported four
+# arms as "already ran" whose configs had changed underneath it.
+
+
+def test_the_resume_key_separates_arms_that_resolve_differently(preflight) -> None:
+    """Keyed on `config_stem + label` alone, reordering a config's partitions keeps every
+    strategy label identical -- so the arms come back "already ran" holding results
+    computed under the previous partition. Reordering `robustness_r1_reduced.yaml` to put
+    the attacked partition first did exactly that: 4/4 ok, label-flipping never executed.
+    """
+    from fedswarm.utils.results import make_run_id
+
+    arms = preflight.arms(CONFIGS / "robustness_r1_reduced.yaml")
+    attacked = next(cfg for label, cfg in arms if label == "fedavg")
+    clean = {**attacked, "attack": "none", "attack-fraction": 0.0}
+
+    fp = lambda cfg: make_run_id(cfg, 0, length=8).rsplit("_", 1)[0]  # noqa: E731
+    assert fp(attacked) != fp(clean), (
+        "the same strategy label under two partitions fingerprints identically, so resume "
+        "cannot tell them apart"
+    )
+
+
+def test_every_arm_of_a_config_gets_a_distinct_resume_key(preflight) -> None:
+    """Two arms sharing a key means one is handed the other's result -- and the arm that
+    never ran is counted as passed. `ablation_a6` is the case that matters: 27 arms, and
+    two of its axes deliberately share the same centre value."""
+    from fedswarm.utils.results import make_run_id
+
+    for name in ("ablation_a6.yaml", "robustness_r2_reduced.yaml",
+                 "robustness_r1_reduced.yaml", "robustness.yaml"):
+        keys = {}
+        for label, cfg in preflight.arms(CONFIGS / name):
+            fp = make_run_id(cfg, 0, length=8).rsplit("_", 1)[0]
+            key = f"{label.replace('/', '_')}__{fp}"
+            assert key not in keys, (
+                f"{name}: arms {keys.get(key)!r} and {label!r} share resume key {key}"
+            )
+            keys[key] = label

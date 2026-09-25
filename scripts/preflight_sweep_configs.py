@@ -34,6 +34,7 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 import yaml  # noqa: E402
 
 from fedswarm.sweep import build_run_config_arg, resolve_entry_overrides  # noqa: E402
+from fedswarm.utils.results import make_run_id  # noqa: E402
 
 # Cut to the bone, but not below what the conditions need. K=6 keeps every ceil-based subset
 # (malicious_ids, late_node_ids) at one client or more; min-train-nodes has to stay at or below
@@ -156,7 +157,20 @@ def main() -> int:
     for path in paths:
         print(f"\n=== {path.name} ===")
         for label, overrides in arms(path):
-            cell = out / f"{path.stem}__{label.replace('/', '_')}"
+            # The resume key includes a hash of the arm's RESOLVED config, not just its
+            # label. Keyed on the label alone (as it was until 2026-09-25) any change to
+            # what an arm resolves to is invisible to resume: reordering a config's
+            # partitions keeps every strategy label identical, so the arms come back
+            # "already ran" holding a result produced under the *previous* partition.
+            #
+            # That happened, to this script, on this repo, within an hour of the resume
+            # being added: `robustness_r1_reduced.yaml` was reordered to put the attacked
+            # partition first, and all four of its strategy arms reported "already ran"
+            # from results computed with `attack: none`. Label-flipping had never
+            # executed and the report said 4/4 ok -- the same shape as the September
+            # sweep bug where a control was handed a sibling's result file.
+            fingerprint = make_run_id(overrides, 0, length=8).rsplit("_", 1)[0]
+            cell = out / f"{path.stem}__{label.replace('/', '_')}__{fingerprint}"
             run_config = {
                 **overrides,
                 **SHRINK,
