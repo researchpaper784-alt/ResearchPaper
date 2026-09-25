@@ -75,11 +75,18 @@ strategies:
     file: configs/strategy/fedaco.yaml
 
 partitions:
-  # `attack: none` is pyproject's default, so this arm resolves to the default variant --
-  # which is what `add_deltas` falls back to when no within-variant baseline exists.
-  - name: clean
-    overrides: {attack: none, attack-fraction: 0.0}
+  # Attacked arm FIRST, deliberately. `scripts/preflight_sweep_configs.py` runs every
+  # strategy against `partitions[0]` and each remaining partition against one strategy, so
+  # this ordering preflights all four strategies *under attack* -- which is where the risk
+  # is, since Krum's `f` is derived from `attack-fraction` and a mis-derivation only shows
+  # up with attackers present. The clean arm is the default code path and is covered by
+  # main_reduced and the smoke config besides.
   - name: label_flip_30pct
     overrides: {attack: label_flip, attack-fraction: 0.30}
+  # `attack: none` is pyproject's default, so this arm resolves to the default variant --
+  # which is what `add_deltas` falls back to when no within-variant baseline exists. It is
+  # also `robustness_r2_reduced.yaml`'s only baseline; see that file's header.
+  - name: clean
+    overrides: {attack: none, attack-fraction: 0.0}
 
 seeds: [0, 1, 2, 3, 4]

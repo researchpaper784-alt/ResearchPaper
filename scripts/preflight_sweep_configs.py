@@ -59,23 +59,49 @@ def arms(path: Path) -> list[tuple[str, dict]]:
     base = {**(spec.get("common") or {}), **(spec.get("base_overrides") or {})}
     out = []
     parts = spec.get("partitions") or spec.get("regimes") or [{"name": "-"}]
-    for entry in spec.get("strategies") or []:
-        if isinstance(entry, str):
-            name, overrides = entry, {"strategy-name": entry}
-        else:
-            name, overrides = entry["name"], resolve_entry_overrides(entry, base_dir=REPO_ROOT)
-        # One partition and one variant per arm: the axes multiply, and the point is to touch
-        # every strategy/variant code path once, not to re-run the grid.
-        part = parts[0]
-        part_overrides = (
+
+    def part_overrides_of(part: object) -> dict:
+        return (
             resolve_entry_overrides(part, base_dir=REPO_ROOT)
             if isinstance(part, dict) and ("file" in part or "overrides" in part)
             else {k: v for k, v in (part or {}).items() if k != "name"}
         )
+
+    strategies = spec.get("strategies") or []
+
+    def resolved(entry: object) -> tuple[str, dict]:
+        if isinstance(entry, str):
+            return entry, {"strategy-name": entry}
+        return entry["name"], resolve_entry_overrides(entry, base_dir=REPO_ROOT)
+
+    for entry in strategies:
+        name, overrides = resolved(entry)
+        # Every strategy against the FIRST partition: the axes multiply, and the point is to
+        # touch every strategy/variant code path once, not to re-run the grid.
+        part_overrides = part_overrides_of(parts[0])
         for variant in (spec.get("variants") or [{}]):
             variant_overrides = {k: v for k, v in variant.items() if k != "name"}
             label = name + (f"/{variant['name']}" if variant.get("name") else "")
             out.append((label, {**base, **part_overrides, **overrides, **variant_overrides}))
+
+    # Then every REMAINING partition once, against one strategy. Until 2026-09-25 only
+    # `parts[0]` ever ran, so a partition axis carrying a code path -- an attack type, a DP
+    # sigma, a cold start hiding nodes -- was executed for its first value only, and the
+    # report said "ok" for the whole config. `robustness_r2_reduced` is the sharp case:
+    # `gaussian` inflates the update norm and `sign_flip` preserves it and reverses the
+    # direction, two different paths through aco/heuristics.py, and only the first ran.
+    #
+    # Linear in partitions rather than multiplicative, so A6's 27 strategies stay 27 arms
+    # plus its partitions. Paired with the method under test where there is one, because
+    # FedACO's r_k / dispersion heuristics are the code the attacked partitions exercise --
+    # pairing them with `fedavg` would execute the attack and skip the thing reading it.
+    if len(parts) > 1 and strategies:
+        names = [resolved(e)[0] for e in strategies]
+        probe = next((e for e, n in zip(strategies, names) if "fedaco" in n), strategies[0])
+        probe_name, probe_overrides = resolved(probe)
+        for part in parts[1:]:
+            label = f"{probe_name}/{(part or {}).get('name', '-')}"
+            out.append((label, {**base, **part_overrides_of(part), **probe_overrides}))
     return out
 
 
