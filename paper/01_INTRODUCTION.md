@@ -33,9 +33,31 @@ Work on adaptive aggregation weights splits four ways:
 
 Swarm intelligence has appeared in federated learning, but at the **systems layer**: ACO for
 scheduling model-update transmission, PSO for edge-device selection, ACO for federated
-*feature* selection. [CITE: each of these three] Applying an ACO metaheuristic directly to the
-aggregation weight vector, with pheromone persisting across communication rounds as a memory
-of client reliability, is the open slot this paper occupies.
+*feature* selection. [CITE: each of these three]
+
+⚠️ **The gap is substantially narrower than this project assumed, in two ways.** First, swarm
+optimization of the aggregation weight vector is *already published*: Adp-FL-PSO applies PSO at
+the server to compute optimal aggregation weights [Srinivas et al., 2025], and FedPSO replaces
+FedAvg's aggregation with PSO [Park et al., 2021]. Second, FedAWA (Shi et al., CVPR 2025)
+adaptively optimizes aggregation weights from *client update vectors*, requires no proxy data,
+and up-weights clients whose updates align with the global direction — the same signal as the
+alignment term in our objective. The claim "applying a metaheuristic to the aggregation weight
+vector is the open slot" does not survive contact with it. What remains genuinely distinct is
+narrower and we state it as such: (i) FedAWA optimizes $\alpha$ by gradient descent, we search
+it with a population metaheuristic over a discretized level set; (ii) FedAWA is **stateless
+across rounds**, and cross-round pheromone persistence has no analogue in it; (iii) our
+objective adds a dispersion term and a concentration penalty to alignment rather than using
+alignment alone.
+
+Point (ii) is the load-bearing one — **every** published method here (FedAWA, Adp-FL-PSO,
+FedPSO) recomputes $\alpha$ from the current round alone — which makes ablation A2, persistence
+off / decayed / full, the experiment carrying the novelty claim rather than a secondary ablation.
+
+It is also worth noting which algorithm the prior work chose: **PSO, not ACO.** Our equal-budget
+comparison finds PSO ahead of ACO by a wide margin on identical fitness (§5.2), and a published
+benchmark of nine swarm algorithms for FL client selection found Grey Wolf Optimization ahead of
+both. Our negative result on ACO is consistent with the literature rather than at odds with it.
+Full metadata for every reference in this paragraph is in `paper/REFERENCES.md`.
 
 ## 1.3 What this paper reports
 

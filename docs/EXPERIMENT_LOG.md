@@ -2867,3 +2867,66 @@ section and pasting another. **It is a methodological call the team can overturn
 because the writing was blocked on it, not because it belongs to the agent.
 
 724 tests pass, ruff clean.
+
+## 2026-09-25 (end) -- the novelty claim is refuted by the literature, and it corroborates our result
+
+Resolving the paper's `[CITE]` markers against a live literature index turned up three papers that
+change what this project can claim. Recorded in full with metadata in `paper/REFERENCES.md`.
+
+**1. Swarm optimization of the aggregation weight vector is already published.** Plan §1.2 states
+that swarm intelligence in FL sits at the systems layer and that "applying an ACO metaheuristic
+directly to the aggregation weight vector ... is the open slot". False:
+
+* **Adp-FL-PSO** (Srinivas et al., NMITCON 2025) -- "an enhanced Particle Swarm Optimization (PSO)
+  algorithm is applied to **the server to compute the optimal aggregation weights**".
+* **FedPSO** (Park et al., Sensors 2021, 119 citations) -- replaces FedAvg's weight aggregation
+  with PSO, targeting communication cost.
+
+**2. Gradient-based adaptive weights without proxy data is CVPR 2025 work.** **FedAWA** (Shi et
+al., CVPR 2025, 49 citations) adapts aggregation weights from client update vectors, needs no
+proxy dataset, and up-weights clients whose updates align with the global direction -- the same
+signal as our alignment term. Our four stated differentiators (no server data, no convexity bound,
+multi-dimensional signal, no policy training) are satisfied by FedAWA on the first two and
+arguably the third.
+
+**3. The refutation corroborates our own negative result.** The published swarm work on
+aggregation weights uses **PSO**. A benchmark of nine swarm algorithms for FL client selection
+(Khan et al., 2024) found Grey Wolf ahead of both ACO and PSO. Our A1 screens measure
+**PSO +0.0484 against ACO +0.0013-0.0066** on identical fitness and budget. Three independent
+signals, same direction: ACO is not the strong choice here.
+
+This is the most useful thing that happened today. The project's framing was "we are first to
+search alpha with a swarm method"; that was never true, and holding it would have been found by
+any reviewer who reads CVPR. What survives is defensible and is what the paper now claims:
+
+1. the first **equal-budget, equal-fitness** comparison across ACO, PSO, GA, coordinate grid and
+   random search for aggregation-weight search -- which tells you *which* search matters, where
+   the existing papers each validate one method against FedAvg;
+2. `corner_margin` and its closed-form penalty threshold, which apply to **any** of these methods
+   including the published PSO ones -- the degenerate single-client optimum is a property of the
+   objective, not of ACO;
+3. cross-round stigmergy. FedAWA, Adp-FL-PSO and FedPSO are all **stateless between rounds**.
+   This is the one structural novelty left, and it rests entirely on ablation A2.
+
+**A2 is therefore promoted from secondary ablation to the experiment carrying the contribution**,
+and it is in C's 9-day set at 30 cells / ~6 GPU-h. `ablation_a2_reduced.yaml` was written this
+morning for a different reason and turns out to be the most important cell block C runs.
+
+Two actions recorded for the team, neither doable here: **Adp-FL-PSO should become a baseline**,
+being the direct competitor rather than FedLAW; and one further finding worth using rather than
+just citing -- FedLAW (Li et al., 2023, 146 citations) reports that aggregation weights need not
+sum to 1 and that client *coherence* governs which clients matter, which is prior work on the same
+signal as our alignment term and should be discussed in §2.1 rather than listed.
+
+Also resolved: **Krum** (Blanchard et al., 2017, 3,028 citations), whose $O(n^2(d+\log n))$
+complexity is worth stating beside our own $O(K^2 d)$ precompute -- the robust baseline has the
+same quadratic client dependence we are asked to justify. And **Xie et al., 2019** ("Fall of
+Empires"), which breaks Krum and coordinate-wise median with inner-product manipulation attacks:
+our R2 `sign_flip` arm preserves the update norm and reverses direction, so it *is* an
+inner-product manipulation, and §5.3 should cite it rather than present the difficulty as new.
+
+Eleven markers remain open (FedNolowe, DaWa, FedProx, SCAFFOLD, the "FedACo" collision paper, the
+dataset's originating publication, and the client-drift analysis). The search rate-limited. None
+may be filled from memory.
+
+724 tests pass, ruff clean.

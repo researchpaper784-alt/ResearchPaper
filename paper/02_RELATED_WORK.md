@@ -30,9 +30,24 @@ ordered monotonically. [CITE: FedNolowe; also the class-contribution weighting l
 sample-hungry — many episodes to train a policy — and the policy transfers poorly to a
 federation with different client composition. [CITE: DaWa]
 
-Our setting differs from all four in what it assumes: no server-side data (unlike learned), no
-convexity or dissimilarity bound (unlike analytic), more than one dimension of client signal
-(unlike heuristic), and no cross-deployment policy training (unlike RL).
+**Client-vector weights — the closest prior work.** FedAWA optimizes aggregation weights from
+client update vectors, with no proxy dataset, up-weighting clients whose updates align with the
+global optimization direction. [Shi et al., CVPR 2025 — metadata in `paper/REFERENCES.md`]
+
+An earlier draft of this section differentiated our work on four axes: no server-side data, no
+convexity or dissimilarity bound, more than one dimension of client signal, and no
+cross-deployment policy training. **FedAWA satisfies the first two and arguably the third**, so
+that framing is withdrawn. The honest distinctions are narrower:
+
+| | FedAWA | this work |
+|---|---|---|
+| how $\alpha$ is obtained | gradient descent on client vectors | population metaheuristic over a discretized level set |
+| state across rounds | **none** | pheromone persists as a record of client reliability |
+| objective | update-direction alignment | alignment + dispersion + concentration penalty |
+
+The second row is the one that matters, and it is the one we test directly: ablation A2 compares
+no persistence, decayed persistence and full persistence. If persistence does not pay, the
+distinction from FedAWA is a search-algorithm substitution and the paper should say so.
 
 ## 2.2 Swarm intelligence in federated learning
 
@@ -46,10 +61,31 @@ the aggregation layer:
   [CITE]
 - **Swarm methods for communication efficiency** more broadly. [CITE]
 
-In each the swarm optimizes *who participates* or *what is transmitted*. None optimizes the
-aggregation weight vector itself, and none carries pheromone across communication rounds as a
-persistent record of client reliability. That combination — a discrete metaheuristic over
-$\alpha$, with cross-round stigmergy — is the gap.
+These operate on *who participates* or *what is transmitted*. **But swarm optimization of the
+aggregation weight vector itself is also already published**, and an earlier draft of this
+section wrongly asserted otherwise:
+
+- **Adp-FL-PSO** applies an enhanced PSO *at the server to compute the optimal aggregation
+  weights* under non-IID data. [Srinivas et al., NMITCON 2025]
+- **FedPSO** replaces FedAvg's weight aggregation with PSO, targeting communication cost.
+  [Park et al., Sensors 2021]
+
+So "a swarm metaheuristic over $\alpha$ is unexplored" is false, and we do not claim it. The
+remaining structural gap is narrower: **cross-round stigmergy**. FedAWA, Adp-FL-PSO and FedPSO
+are all stateless between rounds — each recomputes $\alpha$ from the current round's updates. A
+persistent per-client memory carried across communication rounds has no analogue in any of them,
+and it is the one thing an equal-budget stateless search cannot provide by construction.
+
+That makes ablation A2 — persistence off / decayed / full — the experiment that decides whether
+this work has a contribution at all, rather than a secondary ablation.
+
+**A note on what the literature's choice of algorithm implies.** Published swarm work on
+aggregation weights uses **PSO**, not ACO. A benchmark of nine swarm algorithms for FL client
+selection found Grey Wolf Optimization outperforming both ACO and PSO. [Khan et al., 2024] Our
+own equal-budget comparison (§5.2) measures PSO at +0.0484 against ACO at +0.0013–0.0066 on
+identical fitness and budget. These are independent signals pointing the same way, and we report
+ours as corroborating rather than contradicting the literature — which is a stronger position
+than the one this project set out to occupy.
 
 Whether cross-round pheromone memory is the part that earns its keep is an empirical question
 and we answer it directly: ablation A2 compares no persistence, decayed persistence and full
