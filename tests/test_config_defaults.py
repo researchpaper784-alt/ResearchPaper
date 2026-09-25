@@ -373,7 +373,7 @@ def test_the_reduced_sweep_keeps_a_monotone_heterogeneity_ladder() -> None:
 # same "—" as a cell with no paired seeds.
 
 _REDUCED = ("robustness_r1_reduced.yaml", "robustness_r2_reduced.yaml",
-            "ablation_a2_reduced.yaml")
+            "ablation_a2_reduced.yaml", "ablation_a1_reduced.yaml")
 
 
 def _granular(name: str) -> dict:
@@ -477,3 +477,78 @@ def test_reduced_configs_match_main_reduced_where_the_comparison_depends_on_it(
             f"{name} sets {key}={block[key]!r}, main_reduced uses {main[key]!r} -- the "
             "comparison its header claims does not hold"
         )
+
+
+# --------------------------------------------------------------------------------------
+# Person B's day 1-2 (2026-09-25). `gate_fitness.yaml` decides which fitness fix to use;
+# `ablation_a1_reduced.yaml` decides the paper's framing. Roughly 80% of the project's
+# remaining compute sits behind the second, so what these two configs measure is not a
+# matter of taste.
+
+
+def test_a1_reduced_keeps_every_search_method() -> None:
+    """A1 asks whether the colony beats equal-budget alternatives. Dropping any control is
+    dropping a comparison the whole claim rests on, and `coordinate_grid` -- the control
+    that beat ACO by the largest margin on the fixture, +0.0501 to +0.0013 -- is the one it
+    would be most convenient to lose."""
+    full = {(s.get("overrides") or {})["aco-search-method"]
+            for s in _granular("ablation_a1.yaml")["strategies"]}
+    reduced = {(s.get("overrides") or {})["aco-search-method"]
+               for s in _granular("ablation_a1_reduced.yaml")["strategies"]}
+    assert reduced == full, f"a1_reduced dropped {sorted(full - reduced)}"
+
+
+def test_a1_reduced_keeps_eight_seeds_and_both_partitions() -> None:
+    """The gate's design is not the cuttable part -- its per-cell cost is. At 5 seeds the
+    signed-rank floor of 0.0625 makes "inconclusive, sample too small" arithmetically
+    certain, which is the one outcome this experiment cannot afford to report."""
+    reduced = _granular("ablation_a1_reduced.yaml")
+    assert len(reduced["seeds"]) >= 8, f"{len(reduced['seeds'])} seeds"
+    assert len(reduced["partitions"]) == len(_granular("ablation_a1.yaml")["partitions"])
+    assert _cells(reduced) == _cells(_granular("ablation_a1.yaml")) == 80
+
+
+def test_a1_reduced_is_cheaper_per_cell_not_smaller() -> None:
+    """The saving has to come from K and local epochs, since the cell count is fixed."""
+    def client_epoch_rounds(spec: dict) -> int:
+        b = spec["base_overrides"]
+        return _cells(spec) * b["num-rounds"] * b["num-clients"] * b["local-epochs"]
+
+    full, reduced = _granular("ablation_a1.yaml"), _granular("ablation_a1_reduced.yaml")
+    assert client_epoch_rounds(reduced) < client_epoch_rounds(full) / 2
+
+
+def test_the_gate_config_keeps_the_control_its_fixes_are_measured_against() -> None:
+    """`default` reproduces the +0.6252 corner margin the fixes are compared to. Without it
+    a negative margin cannot be attributed to the change rather than to anything else that
+    moved since September. `fedavg` is what health check 4 reported as "NO BASELINE"."""
+    strategies = _granular("gate_fitness.yaml")["strategies"]
+    names = {s["name"] for s in strategies}
+    assert "default" in names, "no unmodified FedACO arm to compare the fixes against"
+    assert "fedavg" in names, "health check 4 has no baseline without a FedAvg run"
+
+    default = next(s for s in strategies if s["name"] == "default")
+    touched = set(default.get("overrides") or {}) - {"strategy-name"}
+    assert not touched, f"the `default` arm is not default -- it sets {sorted(touched)}"
+
+
+def test_the_gate_config_tests_both_candidate_fixes() -> None:
+    """Two fixes exist and neither is confirmed on real deltas: raising `aco-gamma-entropy`
+    to its closed-form crossing, and switching the dispersion reference to `aggregate`.
+    Running one arm makes the gate a confirmation of a guess rather than a comparison."""
+    overrides = [s.get("overrides") or {} for s in _granular("gate_fitness.yaml")["strategies"]]
+    assert any("aco-gamma-entropy" in o for o in overrides), "no gamma_entropy arm"
+    assert any(o.get("aco-dispersion-reference") == "aggregate" for o in overrides), \
+        "no aggregate-dispersion arm"
+
+
+def test_the_gate_config_stays_comparable_to_the_run_it_re_runs() -> None:
+    """15 rounds and K=10, matching B's September gate, so `corner_margin` is comparable to
+    the +0.6252 on record rather than to nothing."""
+    b = _granular("gate_fitness.yaml")["base_overrides"]
+    assert b["num-rounds"] == 15, f"{b['num-rounds']} rounds is not the recorded gate's 15"
+    assert b["num-clients"] == 10, f"K={b['num-clients']} is not the recorded gate's 10"
+    # `make gate-fitness` reads this directory back with check_fedaco_health.py. Left to
+    # pyproject's default the runs would land in results/fl beside every other run and the
+    # check would average the gate's arms in with whatever else is there.
+    assert b["output-dir"] == "results/fl/gate", f"gate writes to {b['output-dir']!r}"

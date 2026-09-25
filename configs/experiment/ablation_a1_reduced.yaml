@@ -1,0 +1,82 @@
+# Phase 7, A1 -- the go/no-go on claim C2, at the 9-day budget.
+#
+# NOTE WHAT IS *NOT* CUT: all 5 search methods, both partitions, all 8 seeds. 80 cells,
+# unchanged. A1 is plan §11's week-5 gate and plan §12's "Medium-High likelihood, fatal to
+# the framing" risk; cutting its design is cutting the experiment. 8 seeds in particular is
+# load-bearing here and nowhere more so -- this is the one comparison the paper cannot
+# afford to report as "inconclusive because the sample was too small", and at 5 seeds the
+# signed-rank floor of 0.0625 makes that outcome arithmetically certain.
+#
+# THE ONLY CUT IS PER-CELL COST: K=20 -> 10 and 2 local epochs -> 1, matching
+# main_reduced.yaml. 33 -> ~17 GPU-h, same 80 cells. The trim also makes A1's rows
+# comparable to the main table's for the first time; at K=20/2 epochs they were not.
+#
+# WHAT THIS IS EXPECTED TO SHOW, written down before it runs so the result cannot be
+# reinterpreted after the fact. Three local screens on the heterogeneous fixture:
+#
+#   coordinate_grid  +0.0501      pso  +0.0484      ga  +0.0312      random  +0.0304
+#   aco              +0.0013, then +0.0066 after a config-scoping fix
+#
+# ACO beat every control on **0 of 3 seeds**, losing to random by 5.9x at best. The plan's
+# feared outcome was "ACO *ties* random search"; the fixture says it loses. The mechanism is
+# identified and is not about ant colony optimisation: eta_{k,l} = (1 + |lambda_l - d_hat_k|)^-1
+# with d_k spanning ~0.04 against a level spacing of 0.25, so every client's argmax lands on
+# the same level; a uniform level assignment normalises back to `base_weights` exactly; so the
+# greedy branch of the ACS rule constructs **the FedAvg point**, 70% of the time at q0=0.7.
+# The colony is anchored to the reference it is supposed to improve on. Sweeping q0 to 0.0
+# reached +0.0287 and still lost to every control, so greedy anchoring is a contributing
+# mechanism and removing it does not rescue the claim.
+#
+# So this run is expected to confirm a **negative** result. It is still worth 17 GPU-hours:
+# roughly 80% of the project's remaining compute sits behind the reframe decision, the
+# fixture has never been validated for *ranking* transfer (only for the fitness signature),
+# and a claim this consequential should not rest on a synthetic fixture alone.
+#
+# ⚠️ RUN `gate_fitness.yaml` FIRST. A1's four controls optimise the SAME fitness at the same
+# budget, so on a degenerate landscape they inherit the same useless optimum and "ACO ties
+# random search" would be reported for a reason that has nothing to do with ACO -- while the
+# plan reframes the paper on exactly that result. `check_fedaco_health.py --strict` fails on
+# a DEGENERATE verdict for this reason.
+#
+# Cost: 5 x 2 x 8 = 80 cells x 100 rounds = 8,000 rounds, ~17 GPU-h at 7.5s/round.
+#
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a1_reduced.yaml
+
+base_overrides:
+  output-dir: results/fl/ablation
+  num-clients: 10
+  local-epochs: 1
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  strategy-name: fedaco
+
+strategies:
+  - name: aco
+    overrides: {aco-search-method: aco}
+  - name: random
+    overrides: {aco-search-method: random}
+  - name: coordinate_grid
+    overrides: {aco-search-method: coordinate_grid}
+  - name: pso
+    overrides: {aco-search-method: pso}
+  - name: ga
+    overrides: {aco-search-method: ga}
+
+partitions:
+  - name: iid
+    file: configs/data/iid.yaml
+  - name: dirichlet_0.3
+    file: configs/data/dirichlet_0.3.yaml
+
+seeds: [0, 1, 2, 3, 4, 5, 6, 7]

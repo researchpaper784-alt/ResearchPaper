@@ -2625,3 +2625,103 @@ standing between C and 214-427 GPU-hours.
   an arm that ran -- the same test `sweep.is_completed` applies per cell.
 
 670 tests pass, ruff clean.
+
+## 2026-09-25 -- the project resized to 9 days, and two bugs in yesterday's preflight
+
+The stated deadline moved to 7-9 days. The recorded remaining cost was **351-701 GPU-hours**
+(B 139-279, C 214-427), which at Kaggle's ~30 GPU-h per week per account is 12-23 weeks on one
+account and 4-8 across three. No ordering of that fits nine days.
+
+**The binding constraint was never the compute.** 351-701 hours was the price of proving claim
+C2, and three independent local screens say C2 is false: ACO gains +0.0013, then +0.0066 after
+a config-scoping fix, against random search's +0.0304, coordinate grid's +0.0501, PSO's +0.0484
+and a GA's +0.0312 -- beating every control on **0 of 3 seeds**. Roughly 80% of the remaining
+hours exist only to support the framing that is failing. Sized to the claim the evidence can
+actually carry, the experimental core is ~90 GPU-h.
+
+### The resized set: 254 cells for C, 80 + 8 for B
+
+| config | cells | GPU-h | replaces | was |
+|---|---|---|---|---|
+| `main_reduced` | 144 | 30.0 | `main.yaml` (576) | 120-240 |
+| `robustness_r1_reduced` | 40 | 8.3 | `robustness_r1_label_flip` (60) | 25-50 |
+| `robustness_r2_reduced` | 40 | 8.3 | `robustness_r2_update_attack` (120) | 50-100 |
+| `ablation_a2_reduced` | 30 | 6.2 | `ablation_a2` (60) | 25-50 |
+| **C total** | **254** | **52.9** | | 214-427 |
+| `gate_fitness` | 8 | 0.25 | new | -- |
+| `ablation_a1_reduced` | 80 | 16.7 | `ablation_a1` (80) | 17-33 |
+
+Every cut is named in the config header it belongs to, so the paper states them rather than a
+reviewer finding them. The cuts: K=20 -> 10 (the one size this project can *quote* rather than
+extrapolate, since 7.5s/round was measured at K=10), 2 local epochs -> 1, six regimes -> three
+(a monotone heterogeneity ladder, which is what figure 9 and claim C1 need), twelve strategies
+-> six, R1/R2's middle attacker fractions, and A6/A4/A5/A7/A8/R3-R6 entirely.
+
+**A1's cell count is unchanged at 80, deliberately.** Its five search methods, two partitions
+and eight seeds *are* the experiment; the saving comes from K and local epochs alone. 8 seeds
+is load-bearing here more than anywhere: at 5 the signed-rank floor of 0.0625 makes
+"inconclusive, sample too small" arithmetically certain, and that is the one outcome this
+comparison cannot afford to report.
+
+**What the trim gained rather than cost.** `main.yaml` ran 1 local epoch; R1/R2/A2/A1 ran 2.
+So no pairing of the full configs was a controlled comparison -- "FedACO under attack" and
+"FedACO clean" differed in local training as well as in the attack, and A1's rows were not
+comparable to the main table's at all. All six reduced configs now agree with `main_reduced` on
+K, local epochs, rounds, image size, lr, batch size and model, pinned by a test.
+
+**One coupling the trim introduced.** `robustness_r2_reduced` ships with no clean arm and uses
+the one `robustness_r1_reduced` writes to the same `results/fl/robustness`. This works because
+`attack: none` and `fraction-train: 1.0` are already pyproject defaults, so that arm resolves
+to the default variant -- which is what `add_deltas` falls back to. Run r1 before r2 and do not
+trim r1's clean arm, or every R2 delta is None, which renders as the same "—" as a cell with no
+paired seeds. Pinned by four tests.
+
+### Bug 1: the preflight ran one partition per config and called the rest ok
+
+`arms()` paired every strategy with `partitions[0]` and no other partition. Any partition axis
+carrying a *code path* was therefore executed for its first value only, while the report printed
+"ok" for the whole config. **Yesterday's "96 of 96 arms execute" was 96 of a possible 137.**
+
+Never executed, across a month of this script's existence: `robustness_r2_update_attack`'s
+`sign_flip` arms -- and `gaussian` inflates the update norm where `sign_flip` preserves it and
+reverses the direction, two different paths through `aco/heuristics.py`, so the norm-ratio
+heuristic was preflighted against half of what it claims to detect. Also R4's higher DP sigmas,
+R3's straggler fractions, and every regime but the first in `robustness.yaml` and `ablation_all`.
+
+Found while writing `robustness_r1_reduced.yaml`, whose natural partition order puts `clean`
+first: label-flipping would not have executed once, and the report would have read 4/4 ok for a
+config whose entire purpose is the attack.
+
+Now every strategy still runs against `partitions[0]`, and each remaining partition runs once
+against one strategy -- **linear in partitions, not multiplicative**, so A6 goes 27 arms to 28
+rather than 27xP and the walk stays CPU-minutes. The probe is FedACO where the config has it,
+because pairing an attacked partition with `fedavg` would execute the attack and skip the code
+that reads it. `robustness_r1_reduced` declares the attacked partition first so all four
+strategies meet it -- Krum derives its `f` from the cell's own `attack-fraction`, and a
+mis-derivation is invisible with no attackers present.
+
+### Bug 2: the resume key ignored the config, so changed arms reported "already ran"
+
+The resume added *yesterday* keyed on `config_stem + arm_label`. Neither carries what the arm
+resolves to. So reordering `robustness_r1_reduced.yaml`'s partitions -- which keeps every
+strategy label identical -- produced, within the hour:
+
+    skip    fedavg             (already ran)
+    skip    krum               (already ran)
+    skip    trimmed_mean       (already ran)
+    skip    fedaco             (already ran)
+
+from results computed with `attack: none`. Label-flipping had not run once and the report read
+4/4 ok. This is the September sweep bug -- a control handed a sibling's result file -- reproduced
+inside the mechanism added to prevent lost work, one day later.
+
+The key now includes an 8-character hash of the resolved config via the same `make_run_id` the
+real runners use; the two orderings fingerprint `389b6bb4` and `e9db62e6`. Two tests: that the
+same label under two partitions gets different keys, and that no two arms of a config ever
+collide (checked on A6, whose axes deliberately share a centre value).
+
+**Both bugs are the same shape, and it is the shape this repository keeps producing: a check
+that runs, passes, and means nothing.** The count is now eleven instances. What is new here is
+that one of them was introduced by me yesterday and caught today only because an unrelated
+config edit happened to expose it -- a resume that silently accepts stale work fails in exactly
+the direction that looks like success.

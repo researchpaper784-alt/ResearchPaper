@@ -1,0 +1,95 @@
+# GATE 1 re-run -- which fitness fix closes the degenerate corner, measured on real data.
+#
+# THE OPEN QUESTION THIS CLOSES. B's first real GPU run (2026-09-19, K=10, 15 rounds,
+# dirichlet 0.3, seed 0) found the best single-client vertex outscoring the FedAvg point in
+# **15/15 rounds, mean margin +0.6252**. docs/OPEN_QUESTIONS.md records the consequence: the
+# colony did not go to the corner in that run only because the search was too short to find
+# the optimum it is pointed at, so every diagnostic read healthy and the failure arrives as
+# the search gets *better*. That entry's instruction is explicit -- "confirm it with a gate
+# re-run rather than by argument."
+#
+# TWO CANDIDATE FIXES EXIST AND NEITHER IS CONFIRMED ON REAL DELTAS:
+#
+#   `gamma_entropy_0.45`  aco/fitness.required_gamma_entropy computes the zero crossing in
+#                         closed form -- the margin is linear in gamma_3 -- and against a
+#                         replica of B's per-round margins it returned 0.450 as the largest
+#                         crossing over 15 rounds. That is a LOWER bound: the replica assumes
+#                         uniform base weights (P(base) = 0), and under dirichlet(0.3) the
+#                         real reference is already concentrated, so the real requirement is
+#                         higher. This arm measures it exactly.
+#                         ⚠️ B's notebook records that 0.6 closed the corner and broke
+#                         everything downstream: F = align - disp - g3*P, so a penalty large
+#                         enough to outweigh a vertex's free alignment also drags every
+#                         interior candidate down. 0.45 may land in the same trap.
+#
+#   `dispersion_aggregate`  On the local heterogeneous fixture this removed BOTH failure
+#                         modes at once: the corner won 0/15 rounds (margin -0.5283, against
+#                         +0.6185 for the default) and F at the FedAvg point stopped being
+#                         zero-centred noise, so every round deposited. alpha_max was 0.207
+#                         against uniform's 0.100, so the landscape was repaired rather than
+#                         flattened -- which is what distinguishes it from the gamma_3=0.6
+#                         failure.
+#
+# A synthetic *signature* match is much weaker than a data match. The fixture agreed with the
+# Kaggle run's corner margin to three decimals, but it is a fixture, and the transfer that
+# failed before was exactly this one (every earlier corner_margin measurement ran on the
+# log-spaced level set and none transferred to the plan's linear grid).
+#
+# WHAT TO READ. Not macro-F1 -- 15 rounds is far too short for that, and reading it is how
+# the last round of this argument went wrong. Read `corner_margin` per round via
+#   python scripts/check_fedaco_health.py --results-dir results/fl/gate
+# and require check 3 CLEAR: the margin negative in every round, not on average, because
+# gamma_3 and the dispersion shape are set once per run and the value that clears the mean
+# round leaves the worst rounds degenerate.
+#
+# `default` and `fedavg` are both here on purpose. `default` reproduces the +0.6252 the fix
+# is measured against -- without it a negative margin cannot be attributed to the change
+# rather than to anything else that moved since September. `fedavg` gives health check 4 the
+# baseline it reported as "NO BASELINE" last time.
+#
+# Cost: 4 arms x 2 seeds x 15 rounds = 120 rounds, ~15 minutes at 7.5s/round. This is the
+# cheapest experiment in the project and 351-701 GPU-hours sit behind it.
+#
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/gate_fitness.yaml
+
+base_overrides:
+  output-dir: results/fl/gate
+  # Matches main_reduced.yaml, so a margin measured here applies to the sweep that follows.
+  num-clients: 10
+  local-epochs: 1
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-lr: 0.01
+  local-batch-size: 32
+  # 15 rounds, matching the September gate, so `corner_margin` is comparable to the
+  # +0.6252 already on record rather than to nothing.
+  num-rounds: 15
+  deterministic: true
+  regime: dirichlet
+  alpha: 0.3
+
+strategies:
+  - name: default
+    overrides: {strategy-name: fedaco}
+  - name: gamma_entropy_0.45
+    overrides: {strategy-name: fedaco, aco-gamma-entropy: 0.45}
+  - name: dispersion_aggregate
+    overrides: {strategy-name: fedaco, aco-dispersion-reference: aggregate}
+  - name: fedavg
+    file: configs/strategy/fedavg.yaml
+
+partitions:
+  - name: dirichlet_0.3
+    file: configs/data/dirichlet_0.3.yaml
+
+# Two seeds, not one. The September gate ran one, and `corner_margin` is a per-round
+# diagnostic rather than a significance test -- but a sign that flips between seeds is
+# exactly what would make a "CLEAR" verdict unsafe to spend 17-33 GPU-hours on.
+seeds: [0, 1]
