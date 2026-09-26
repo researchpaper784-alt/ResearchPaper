@@ -44,8 +44,8 @@ def test_committed_notebook_matches_the_builder(name: str) -> None:
 def test_the_shared_setup_cells_really_are_shared() -> None:
     """The point of the builder. If a day's notebook stopped using the shared objects, a fix
     to them would no longer reach it."""
-    shared = [BUILDER.CLONE, BUILDER.INSTALL, BUILDER.DATASET, BUILDER.RESTORE,
-              BUILDER.CACHE, BUILDER.FEDERATION]
+    shared = [BUILDER.PREFLIGHT, BUILDER.CLONE, BUILDER.INSTALL, BUILDER.DATASET,
+              BUILDER.RESTORE, BUILDER.CACHE, BUILDER.FEDERATION]
     for name, (_, cells) in BUILDER.NOTEBOOKS.items():
         for cell in shared:
             assert cell in cells, f"{name} no longer includes a shared setup cell"
@@ -88,3 +88,34 @@ def test_the_builder_output_is_deterministic() -> None:
         assert a == b, name
         ids = [c["id"] for c in json.loads(a)["cells"]]
         assert len(ids) == len(set(ids)), f"{name} has duplicate cell ids"
+
+
+def test_the_gpu_check_is_the_first_code_cell() -> None:
+    """A wrong accelerator setting must fail in seconds, not after four minutes of installs --
+    it is the one thing the user has to fix by hand, so they should find out first."""
+    for name, (_, cells) in BUILDER.NOTEBOOKS.items():
+        first_code = next(c for c in cells if c[0] == "code")
+        assert first_code == BUILDER.PREFLIGHT, f"{name}: first code cell is not the GPU check"
+
+
+def test_no_notebook_requires_attaching_the_dataset_by_hand() -> None:
+    """A user ran Day 1 twice and stopped both times at 'no dataset attached'. The dataset cell
+    must fetch it, and must not halt merely because /kaggle/input is empty."""
+    source = BUILDER.DATASET[1]
+    assert "locate_or_fetch_kaggle_dataset()" in source
+    assert "if not inputs:" not in source, "the old halt-on-empty-input check is back"
+
+
+def test_later_days_run_the_gate_themselves_when_its_results_are_missing() -> None:
+    """Day 2 and Day 3 must not demand Day 1's output be attached: they re-run the gate."""
+    for name in ("kaggle_day2_a1.ipynb", "kaggle_day3_main_and_robustness.ipynb"):
+        cells = BUILDER.NOTEBOOKS[name][1]
+        assert BUILDER.GATE_IF_MISSING in cells, name
+        # ...and before any sweep that needs the fix
+        first_sweep = next(i for i, (k, s) in enumerate(cells)
+                           if k == "code" and "run_sweep" in s and "gate_fitness" not in s)
+        assert cells.index(BUILDER.GATE_IF_MISSING) < first_sweep, name
+
+
+def test_a_reclone_in_a_live_kernel_drops_stale_fedswarm_modules() -> None:
+    assert "del sys.modules[name]" in BUILDER.CLONE[1]

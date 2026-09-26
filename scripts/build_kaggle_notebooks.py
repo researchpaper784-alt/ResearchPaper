@@ -35,6 +35,51 @@ def code(text: str) -> tuple[str, str]:
 # Shared cells
 
 
+PREFLIGHT = code(r'''
+# Settings check FIRST, in two seconds -- not after four minutes of installs. The GPU is the one
+# thing no code can switch on; it is a notebook setting, and it persists once set.
+import shutil
+import subprocess
+
+gpu = (subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True)
+       if shutil.which("nvidia-smi") else None)
+if gpu is None or gpu.returncode != 0 or "GPU" not in gpu.stdout:
+    raise RuntimeError(
+        "NO GPU -- a notebook setting, not a code problem. Fix once and it stays set:\n"
+        "  right sidebar -> 'Session options' (or top menu 'Settings') -> Accelerator ->\n"
+        "  'GPU T4 x2'. Then Run All again.\n"
+        "If the Accelerator menu is greyed out, your Kaggle account needs phone verification\n"
+        "(kaggle.com -> Settings -> Phone verification)."
+    )
+print(gpu.stdout.strip())
+print("GPU OK")
+''')
+
+
+HOW_TO_RUN = r"""
+## How to run this — no uploads, no clicks on data
+
+**Two settings, once** (right sidebar → **Session options**; they stay set for this notebook):
+
+- **Accelerator → GPU T4 x2**
+- **Internet → On**
+
+Everything else is automatic: the code is cloned from GitHub and the MRI dataset is attached by
+the notebook itself.
+
+**Then, to avoid babysitting it:**
+
+1. Click **Run All** and watch the first few cells (~5 min). You want to see `GPU OK`,
+   `INSTALL OK`, and `dataset check: 7200/7200`.
+2. Once those pass, **Save Version → Save & Run All (Commit)** and close the tab. The commit
+   runs in the background for up to 12 hours and keeps every output. An interactive session can
+   die if the browser disconnects; a commit does not.
+
+If anything stops, the error says exactly what to change. The red `ERROR: pip's dependency
+resolver…` block during install is **not** one of them — it is harmless, see the install cell.
+"""
+
+
 CLONE = code(r'''
 import subprocess
 from pathlib import Path
@@ -60,6 +105,18 @@ print(subprocess.run(["git", "-C", REPO_DIR, "log", "--oneline", "-3"],
                      capture_output=True, text=True).stdout)
 if on != BRANCH:
     raise RuntimeError(f"Checked out {on!r}, not {BRANCH!r}.")
+
+# Re-running this cell in a live kernel pulls new code, but Python keeps any fedswarm module it
+# already imported -- so a function added since would be "missing". Drop the cached copies.
+import importlib  # noqa: E402
+import sys  # noqa: E402
+
+stale = [name for name in sys.modules if name == "fedswarm" or name.startswith("fedswarm.")]
+for name in stale:
+    del sys.modules[name]
+importlib.invalidate_caches()
+if stale:
+    print(f"dropped {len(stale)} cached fedswarm module(s); the fresh code will be imported")
 ''')
 
 INSTALL = code(r'''
@@ -87,26 +144,22 @@ import os
 import sys
 from pathlib import Path
 
-inputs = sorted(glob.glob("/kaggle/input/*"))
-print("inputs mounted:", [Path(p).name for p in inputs] or "NONE")
-if not inputs:
-    raise RuntimeError(
-        "NO DATASET ATTACHED -- this is the one manual step, and nothing above is wrong.\n"
-        "  1. In the notebook editor's RIGHT sidebar, find the 'Input' section.\n"
-        "  2. Click '+ Add Input'.\n"
-        "  3. Search: brain tumor mri dataset   (owner: masoudnickparvar)\n"
-        "  4. Click the (+) next to it. It mounts under /kaggle/input/.\n"
-        "  5. Run this cell again -- cells 1-2 do not need re-running."
-    )
+# The dataset is fetched automatically -- nothing to click. If it is already attached (sidebar,
+# or a previous session) that copy is used; otherwise kagglehub attaches the public dataset to
+# this session and returns where it mounted.
+from fedswarm.data.download import locate_or_fetch_kaggle_dataset  # noqa: E402
 
-# Pick the input that actually holds the images rather than trusting glob order: once you
-# attach a previous session's output, inputs[0] may be a results folder.
-DATA_ROOT = next((p for p in inputs if any(Path(p).rglob("Training"))), None)
+print("inputs mounted:", [Path(p).name for p in sorted(glob.glob("/kaggle/input/*"))] or "none yet")
+DATA_ROOT = locate_or_fetch_kaggle_dataset()
 if DATA_ROOT is None:
     raise RuntimeError(
-        "None of the mounted inputs contains a Training/ directory, so none is the MRI "
-        f"dataset. Mounted: {[Path(p).name for p in inputs]}."
+        "Could not attach masoudnickparvar/brain-tumor-mri-dataset automatically.\n"
+        "  Most likely cause: Internet is off. Right sidebar -> 'Session options' -> Internet ->\n"
+        "  On, then Run All again. (The clone cell above needs internet too, so if it passed,\n"
+        "  this is something else -- attach it by hand once: right sidebar -> '+ Add Input' ->\n"
+        "  search 'brain tumor mri dataset' by masoudnickparvar -> (+).)"
     )
+DATA_ROOT = str(DATA_ROOT)
 print("dataset root:", DATA_ROOT)
 
 # `flwr run` executes an INSTALLED COPY of the app, whose __file__ is not this clone, so the
@@ -122,8 +175,8 @@ print("CUDA:", torch.cuda.is_available(),
       torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")
 if not torch.cuda.is_available():
     raise RuntimeError(
-        "No GPU visible; these sweeps will not finish on CPU. Fix: Notebook options -> "
-        "Accelerator -> GPU T4 x2, then Run -> Restart & clear cell outputs."
+        "No GPU visible to PyTorch; these sweeps will not finish on CPU. Right sidebar -> "
+        "'Session options' -> Accelerator -> 'GPU T4 x2', then Run All again."
     )
 print("CPU cores:", os.cpu_count(), "| Python:", sys.version.split()[0])
 
@@ -243,6 +296,22 @@ print("GPUs per ClientApp:", GPUS_PER_CLIENT)
 ''')
 
 
+GATE_IF_MISSING = code(r'''
+# The gate's results normally arrive with Day 1's attached output. If they are not here, run the
+# gate now (~20 min) rather than stopping: its seeds are fixed and it runs deterministic, so it
+# should reach Day 1's verdict. ensure_gate_fix() prints the verdict -- compare it with Day 1's.
+import subprocess
+from pathlib import Path
+
+if not list(Path("results/fl/gate").glob("*.json")):
+    print("No gate results attached -- running the gate here first (~20 min).")
+    subprocess.run(["git", "checkout", "--", "pyproject.toml"], check=True)
+    !python scripts/run_sweep_granular.py --config configs/experiment/gate_fitness.yaml --gpus-per-client {GPUS_PER_CLIENT}
+
+ensure_gate_fix()
+''')
+
+
 def save(next_step: str) -> list[tuple[str, str]]:
     return [
         md(r'''
@@ -313,12 +382,6 @@ DAY1 = [
     md(r'''
 # FedSwarm — DAY 1: the gate, then A2 (Kaggle GPU)
 
-Everything comes from GitHub. **One thing you must click**, because the MRI images are not in
-the repository and should not be (7,200 JPEGs under the dataset's own licence):
-
-> **Right sidebar → + Add Input → Datasets → `masoudnickparvar/brain-tumor-mri-dataset` → Add**,
-> then **Notebook options → Accelerator → GPU T4 x2**.
-
 | step | what | cells | time |
 |---|---|---|---|
 | 1 | **`gate_fitness`** — which fitness fix closes the degenerate optimum | 8 | ~15 min |
@@ -333,7 +396,8 @@ structural novelty left, and A2 is the only experiment that tests it.
 itself), or step 3 shows `none` ≈ `decayed` ≈ `full` (persistence buys nothing — re-plan before
 spending the remaining ~64 GPU-hours). Full context: `HANDOVER.md`.
 '''),
-    md("## 1. Setup — clone from GitHub"), CLONE, INSTALL, DATASET,
+    md(HOW_TO_RUN),
+    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
     md("### Restore results from a previous session\n\nSkip on your first run. On a re-run, "
        "attach this notebook's previous output (**+ Add Input → Your Work**) first."),
     RESTORE,
@@ -423,7 +487,7 @@ else:
     print("nothing and the last structural novelty is gone. Stop and re-plan before Day 2.")
 ''', imports="from collections import defaultdict\n"),
     code("!python scripts/make_tables.py --results-dir results/fl/ablation --out paper/tables"),
-    *save("Day 2 -- notebooks/kaggle_day2_a1.ipynb, with THIS notebook's output attached."),
+    *save("Day 2 -- notebooks/kaggle_day2_a1.ipynb. Attaching THIS notebook's output saves ~20 min."),
 ]
 
 
@@ -434,14 +498,9 @@ DAY2 = [
     md(r'''
 # FedSwarm — DAY 2: A1, the go/no-go on the framing (Kaggle GPU)
 
-**Before running, attach two inputs** (right sidebar → **+ Add Input**):
-
-1. **Datasets** → `masoudnickparvar/brain-tumor-mri-dataset`
-2. **Your Work** → the **Day 1** notebook's output. Required: it holds the gate's results, from
-   which this notebook re-derives the fitness fix. Without it, the guard halts the notebook
-   rather than run A1 on the broken default.
-
-Then **Accelerator → GPU T4 x2**.
+**Optional, saves ~20 minutes:** attach the **Day 1** notebook's output (right sidebar →
+**+ Add Input → Your Work**). It holds the gate's results, from which this notebook re-derives the
+fitness fix. Without it, this notebook re-runs the gate itself before A1.
 
 **A1** replaces the colony with random search, coordinate-grid search, PSO and a GA at an
 **identical evaluation budget and identical fitness**. 80 cells, ~17 GPU-h — **two sessions**.
@@ -457,18 +516,20 @@ control (ACO +0.0013 → +0.0066 against random +0.0304, PSO +0.0484, coordinate
 - **ACO significantly beats all four** → delete §1.3 there and paste the alternative framing from
   the end of the same file.
 '''),
-    md("## 1. Setup — clone from GitHub"), CLONE, INSTALL, DATASET,
-    md("### Restore — brings back Day 1's gate results (required) and any earlier A1 session"),
+    md(HOW_TO_RUN),
+    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
+    md("### Restore — Day 1's gate results and any earlier A1 session, if attached"),
     RESTORE,
     md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
     FEDERATION_MD, FEDERATION,
     md(r'''
 ---
-# STEP 1 — re-apply Day 1's fitness fix
+# STEP 1 — the fitness fix: from Day 1's results, or by re-running the gate
 
-Halts if Day 1's output is not attached, or if Day 1's gate found no fix.
+Halts only if the gate finds no arm that closes the corner -- in which case no FedACO sweep
+should run at all.
 '''),
-    code("ensure_gate_fix()"),
+    GATE_IF_MISSING,
     md(r'''
 ---
 # STEP 2 — A1: 80 cells, ~17 GPU-h
@@ -517,7 +578,7 @@ else:
     print("controls. Losing to or tying any one of them is enough for framing A.")
 ''', imports="from collections import defaultdict\n"),
     code("!python scripts/make_tables.py --results-dir results/fl/ablation --out paper/tables"),
-    *save("Day 3 -- notebooks/kaggle_day3_main_and_robustness.ipynb, with Day 1's output attached."),
+    *save("Day 3 -- notebooks/kaggle_day3_main_and_robustness.ipynb."),
 ]
 
 
@@ -528,8 +589,9 @@ DAY3 = [
     md(r'''
 # FedSwarm — DAY 3: the main table, then R1 and R2 (Kaggle GPU)
 
-**Attach** the dataset (`masoudnickparvar/brain-tumor-mri-dataset`) **and Day 1's output**
-(the gate's results — the guard re-derives the fitness fix from them). Accelerator → GPU T4 x2.
+**Optional, saves ~20 minutes:** attach the **Day 1** notebook's output (right sidebar →
+**+ Add Input → Your Work**) — it holds the gate's results. Without it, this notebook re-runs the
+gate itself first.
 
 | step | sweep | cells | GPU-h |
 |---|---|---|---|
@@ -544,12 +606,13 @@ notebook's previous output attached and it continues where it stopped.
 **R1 must finish before R2's table means anything.** R2 ships with no unattacked arm by design;
 its deltas are measured against R1's `clean` arm in the same `results/fl/robustness`.
 '''),
-    md("## 1. Setup — clone from GitHub"), CLONE, INSTALL, DATASET,
-    md("### Restore — Day 1's gate results (required) plus any earlier Day 3 session"),
+    md(HOW_TO_RUN),
+    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
+    md("### Restore — Day 1's gate results and any earlier Day 3 session, if attached"),
     RESTORE,
     md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
     FEDERATION_MD, FEDERATION,
-    code("ensure_gate_fix()"),
+    GATE_IF_MISSING,
     md(r'''
 ---
 # STEP 1 — the main table: 144 cells, ~30 GPU-h
