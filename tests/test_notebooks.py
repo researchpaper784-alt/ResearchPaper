@@ -296,8 +296,70 @@ def check_stdlib_portability(nb: dict, floor: tuple[int, int] | None = None) -> 
     return problems
 
 
+def _adds_src_to_path(node: ast.AST, names: dict[str, str]) -> bool:
+    """True for `sys.path.insert(..., <a src directory>)` or `.append(...)`.
+
+    `names` maps simple variable names to the source of what was assigned to them, so
+    `SRC = f"{REPO_DIR}/src"; sys.path.insert(0, SRC)` is recognised -- the form the clone
+    cell uses. Matching only literal text missed it and flagged a correct notebook.
+    """
+    if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("insert", "append")
+            and ast.unparse(node.func.value) == "sys.path"):
+        return False
+    parts = []
+    for arg in node.args:
+        parts.append(ast.unparse(arg))
+        if isinstance(arg, ast.Name) and arg.id in names:
+            parts.append(names[arg.id])
+    return any(p.rstrip("'\"/").endswith("src") for p in parts)
+
+
+def check_kernel_can_import_fedswarm(nb: dict) -> list[str]:
+    """No in-kernel `fedswarm` import before the kernel has `src` on sys.path.
+
+    `pip install -e .` registers the package through a `.pth` file, and Python reads `.pth`
+    files ONLY AT PROCESS START. A Jupyter kernel is already running when the install cell
+    executes, so the kernel cannot import an editable install made in the same session --
+    only fresh subprocesses can. A user hit exactly this on Kaggle: `ModuleNotFoundError: No
+    module named 'fedswarm'`, one cell after an install check that printed INSTALL OK, because
+    that check ran `!python -c "import fedswarm"` -- a new process, which does read the `.pth`.
+
+    Walks code cells in notebook order, tracking whether any statement so far has put a `src`
+    directory on sys.path, and flags the first fedswarm import that comes before it.
+    """
+    problems, on_path, names = [], False, {}
+    for i, src, _ in code_cells(nb):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            continue
+        # Statement order within the cell matters as much as cell order.
+        for stmt in tree.body:
+            if (isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Name)):
+                names[stmt.targets[0].id] = ast.unparse(stmt.value)
+            if any(_adds_src_to_path(n, names) for n in ast.walk(stmt)):
+                on_path = True
+            for n in ast.walk(stmt):
+                is_fedswarm = (
+                    (isinstance(n, ast.ImportFrom) and (n.module or "").startswith("fedswarm"))
+                    or (isinstance(n, ast.Import)
+                        and any(a.name.split(".")[0] == "fedswarm" for a in n.names))
+                )
+                if is_fedswarm and not on_path:
+                    problems.append(
+                        f"cell {i} line {n.lineno}: imports fedswarm in the kernel before `src` "
+                        "is on sys.path; an editable install made after the kernel started is "
+                        "invisible to it"
+                    )
+                    return problems  # the first one is the one that fails
+    return problems
+
+
 CHECKS = [check_parses, check_imports, check_call_signatures, check_final_keys,
-          check_scripts_and_flags, check_config_paths, check_stdlib_portability]
+          check_scripts_and_flags, check_config_paths, check_stdlib_portability,
+          check_kernel_can_import_fedswarm]
 
 
 # --------------------------------------------------------------------------------------
@@ -358,10 +420,38 @@ def test_each_check_catches_the_bug_it_exists_for() -> None:
     guarded = {"cells": [cell("try:\n    import tomllib\nexcept ModuleNotFoundError:\n    pass\n")]}
     assert not check_stdlib_portability(guarded, floor=(3, 10))
 
+    # The Kaggle ModuleNotFoundError, reconstructed: install, then import before src is on the
+    # path -- including the case that bit, where the path insert comes LATER IN THE SAME CELL.
+    same_cell_late = {"cells": [
+        cell("!pip install -e .\n"),
+        cell("import sys\nfrom fedswarm.data.download import x\nsys.path.insert(0, 'src')\n"),
+    ]}
+    assert check_kernel_can_import_fedswarm(same_cell_late), "missed the in-cell ordering bug"
+    never = {"cells": [cell("!pip install -e .\n"), cell("import fedswarm\n")]}
+    assert check_kernel_can_import_fedswarm(never), "missed an import with no path insert"
+    fixed = {"cells": [
+        cell("import sys\nsys.path.insert(0, f'{REPO_DIR}/src')\n"),
+        cell("!pip install -e .\n"),
+        cell("from fedswarm.data.download import x\n"),
+    ]}
+    assert not check_kernel_can_import_fedswarm(fixed), check_kernel_can_import_fedswarm(fixed)
+    via_name = {"cells": [
+        cell("import sys\nSRC = f'{REPO_DIR}/src'\nsys.path.insert(0, SRC)\n"),
+        cell("import fedswarm\n"),
+    ]}
+    assert not check_kernel_can_import_fedswarm(via_name), "missed insertion through a variable"
+    wrong_dir = {"cells": [
+        cell("import sys\nDATA = '/kaggle/input'\nsys.path.insert(0, DATA)\n"),
+        cell("import fedswarm\n"),
+    ]}
+    assert check_kernel_can_import_fedswarm(wrong_dir), "counted a non-src path as src"
+
 
 def test_a_clean_notebook_passes_every_check() -> None:
     """The converse: the checks must not flag correct code, or they get ignored."""
     good = {"cells": [{"cell_type": "code", "source": [
+        "import sys\n",
+        "sys.path.insert(0, '/kaggle/working/ResearchPaper/src')\n",
         "from fedswarm.sweep import run_sweep\n",
         "run_sweep([], pyproject_path='pyproject.toml', dry_run=True)\n",
         "f1 = (r.get('final') or {}).get('final_test_macro_f1')\n",

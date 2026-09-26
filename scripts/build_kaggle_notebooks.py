@@ -117,6 +117,15 @@ for name in stale:
 importlib.invalidate_caches()
 if stale:
     print(f"dropped {len(stale)} cached fedswarm module(s); the fresh code will be imported")
+
+# Put src/ on THIS KERNEL's path, now, before anything imports fedswarm. `pip install -e .` in the
+# next cell registers the package through a .pth file, and Python reads .pth files only when a
+# process STARTS -- this kernel is already running, so it would never see the install. Only
+# fresh subprocesses (the sweep scripts, `flwr run`) do. Missing this line is what produced
+# "ModuleNotFoundError: No module named 'fedswarm'" on Kaggle.
+SRC = f"{REPO_DIR}/src"
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
 ''')
 
 INSTALL = code(r'''
@@ -135,7 +144,20 @@ INSTALL = code(r'''
 !pip install -q "flwr[simulation]>=1.36.0,<1.37.0"
 !pip install -q --no-deps -e .
 !pip install -q omegaconf rich
-!python -c "import fedswarm, flwr, sys; print('INSTALL OK -- fedswarm importable, flwr', flwr.__version__, '| Python', sys.version.split()[0])"
+
+# Check the imports IN THIS KERNEL -- the process every later cell runs in. An earlier version
+# checked with `!python -c "import fedswarm"`, which starts a NEW process; that one reads pip's
+# .pth file and passed, while this kernel could not import fedswarm at all.
+import importlib  # noqa: E402
+import sys  # noqa: E402
+
+importlib.invalidate_caches()
+import flwr  # noqa: E402
+
+import fedswarm  # noqa: E402
+
+print("INSTALL OK -- fedswarm from", fedswarm.__file__)
+print("flwr", flwr.__version__, "| Python", sys.version.split()[0])
 ''')
 
 DATASET = code(r'''
