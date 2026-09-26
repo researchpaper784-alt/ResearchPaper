@@ -97,7 +97,7 @@ from fedswarm.fl.privacy import (
 )
 from fedswarm.models.factory import build_model
 from fedswarm.strategies.factory import strategy_from_run_config
-from fedswarm.utils.results import make_run_id, write_result
+from fedswarm.utils.results import make_run_id, resolved_config, write_result
 from fedswarm.utils.seed import seed_everything
 
 RunConfig = dict  # Context.run_config's real type: dict[str, bool | float | int | str]
@@ -933,8 +933,8 @@ def main(grid: Grid, context: Context) -> None:
     seed_everything(seed, deterministic=deterministic)
 
     strategy_name = str(run_config.get("strategy-name", "fedavg")).lower()
-    resolved_config = {"run_config": dict(run_config), "strategy": strategy_name, "seed": seed}
-    run_id = make_run_id(resolved_config, seed)
+    resolved = resolved_config(run_config, strategy_name, seed)
+    run_id = make_run_id(resolved, seed)
     run_config = {**run_config, "_run_id": run_id}  # threaded through to build_evaluate_fn
 
     num_rounds = int(run_config.get("num-rounds", 2))
@@ -998,7 +998,7 @@ def main(grid: Grid, context: Context) -> None:
 
     write_result(
         output_dir / f"{run_id}.json",
-        config=resolved_config,
+        config=resolved,
         partition_stats=partition_stats_for_result(run_config),
         rounds=rounds_log,
         final={

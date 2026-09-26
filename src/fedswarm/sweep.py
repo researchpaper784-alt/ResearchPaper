@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 import yaml
 
-from fedswarm.utils.results import make_run_id
+from fedswarm.utils.results import make_run_id, resolved_config
 
 DEFAULT_LOCK_TIMEOUT_S = 3600.0
 
@@ -168,8 +168,9 @@ def predict_run_id(defaults: dict[str, Any], overrides: dict[str, Any]) -> str:
     merged = {**defaults, **overrides}
     seed = int(merged.get("seed", 0))
     strategy_name = str(merged.get("strategy-name", "fedavg")).lower()
-    resolved_config = {"run_config": merged, "strategy": strategy_name, "seed": seed}
-    return make_run_id(resolved_config, seed)
+    # The same function fl/app.py uses to build the block it hashes, so a predicted run_id
+    # and the real one cannot drift apart through two hand-written copies of the layout.
+    return make_run_id(resolved_config(merged, strategy_name, seed), seed)
 
 
 DEFAULT_OUTPUT_DIR = "results/fl"

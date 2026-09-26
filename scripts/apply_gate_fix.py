@@ -34,6 +34,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from fedswarm.utils.results import result_settings  # noqa: E402
+
 # key -> value, matching gate_fitness.yaml's arms.
 FIXES = {
     "none": {},
@@ -68,15 +70,19 @@ def read_gate(results_dir: Path) -> list[dict]:
         except (OSError, json.JSONDecodeError):
             continue
         config = result.get("config") or {}
-        if not config:
+        # Settings are NESTED under config["run_config"] (fedswarm.utils.results.
+        # resolved_config). This read them flat until the first real Kaggle gate, where every
+        # arm therefore came back with no settings and was labelled `default`.
+        settings = result_settings(result)
+        if not settings:
             continue
         margins = round_margins(result)
         rows.append({
             "file": path.name,
-            "strategy": config.get("strategy-name") or config.get("strategy") or "?",
-            "gamma_entropy": config.get("aco-gamma-entropy"),
-            "dispersion": config.get("aco-dispersion-reference"),
-            "seed": result.get("seed"),
+            "strategy": config.get("strategy") or settings.get("strategy-name") or "?",
+            "gamma_entropy": settings.get("aco-gamma-entropy"),
+            "dispersion": settings.get("aco-dispersion-reference"),
+            "seed": config.get("seed", settings.get("seed")),
             "rounds": len(margins),
             "mean_margin": sum(margins) / len(margins) if margins else None,
             "max_margin": max(margins) if margins else None,
