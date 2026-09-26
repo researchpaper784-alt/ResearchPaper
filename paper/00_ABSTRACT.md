@@ -12,7 +12,8 @@ forbids for exactly the reason that it then diverges from the table.
    negative framing holds, lead with the degenerate optimum (measured: best single-client vertex
    beat the reference point in 15/15 rounds) and the equal-budget result, not with the method.
 4. The reusable contributions: the `corner_margin` diagnostic, its closed-form penalty
-   threshold, the equal-budget protocol, the de-duplicated pseudo-patient split.
+   threshold, the equal-budget protocol, component-level pseudo-patient splitting (image-level
+   de-dup is published; the contribution is the 7.9% it leaves chain-linked).
 5. One sentence of scope: one dataset, K=10, 3 regimes, 6 baselines, 8 seeds.
 
 **Numbers to pull in, each from a generated artifact rather than retyped:**

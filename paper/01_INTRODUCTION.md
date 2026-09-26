@@ -99,8 +99,11 @@ negative and, we argue, more useful than the first would have been.
 — which detects the degeneracy above from quantities a round already computes. (ii) A
 closed-form expression for the penalty weight that removes it. (iii) An equal-budget comparison
 that isolates *which* search method matters, with the anchoring mechanism identified. (iv) A
-fully de-duplicated, leakage-audited pseudo-patient split for this dataset, on which the
-published class balance turns out to be an artifact of duplicating one class (§4.1).
+component-level pseudo-patient split. Image-level de-duplication of this dataset is already
+published; we show it still leaves 7.9% of retained images chain-linked to another retained
+image and split independently, and remove that by splitting on connected components of the
+near-duplicate graph (§4.2). We also separate a confound prior work names but does not
+quantify: the archive's exact class balance is manufactured by duplicating one class (§4.1).
 
 ---
 

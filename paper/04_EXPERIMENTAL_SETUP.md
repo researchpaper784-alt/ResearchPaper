@@ -49,8 +49,14 @@ data that is one-third redundant with two-thirds of that redundancy inside a sin
 
 ## 4.2 De-duplication and leakage, at the pseudo-patient level
 
-Brain-tumour-MRI papers routinely report 99%+ accuracy that does not survive a proper split.
-We audited for it rather than inheriting it.
+That this dataset leaks is **not our finding**. Image-level de-duplication of it has been
+published at least three times — a 3,522-scan leakage-free benchmark [CITE: MTA-Swin, Lu et al.,
+J. Medical Systems 2026], deduplicated splits of the same archive with a 4.17-point accuracy drop
+[CITE: WICA-Net-M, Khan et al., Computers 2026], and a pHash before/after protocol [CITE:
+Saifullah et al., ICTAI 2025] — against the broader background of slice-selection bias in this
+dataset [CITE: Wallis et al., Medical Image Analysis 2022] and leakage-inflated accuracy in
+medical imaging generally [CITE: Tampu et al., Scientific Data 2022]. We report our audit for
+completeness and reproducibility, not as a contribution:
 
 | finding | count |
 |---|---|
@@ -68,10 +74,44 @@ We audited for it rather than inheriting it.
 *Source: `data/processed/leakage_report.json`.*
 
 **2,030 of 7,200 images (28.2%) appear on both sides of the dataset's own published split.**
-Any model evaluated on that split is scored partly on images it trained on. We rebuild the
-split at the pseudo-patient level, so no component appears in more than one of train/val/test
-and no component is divided across federated clients. `n_components_spanning_splits` is 0 by
-construction and `tests/test_partition.py::test_no_cross_split_leakage` asserts it.
+
+### What image-level de-duplication leaves behind
+
+Two of those papers state the remaining problem themselves: *"patient-level leakage remains
+unresolved because patient identifiers are unavailable."* [CITE: Khan et al. 2026; also Sabuj et
+al. 2026] Image-level de-duplication — keep an image unless it is a near-duplicate of one
+already kept — guarantees that no two retained images are near-duplicates. **It does not
+guarantee they are unrelated.** Images $A$ and $C$ can both survive while each is a
+near-duplicate of a dropped $B$; they are then split independently, and one can land in train
+while the other lands in test.
+
+We treat near-duplication as a graph and split on its **connected components**: every image
+joined to another by any chain of near-duplicate edges belongs to one pseudo-patient, and a
+pseudo-patient is never divided across train/val/test or across federated clients. The
+difference is the transitive part of the graph, and on this dataset it is not small:
+
+| | count |
+|---|---|
+| same-component image pairs | 7,182 |
+| of which **not** direct near-duplicates (chain-linked only) | **1,289** |
+| components that are not cliques | **235** of 1,103 |
+| images a greedy image-level pass retains **that are chain-linked to another retained image** | **394 of 4,968 (7.9%)** |
+| related pairs it then splits independently | **256** (range 241–275 over 5 orderings) |
+
+*Source: `data/processed/component_vs_image_dedup.json`, produced by
+`scripts/measure_component_vs_image_dedup.py` from the committed manifest's `phash` and
+`sha256` columns, which exactly reproduces the committed partition. pHash threshold 5.*
+
+Component-level splitting makes the last two rows zero by construction:
+`n_components_spanning_splits` is 0 and `tests/test_partition.py::test_no_cross_split_leakage`
+asserts it.
+
+**What it costs, stated rather than hidden.** Chain-linked is not the same as same-patient. A
+pHash chain can join genuinely different slices that merely look alike — the 25 components
+spanning two class labels show chains *do* sometimes cross a boundary that the same patient could
+not. Component-level splitting is therefore **conservative**: it may over-group, leaving 4,755
+independent units where the greedy image-level pass reports ~4,968, and coarser units make
+stratification harder. We accept that trade in the direction that cannot inflate a test score.
 
 The 25 mixed-label components are not silently discarded: this dataset's SARTAJ portion has
 documented glioma mislabeling, so these are either a too-loose near-duplicate threshold or

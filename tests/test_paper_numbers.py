@@ -130,3 +130,77 @@ def test_every_citation_placeholder_is_findable() -> None:
         "no [CITE] markers remain in paper/. If the references were genuinely resolved, delete "
         "this test in the same commit that adds the bibliography."
     )
+
+
+# --------------------------------------------------------------------------------------
+# §4.2's surviving contribution (2026-09-26). Image-level de-duplication of this dataset is
+# published three times over; what is left is the claim that splitting on CONNECTED
+# COMPONENTS catches chain-linked images an image-level pass keeps. That claim is only as good
+# as its number, so the number is pinned to the committed JSON and the JSON to the manifest.
+
+COMPONENT_REPORT = REPO_ROOT / "data/processed/component_vs_image_dedup.json"
+
+
+@pytest.fixture(scope="module")
+def component_report() -> dict:
+    return json.loads(COMPONENT_REPORT.read_text())
+
+
+def test_component_report_describes_the_graph_the_splits_were_built_on(component_report) -> None:
+    """If the reconstruction diverged from the committed partition, every number in §4.2
+    would describe a different graph from the one the train/val/test split used."""
+    assert component_report["reconstruction_matches_committed_partition"] is True
+
+
+def test_component_report_is_not_stale(manifest, component_report) -> None:
+    """Recompute the cheap, deterministic half from the manifest. The greedy half is
+    order-dependent and slow, so it is read from the committed report instead."""
+    import numpy as np
+
+    from fedswarm.data.dedup import (
+        components_from_edges,
+        exact_duplicate_edges,
+        near_duplicate_edges,
+    )
+
+    raw = pd.read_csv(REPO_ROOT / "data/processed/manifest.csv",
+                      dtype={"phash": str, "sha256": str})
+    bits = np.array([[c == "1" for c in h] for h in raw["phash"]], dtype=np.float32)
+    edges = set(exact_duplicate_edges(raw["sha256"].tolist())) | set(
+        near_duplicate_edges(bits, component_report["threshold"]))
+    labels = components_from_edges(len(raw), sorted(edges))
+    sizes = np.bincount(labels)
+    same_component_pairs = int(sum(k * (k - 1) // 2 for k in sizes if k > 1))
+
+    assert len(edges) == component_report["n_direct_edges"]
+    assert same_component_pairs == component_report["n_same_component_pairs"]
+    assert same_component_pairs - len(edges) == component_report["n_indirect_pairs"]
+
+
+def test_setup_quotes_the_component_numbers(setup_text, component_report) -> None:
+    greedy = component_report["image_level_greedy"]
+    runs = greedy["per_ordering"]
+    mean_linked = round(greedy["mean_survivors_sharing_a_component"])
+    mean_survivors = round(greedy["mean_survivors"])
+    pct = 100 * greedy["mean_survivors_sharing_a_component"] / greedy["mean_survivors"]
+
+    for value in (
+        component_report["n_same_component_pairs"], component_report["n_indirect_pairs"],
+        component_report["n_non_clique_components"], component_report["n_multi_image_components"],
+        mean_linked, mean_survivors, round(greedy["mean_related_survivor_pairs"]),
+        min(r["related_survivor_pairs"] for r in runs),
+        max(r["related_survivor_pairs"] for r in runs),
+    ):
+        assert _says(setup_text, f"{value:,}"), f"§4.2 does not state {value:,}"
+    assert _says(setup_text, f"{pct:.1f}%"), f"§4.2 does not state {pct:.1f}%"
+
+    # The comparative claim, not just the values: an image-level pass leaves SOME
+    # chain-linked survivors. If a re-run ever made this zero, §4.2's argument is gone.
+    assert all(r["related_survivor_pairs"] > 0 for r in runs)
+
+
+def test_the_setup_no_longer_claims_the_audit_as_a_contribution(setup_text) -> None:
+    """The earlier draft said 'We audited for it rather than inheriting it' as though the
+    audit were new. Three papers did it first; the section must say so."""
+    assert "We audited for it rather than inheriting it" not in setup_text
+    assert "not our finding" in setup_text
