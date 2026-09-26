@@ -243,14 +243,29 @@ def check_config_paths(nb: dict) -> list[str]:
     return problems
 
 
-# Stdlib modules newer than the oldest Python a notebook runtime has shipped. Kaggle images
-# have run 3.10; `tomllib` arrived in 3.11. An unguarded import dies with
-# ModuleNotFoundError right after the gate has spent its GPU time.
-NEWER_THAN_310 = {"tomllib": "3.11"}
+# Stdlib modules and the Python version that introduced them. A notebook may use any module
+# available at the project's DECLARED floor (`requires-python` in pyproject.toml), because pip
+# refuses to install fedswarm below it -- so a runtime older than the floor fails loudly at the
+# install cell, not quietly at a later one.
+#
+# An earlier version of this check hardcoded "Kaggle images have shipped 3.10" and flagged
+# `import tomllib`. That was an assumption, not a measurement, and it was wrong in the way
+# that matters: the floor is 3.11, and B's notebook installed fedswarm on Kaggle on
+# 2026-09-19, which pip would have refused below 3.11. A check that flags code which cannot
+# break teaches people to ignore it. The floor is now read, not assumed.
+STDLIB_SINCE = {"tomllib": (3, 11), "graphlib": (3, 9), "zoneinfo": (3, 9)}
 
 
-def check_stdlib_portability(nb: dict) -> list[str]:
-    """Flag a 3.11+ stdlib import unless it sits inside a try that catches ImportError."""
+def python_floor() -> tuple[int, int]:
+    text = (REPO_ROOT / "pyproject.toml").read_text()
+    m = re.search(r'requires-python\s*=\s*">=\s*(\d+)\.(\d+)', text)
+    assert m, "pyproject.toml declares no requires-python lower bound"
+    return int(m.group(1)), int(m.group(2))
+
+
+def check_stdlib_portability(nb: dict, floor: tuple[int, int] | None = None) -> list[str]:
+    """Flag a stdlib import newer than the declared floor, unless guarded by a try."""
+    floor = floor or python_floor()
     problems = []
     for i, src, _ in code_cells(nb):
         try:
@@ -271,10 +286,12 @@ def check_stdlib_portability(nb: dict) -> list[str]:
             elif isinstance(node, ast.ImportFrom) and node.module:
                 names = [node.module.split(".")[0]]
             for name in names:
-                if name in NEWER_THAN_310 and id(node) not in guarded:
+                since = STDLIB_SINCE.get(name)
+                if since and since > floor and id(node) not in guarded:
                     problems.append(
                         f"cell {i}: unguarded `import {name}` needs Python "
-                        f"{NEWER_THAN_310[name]}+; Kaggle images have shipped 3.10"
+                        f"{since[0]}.{since[1]}+, above the declared floor "
+                        f"{floor[0]}.{floor[1]}"
                     )
     return problems
 
@@ -333,11 +350,13 @@ def test_each_check_catches_the_bug_it_exists_for() -> None:
     assert any("--no-such-flag" in p for p in flag_problems)
     assert any("no_such_script" in p for p in flag_problems)
     assert any("does_not_exist" in p for p in check_config_paths(broken))
-    assert any("tomllib" in p for p in check_stdlib_portability(broken))
+    # Against a hypothetical 3.10 floor the check must fire; against the real floor it must
+    # not, because tomllib cannot break a runtime pip was willing to install into.
+    assert any("tomllib" in p for p in check_stdlib_portability(broken, floor=(3, 10)))
+    assert not check_stdlib_portability(broken), "flags tomllib despite a >=3.11 floor"
 
-    # And the guarded form -- what the Day 1 notebook now does -- must pass.
     guarded = {"cells": [cell("try:\n    import tomllib\nexcept ModuleNotFoundError:\n    pass\n")]}
-    assert not check_stdlib_portability(guarded), check_stdlib_portability(guarded)
+    assert not check_stdlib_portability(guarded, floor=(3, 10))
 
 
 def test_a_clean_notebook_passes_every_check() -> None:

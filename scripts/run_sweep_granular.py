@@ -35,23 +35,16 @@ import argparse
 import sys
 from pathlib import Path
 
-import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from fedswarm.sweep import (  # noqa: E402
-    expand_grid,
     gpu_fraction_problem,
-    order_seed_first,
+    granular_runs,
     run_sweep,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-
-
-def load_experiment_config(path: str | Path) -> dict:
-    with open(path) as f:
-        return yaml.safe_load(f)
 
 
 def main() -> int:
@@ -80,17 +73,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    experiment = load_experiment_config(args.config)
-    runs = order_seed_first(
-        expand_grid(
-            strategies=experiment["strategies"],
-            partitions=experiment["partitions"],
-            seeds=experiment["seeds"],
-            base_overrides=experiment.get("base_overrides", {}),
-            group=Path(args.config).stem,
-            base_dir=REPO_ROOT,
-        )
-    )
+    # One expansion, shared with the notebooks via fedswarm.sweep.granular_runs, so "which
+    # cells belong to this sweep" cannot mean different things in the two places.
+    runs = granular_runs(args.config, REPO_ROOT)
 
     # Before anything starts: a sweep that trains on CPU on a GPU box looks healthy and
     # never finishes (`sweep.gpu_fraction_problem`). A dry run is exempt -- it runs nothing.

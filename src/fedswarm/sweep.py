@@ -92,6 +92,42 @@ def expand_grid(
     return runs
 
 
+def granular_runs(config_path: str | Path, base_dir: str | Path) -> list[RunSpec]:
+    """Expand a granular experiment config (strategies x partitions x seeds) into runs.
+
+    The one expansion `scripts/run_sweep_granular.py` and the Kaggle notebooks share, so a
+    notebook asking "which cells belong to this sweep?" gets the same answer the runner acts
+    on. Before this existed each notebook re-derived it by hand, and the first attempt called
+    a helper that lived only inside the script and omitted a required argument.
+    """
+    path = Path(config_path)
+    spec = yaml.safe_load(path.read_text())
+    return order_seed_first(
+        expand_grid(
+            strategies=spec["strategies"],
+            partitions=spec["partitions"],
+            seeds=spec["seeds"],
+            base_overrides=spec.get("base_overrides", {}),
+            group=path.stem,
+            base_dir=Path(base_dir),
+        )
+    )
+
+
+def planned_run_ids(runs: list[RunSpec], pyproject_path: str | Path) -> dict[str, str]:
+    """{run_id: label} for every run, predicted exactly as `run_sweep` would name them.
+
+    Side-effect free: `run_sweep(dry_run=True)` writes no manifest entry and takes no lock.
+
+    The ids hash the resolved config INCLUDING pyproject's defaults, so they change when a
+    default does -- which is the point when filtering results, and the trap when the gate's
+    fitness fix has been applied in one session and not the next. Call this after
+    `scripts/apply_gate_fix.py`, never before.
+    """
+    entries = run_sweep(runs, pyproject_path=str(pyproject_path), dry_run=True)
+    return {e["run_id"]: e["label"] for e in entries}
+
+
 def order_seed_first(runs: list[RunSpec]) -> list[RunSpec]:
     """Plan §6.2: "Order runs so that one complete seed of every configuration
     finishes first -- that way a partial sweep still yields a full (if noisy)
