@@ -2981,3 +2981,25 @@ which is why this change did not need any test rewritten, only the comments and 
 quote the number in prose.
 
 830 tests pass, ruff clean.
+
+## 2026-09-27 (later) -- Day 2 split into 2a/2b, at the project owner's request
+
+Day 2 (A1: 80 cells, ~17 GPU-h) has never fit one 12-hour Kaggle session, and until now its
+own instructions said "run this one file twice, attaching your own previous output the second
+time." The project owner asked for it as two separate files instead, matching the shape every
+other day-boundary in this project already uses (Day 1 -> Day 2, Day 2 -> Day 3: a distinct
+notebook per stage, output handed forward).
+
+`kaggle_day2_a1.ipynb` is retired; `kaggle_day2a_a1.ipynb` starts the A1 sweep and commits
+however far it gets, `kaggle_day2b_a1.ipynb` is a second, independent notebook (full setup of
+its own, same as any other day boundary) that attaches Day 2a's output, continues the *same*
+`ablation_a1_reduced.yaml` sweep (finished cells skip automatically -- nothing is duplicated
+or re-run), then does the analysis and hands off to Day 3. Neither file changes what the sweep
+tests or its cost; the split is purely about which notebook object each half of the work lives
+in, matching the pattern the project owner is already used to from Day 1/Day 2/Day 3.
+
+Day 1's own "NEXT" pointer at the end of its notebook is updated to name Day 2a instead of the
+retired file. Day 3 is untouched -- it never referenced Day 2 by filename.
+
+840 tests pass (up from 830: two more notebooks for the parametrized static, dynamic and
+builder-parity checks to run against), ruff clean.

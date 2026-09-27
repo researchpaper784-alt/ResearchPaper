@@ -509,38 +509,39 @@ else:
     print("nothing and the last structural novelty is gone. Stop and re-plan before Day 2.")
 ''', imports="from collections import defaultdict\n"),
     code("!python scripts/make_tables.py --results-dir results/fl/ablation --out paper/tables"),
-    *save("Day 2 -- notebooks/kaggle_day2_a1.ipynb. Attaching THIS notebook's output saves ~20 min."),
+    *save("Day 2a -- notebooks/kaggle_day2a_a1.ipynb. Attaching THIS notebook's output saves ~20 min."),
 ]
 
 
 # ======================================================================================
-# Day 2 — A1
+# Day 2 — A1, split across two files because 80 cells / ~17 GPU-h does not fit one 12-hour
+# Kaggle session. Day 2a starts the sweep and commits whatever it gets through; Day 2b is a
+# second, independent notebook that attaches Day 2a's output, continues the SAME sweep
+# (finished cells skip automatically), then runs the analysis. This is the same shape as the
+# Day 1 -> Day 2 handoff, one level deeper, rather than "open this one file twice."
 
-DAY2 = [
+DAY2A = [
     md(r'''
-# FedSwarm — DAY 2: A1, the go/no-go on the framing (Kaggle GPU)
+# FedSwarm — DAY 2a: A1, part 1 of 2 (Kaggle GPU)
 
 **Optional, saves ~20 minutes:** attach the **Day 1** notebook's output (right sidebar →
 **+ Add Input → Your Work**). It holds the gate's results, from which this notebook re-derives the
 fitness fix. Without it, this notebook re-runs the gate itself before A1.
 
 **A1** replaces the colony with random search, coordinate-grid search, PSO and a GA at an
-**identical evaluation budget and identical fitness**. 80 cells, ~17 GPU-h — **two sessions**.
-Session 2: attach this notebook's own session-1 output too; finished cells are skipped. The 5
-cells A1 shares with Day 1's A2 are skipped as well.
+**identical evaluation budget and identical fitness**. 80 cells, ~17 GPU-h total — split across
+**two notebooks** because that does not fit one 12-hour session. This one (2a) starts the sweep
+and commits however far it gets; **Day 2b** picks up from here and finishes it. The 5 cells A1
+shares with Day 1's A2 are skipped here too.
 
 **What to expect, written down before it runs:** three local screens found ACO *losing* to every
 control (ACO +0.0013 → +0.0066 against random +0.0304, PSO +0.0484, coordinate grid +0.0501; 0 of
 3 seeds). The mechanism is known: the desirability signal spans ~0.04 against a level spacing of
 0.25, so the greedy branch reproduces the FedAvg point ~70% of the time.
-
-- **ACO loses or ties** → framing A stands as written in `paper/01_INTRODUCTION.md`.
-- **ACO significantly beats all four** → delete §1.3 there and paste the alternative framing from
-  the end of the same file.
 '''),
     md(HOW_TO_RUN),
     md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
-    md("### Restore — Day 1's gate results and any earlier A1 session, if attached"),
+    md("### Restore — Day 1's gate results, if attached"),
     RESTORE,
     md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
     FEDERATION_MD, FEDERATION,
@@ -554,7 +555,45 @@ should run at all.
     GATE_IF_MISSING,
     md(r'''
 ---
-# STEP 2 — A1: 80 cells, ~17 GPU-h
+# STEP 2 — A1: however many of the 80 cells this session has time for
+'''),
+    code(r'''
+ensure_gate_fix()
+!python scripts/run_sweep_granular.py --config configs/experiment/ablation_a1_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT}
+'''),
+    *save("Day 2b -- notebooks/kaggle_day2b_a1.ipynb. Attach THIS notebook's output there to "
+          "continue the same sweep; finished cells skip automatically."),
+]
+
+
+DAY2B = [
+    md(r'''
+# FedSwarm — DAY 2b: A1, part 2 of 2 -- finish the sweep, then the analysis (Kaggle GPU)
+
+Attach **both** Day 1's output and **Day 2a's** output (right sidebar → **+ Add Input →
+Your Work**, twice). This continues the exact same `ablation_a1_reduced.yaml` sweep Day 2a
+started -- cells it already finished are skipped, not re-run.
+
+If Day 2a already finished all 80 cells, this notebook's sweep cell below is a fast no-op and
+it goes straight to the analysis.
+'''),
+    md(HOW_TO_RUN),
+    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
+    md("### Restore — Day 1's gate results and Day 2a's A1 progress, if attached"),
+    RESTORE,
+    md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
+    FEDERATION_MD, FEDERATION,
+    md(r'''
+---
+# STEP 1 — the fitness fix: from Day 1's results, or by re-running the gate
+
+Halts only if the gate finds no arm that closes the corner -- in which case no FedACO sweep
+should run at all.
+'''),
+    GATE_IF_MISSING,
+    md(r'''
+---
+# STEP 2 — finish A1: whatever of the 80 cells Day 2a did not get to
 '''),
     code(r'''
 ensure_gate_fix()
@@ -681,7 +720,8 @@ if len(clean_done) < len(clean_labels):
 
 NOTEBOOKS = {
     "kaggle_day1_gate_and_a2.ipynb": ("d1", DAY1),
-    "kaggle_day2_a1.ipynb": ("d2", DAY2),
+    "kaggle_day2a_a1.ipynb": ("d2a", DAY2A),
+    "kaggle_day2b_a1.ipynb": ("d2b", DAY2B),
     "kaggle_day3_main_and_robustness.ipynb": ("d3", DAY3),
 }
 

@@ -107,8 +107,10 @@ def test_no_notebook_requires_attaching_the_dataset_by_hand() -> None:
 
 
 def test_later_days_run_the_gate_themselves_when_its_results_are_missing() -> None:
-    """Day 2 and Day 3 must not demand Day 1's output be attached: they re-run the gate."""
-    for name in ("kaggle_day2_a1.ipynb", "kaggle_day3_main_and_robustness.ipynb"):
+    """Day 2a, Day 2b and Day 3 must not demand Day 1's output be attached: they re-run the
+    gate."""
+    for name in ("kaggle_day2a_a1.ipynb", "kaggle_day2b_a1.ipynb",
+                 "kaggle_day3_main_and_robustness.ipynb"):
         cells = BUILDER.NOTEBOOKS[name][1]
         assert BUILDER.GATE_IF_MISSING in cells, name
         # ...and before any sweep that needs the fix
