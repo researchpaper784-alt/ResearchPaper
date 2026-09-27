@@ -118,8 +118,9 @@ main-plan:
 main:
 	$(PY) scripts/run_sweep.py --config configs/experiment/main.yaml $(GPUS_ARG)
 
-# The 9-day / ~100 GPU-h budget version of the main sweep: K=10, 3 regimes, 6
-# strategies, 8 seeds = 144 cells / ~30 GPU-h. Every cut is named in the config header.
+# The 9-day / ~100 GPU-h budget version of the main sweep: K=10, 3 regimes, 7
+# strategies (incl. scaffold), 8 seeds = 168 cells / ~35 GPU-h. Every cut is named in
+# the config header.
 main-reduced-plan:
 	$(PY) scripts/run_sweep.py --config configs/experiment/main_reduced.yaml --dry-run
 

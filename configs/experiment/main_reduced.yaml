@@ -22,12 +22,15 @@
 #    thing FedSwarm replaces -- so it is the most costly of the three to drop and the
 #    first to add back if hours free up.
 #
-# 3. Twelve strategies -> six. Kept: `fedavg` (the reference every claim is relative to,
+# 3. Twelve strategies -> seven. Kept: `fedavg` (the reference every claim is relative to,
 #    never droppable), `fedprox` (the standard heterogeneity baseline), `krum` and
 #    `trimmed-mean` (the Byzantine-robust pair R1/R2 compare against, so they are needed
 #    twice over), `fedlaw` (the adaptive-aggregation-weight competitor -- the closest
-#    prior work, so dropping it would leave the contribution uncontested), `fedaco`.
-#    Dropped: fedadam, fedyogi, median, fednova, loss-based, scaffold.
+#    prior work, so dropping it would leave the contribution uncontested), `scaffold`
+#    (the standard client-drift correction for non-IID FL -- the baseline most likely to
+#    be asked for by name, and already fully implemented with genuine client-side state,
+#    not a stub), `fedaco`.
+#    Dropped: fedadam, fedyogi, median, fednova, loss-based.
 #
 # WHAT IS NOT CUT: 8 seeds. That is not a preference, it is the signed-rank test's
 # p-value floor. At 5 seeds the smallest two-sided p obtainable is 0.0625, so a 5-seed
@@ -36,13 +39,13 @@
 #
 # The comparison family this supports: FedACO vs FedAvg in each of 3 regimes = 3
 # comparisons, which 8 seeds clears after Holm-Bonferroni. Comparisons against the other
-# four baselines are reported descriptively, NOT as significance claims -- 6 strategies x
-# 3 regimes would be a 15-comparison family and 8 seeds does not clear it. `make tables`
+# five baselines are reported descriptively, NOT as significance claims -- 7 strategies x
+# 3 regimes would be an 18-comparison family and 8 seeds does not clear it. `make tables`
 # prints the requirement for whatever family the table actually contains; believe it over
 # this comment.
 #
-# Cost: 6 x 3 x 8 = 144 cells x 100 rounds = 14,400 rounds. At the measured 7.5s/round
-# at K=10 that is ~30 GPU-h. Confirm with --dry-run on the GPU box before committing a
+# Cost: 7 x 3 x 8 = 168 cells x 100 rounds = 16,800 rounds. At the measured 7.5s/round
+# at K=10 that is ~35 GPU-h. Confirm with --dry-run on the GPU box before committing a
 # session; the CPU-measured basis printed here is not a GPU quote.
 
 name: main_reduced
@@ -53,6 +56,7 @@ strategies:
   - krum
   - trimmed-mean
   - fedlaw
+  - scaffold
   - fedaco
 
 regimes:

@@ -110,17 +110,17 @@ Two answers, depending on the deadline.
 
 **If you have 7–9 days**, the full set does not fit and no ordering of it does: it is
 351–701 GPU-hours, which at Kaggle's ~30 GPU-h per week per account is 12–23 weeks on one
-account and 4–8 across three. Run the reduced set — **342 cells, ~70 GPU-h**, in this order:
+account and 4–8 across three. Run the reduced set — **366 cells, ~75 GPU-h**, in this order:
 
 | order | make target | cells | GPU-h | who |
 |---|---|---|---|---|
 | 1 | `gate-fitness` | 8 | 0.25 | B — which fitness fix closes the corner, ~15 min |
 | 2 | `a1-reduced` | 80 | 16.7 | B — the go/no-go on claim C2 |
-| 3 | `main-reduced` | 144 | 30.0 | C — the headline table |
+| 3 | `main-reduced` | 168 | 35.0 | C — the headline table (7 strategies, incl. `scaffold`) |
 | 4 | `r1-reduced` | 40 | 8.3 | C — **before** `r2-reduced`, see below |
 | 5 | `r2-reduced` | 40 | 8.3 | C |
 | 6 | `a2-reduced` | 30 | 6.2 | C |
-| | `b-all`, `c-all` | **342** | **~70** | |
+| | `b-all`, `c-all` | **366** | **~75** | |
 
 Every cut is named in the config header it belongs to, so the paper states them rather than
 a reviewer finding them. `r1-reduced` must run before `r2-reduced`: R2 ships with no

@@ -24,7 +24,7 @@ make verify-phase9         # regenerates every figure and table TWICE, byte-comp
 `make verify-phase9` is plan §9.3's acceptance criterion: deleting `paper/figures/` and
 `paper/tables/` and re-running must restore them byte-for-byte. It passes on 10 artifacts.
 
-To reproduce the experiments themselves (~70 GPU-hours):
+To reproduce the experiments themselves (~75 GPU-hours):
 
 ```bash
 make b-all GPUS=0.1        # gate_fitness, then A1 -- the framing decision

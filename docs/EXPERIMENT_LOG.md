@@ -2955,3 +2955,29 @@ New order: `gate_fitness` (0.25 GPU-h, which fix) -> `a2_reduced` (6, is there a
 The first three are 23 GPU-h and settle every open question the paper's structure depends on.
 
 724 tests pass, ruff clean.
+
+## 2026-09-27 -- SCAFFOLD added back to `main_reduced`, at the project owner's request
+
+The 2026-09-25 trim cut `main_reduced.yaml` from twelve strategies to six, dropping fedadam,
+fedyogi, median, fednova, loss-based and scaffold together as one line item. Of those six,
+SCAFFOLD is the one with a real cost: it is the standard client-drift correction for non-IID
+FL, it is fully implemented with genuine per-client state (a control variate carried in
+Flower's node context, not a stub), and it is the baseline most likely to be asked for by name
+by anyone who knows the FL literature. The other five drops (adaptive server optimizers,
+a redundant robust-aggregator, and an unverified in-house heuristic with no citable source)
+stay dropped -- none of them bears on the paper's three actual claims.
+
+`main_reduced.yaml`'s strategies list is now `fedavg, fedprox, krum, trimmed-mean, fedlaw,
+scaffold, fedaco` -- seven, not six. Cost scales linearly with strategy count: 168 cells (was
+144), ~35 GPU-h (was ~30). Every downstream number that quoted the old count is updated in the
+same commit: `README.md`, `HANDOVER.md`, `paper/04_EXPERIMENTAL_SETUP.md`,
+`paper/07_REPRODUCIBILITY.md`, the Kaggle Day 3 notebook (regenerated via
+`scripts/build_kaggle_notebooks.py`, not hand-edited), and the Makefile comment. Project
+totals: 342 cells / ~70 GPU-h -> 366 cells / ~75 GPU-h.
+
+No test hardcoded the old strategy count or cell count -- `tests/test_config_defaults.py`
+checks ratios and set membership (`fedavg`/`fedaco` present, reduced-vs-full cost ratio),
+which is why this change did not need any test rewritten, only the comments and docs that
+quote the number in prose.
+
+830 tests pass, ruff clean.

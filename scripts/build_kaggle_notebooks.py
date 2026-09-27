@@ -617,11 +617,11 @@ gate itself first.
 
 | step | sweep | cells | GPU-h |
 |---|---|---|---|
-| 1 | `main_reduced` — 6 strategies × 3 regimes × 8 seeds | 144 | ~30 |
+| 1 | `main_reduced` — 7 strategies × 3 regimes × 8 seeds (incl. `scaffold`) | 168 | ~35 |
 | 2 | `robustness_r1_reduced` — label-flip at 30% + the clean arm | 40 | ~8 |
 | 3 | `robustness_r2_reduced` — gaussian and sign-flip at 30% | 40 | ~8 |
 
-**~46 GPU-hours is five or six Kaggle sessions** and more than one account's weekly quota
+**~51 GPU-hours is five or six Kaggle sessions** and more than one account's weekly quota
 (~30 GPU-h). Split it across accounts or weeks. Every sweep resumes per cell: re-run with this
 notebook's previous output attached and it continues where it stopped.
 
@@ -637,7 +637,7 @@ its deltas are measured against R1's `clean` arm in the same `results/fl/robustn
     GATE_IF_MISSING,
     md(r'''
 ---
-# STEP 1 — the main table: 144 cells, ~30 GPU-h
+# STEP 1 — the main table: 168 cells, ~35 GPU-h
 
 Then the IID band check. With almost no heterogeneity to exploit, every strategy should land in a
 narrow band on IID; a wide spread means something other than the method is driving the results,

@@ -162,16 +162,20 @@ FedLAW.
 
 ## 4.5 Baselines
 
-FedAvg, FedProx, Krum, Trimmed-Mean, FedLAW, and the proposed method. Each baseline received
-its own hyperparameter search on the validation split with a budget matched to the proposed
-method's (`scripts/run_hparam_search.py`; every search recorded in `docs/EXPERIMENT_LOG.md`).
+FedAvg, FedProx, Krum, Trimmed-Mean, FedLAW, SCAFFOLD, and the proposed method. Each baseline
+received its own hyperparameter search on the validation split with a budget matched to the
+proposed method's (`scripts/run_hparam_search.py`; every search recorded in
+`docs/EXPERIMENT_LOG.md`).
 
 FedLAW is the load-bearing baseline: it is the closest prior work — server-side *learned*
 aggregation weights — so it is the comparison that decides whether an ACO-searched weight
 vector buys anything a gradient-learned one does not. Krum and Trimmed-Mean serve twice, as
-standard baselines and as the Byzantine-robust reference set in §5.3.
+standard baselines and as the Byzantine-robust reference set in §5.3. SCAFFOLD is the standard
+client-drift correction for non-IID FL and the baseline most likely to be expected by name; it
+needs genuine per-client state (a control variate carried in Flower's node context, not just a
+different server-side rule), unlike every other baseline in this table.
 
-**Scope stated plainly:** six strategies, not the twelve the repository implements, and three
+**Scope stated plainly:** seven strategies, not the twelve the repository implements, and three
 partition regimes, not six. This is a compute constraint and not a methodological claim.
 `configs/experiment/main.yaml` holds the full grid (576 cells, 120–240 GPU-hours) and
 `main_reduced.yaml` documents each cut at the point it is made. The regimes dropped were
@@ -188,8 +192,8 @@ p = 0.25. Eight seeds move the floor to 0.0078.
 
 We test the proposed method against FedAvg in each of the three regimes: a **three-comparison
 family**, corrected with Holm–Bonferroni across the whole table rather than per regime. The
-remaining four baselines are reported descriptively with effect sizes and bootstrap CIs, not
-as significance claims — six strategies × three regimes would be a 15-comparison family that
-8 seeds does not clear. `scripts/make_tables.py` prints the seed requirement for whatever
+remaining five baselines are reported descriptively with effect sizes and bootstrap CIs, not
+as significance claims — seven strategies × three regimes would be an 18-comparison family
+that 8 seeds does not clear. `scripts/make_tables.py` prints the seed requirement for whatever
 family the table it just built actually contains; that output, not this paragraph, is the
 authority.

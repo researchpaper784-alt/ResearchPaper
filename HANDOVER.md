@@ -74,7 +74,7 @@ and it was written as a routine ablation before anyone realised it carries the c
 |---|---|---|
 | **Framing** | **A** — the degenerate optimum and the equal-budget loss are the findings | The alternative framing is written out in full at the end of `paper/01_INTRODUCTION.md`. If A1 on real data reverses the result, delete §1.3 and paste that block. Nothing else in the paper changes — §4, §6 and §7 are framing-independent by construction. |
 | **Dataset variant** | **(a)** — keep this archive, document it precisely, restate the macro-F1 rationale against the de-duplicated distribution | `docs/OPEN_QUESTIONS.md` "Dataset variant … RESOLVED". Reversing means fetching the canonical release: Kaggle credentials, and the compute budget spent twice. |
-| **Scope** | **342 cells / ~70 GPU-h** instead of 351–701 | Every `*_reduced.yaml` header names its own cuts. The full-size configs are untouched and still runnable if the deadline moves. |
+| **Scope** | **366 cells / ~75 GPU-h** instead of 351–701 | Every `*_reduced.yaml` header names its own cuts. The full-size configs are untouched and still runnable if the deadline moves. `main_reduced` carries 7 strategies (added `scaffold` back, 2026-09-27), not 6. |
 
 These are settled. Write the paper as though they are true, not hedged. What can still change is
 the *evidence* (A1, A2), not the decisions.
@@ -91,9 +91,9 @@ make test                       # 724 tests, ~50s
 make gate-fitness GPUS=0.1      # 8 cells, ~15 min. Decides WHICH fitness fix to use.
 make a1-reduced   GPUS=0.1      # 80 cells, ~17 GPU-h. The go/no-go on the framing.
 
-# Person C — 254 cells, ~53 GPU-h, in DECISION order. r1 MUST precede r2 (see §6).
+# Person C — 278 cells, ~58 GPU-h, in DECISION order. r1 MUST precede r2 (see §6).
 make a2-reduced   GPUS=0.1      # 30 cells,  ~6 GPU-h  <-- FIRST: carries the contribution
-make main-reduced GPUS=0.1      # 144 cells, ~30 GPU-h
+make main-reduced GPUS=0.1      # 168 cells, ~35 GPU-h (7 strategies, incl. scaffold)
 make r1-reduced   GPUS=0.1      # 40 cells,  ~8 GPU-h
 make r2-reduced   GPUS=0.1      # 40 cells,  ~8 GPU-h
 
@@ -120,7 +120,7 @@ whether numbers mean anything.
 | # | work | GPU-h | state |
 |---|---|---|---|
 | 1 | `gate-fitness` → `a1-reduced` | 17 | ready, never run |
-| 2 | `main-reduced`, `r1`, `r2`, **`a2`** | 53 | ready, never run |
+| 2 | `main-reduced`, `r1`, `r2`, **`a2`** | 58 | ready, never run |
 | 3 | Phase 9: statistics, figures, tables | 0 | built and byte-verified, never run on real results |
 | 4 | **The paper** — §5 results prose + abstract | 0 | blocked on 1–2 |
 | 5 | **11 open `[CITE]` markers** | 0 | needs literature access |
@@ -129,7 +129,7 @@ whether numbers mean anything.
 
 `grep -rn "\[CITE" paper/` lists the open citations. Never invent an author, year or venue.
 
-**Item 4 is the real risk, not the GPU rows.** 70 GPU-hours is a `make` target. Eight pages with
+**Item 4 is the real risk, not the GPU rows.** 75 GPU-hours is a `make` target. Eight pages with
 two related-work sections is a person's undivided attention for days, and as of now nobody is
 assigned to it. Sections 1, 2, 4, 6 and 7 are already written (`paper/`); §5 and the abstract
 need the numbers.
