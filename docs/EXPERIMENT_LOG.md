@@ -3003,3 +3003,27 @@ retired file. Day 3 is untouched -- it never referenced Day 2 by filename.
 
 840 tests pass (up from 830: two more notebooks for the parametrized static, dynamic and
 builder-parity checks to run against), ruff clean.
+
+## 2026-09-28 -- Day 3's main table split into sequential parts, same reason as Day 2
+
+`main_reduced` is 168 cells / ~35 GPU-h -- roughly 3 Kaggle sessions back to back, since none
+of them fit 35 hours alone. Its own combined file used to just say "keep re-running this until
+it's done," same as Day 2 did before yesterday's split. The project owner asked for the same
+treatment: separate files, one per part, rather than one file re-opened repeatedly. Unlike
+Day 2's A1 (which needed exactly two parts), main_reduced's real GPU throughput isn't known
+precisely enough to commit to an exact part count, so the design leans on `run_sweep.py`'s own
+`"{done} already complete, {todo} to run"` line -- printed fresh every invocation against the
+full 168 -- as the actual signal, not the file's number. `kaggle_day3c_main_finish.ipynb` is
+explicitly documented as repeatable: if its own sweep line doesn't read `0 to run`, re-attach
+its own output and run it again before trusting the IID-band check and table beneath it.
+
+`kaggle_day3_main_and_robustness.ipynb` is retired, replaced by four files:
+`kaggle_day3a_main.ipynb` and `kaggle_day3b_main.ipynb` (start and continue the sweep, commit
+whatever they get through), `kaggle_day3c_main_finish.ipynb` (finishes the sweep, then the IID
+band check and `make_tables`), and `kaggle_day3_robustness.ipynb` (R1 then R2, unchanged in
+substance -- it only ever needed the gate's fix, not the main table, so pulling main_reduced
+out into its own sequence doesn't touch it). Day 2b's own "NEXT" pointer is updated to name
+Day 3a instead of the retired file.
+
+870 tests pass (up from 840: three net new notebooks -- one retired, four added -- for the
+parametrized static, dynamic and builder-parity checks to run against), ruff clean.

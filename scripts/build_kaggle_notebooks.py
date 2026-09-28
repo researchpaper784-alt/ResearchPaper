@@ -639,60 +639,154 @@ else:
     print("controls. Losing to or tying any one of them is enough for framing A.")
 ''', imports="from collections import defaultdict\n"),
     code("!python scripts/make_tables.py --results-dir results/fl/ablation --out paper/tables"),
-    *save("Day 3 -- notebooks/kaggle_day3_main_and_robustness.ipynb."),
+    *save("Day 3, main part 1 -- notebooks/kaggle_day3a_main.ipynb."),
 ]
 
 
 # ======================================================================================
-# Day 3 — the main table and the two robustness sweeps
+# Day 3, main table -- split into sequential parts because 168 cells / ~35 GPU-h does not
+# fit one 12-hour Kaggle session (35h needs at least 3 of them back to back). Each part
+# runs the SAME `main_reduced.yaml` sweep command; `run_sweep.py` itself prints
+# "{done} already complete, {todo} to run" against the full 168 every time it starts, so
+# that line -- not a fixed part count -- is the real progress signal. If a part ends with
+# anything other than "0 to run", re-run that same file (attach its own latest output)
+# again before moving to the next one.
 
-DAY3 = [
+MAIN_SWEEP_CELL = code(r'''
+ensure_gate_fix()
+!python scripts/run_sweep.py --config configs/experiment/main_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT}
+''')
+
+
+def main_part_intro(part: int, of: int, next_step: str) -> tuple[str, str]:
+    return md(r'''
+# FedSwarm — DAY 3, main table: part ''' + str(part) + " of ~" + str(of) + r''' (Kaggle GPU)
+
+168 cells, ~35 GPU-h total -- roughly 3 Kaggle sessions back to back, since none of them fit
+35 hours alone. This file runs the same `main_reduced.yaml` sweep every part runs; finished
+cells are skipped automatically, so re-running it costs nothing beyond what is actually left.
+
+**Read the sweep's own first line of output**, not this notebook's part number, to know
+whether to continue: it prints `"N already complete, M to run"` against the full 168 every
+time. If `M` is not `0` when this session ends, attach **this same notebook's own output**
+and run it again -- as many times as it takes. Once it reads `0 to run`, move on: ''' + next_step + r'''
+''')
+
+
+DAY3A_MAIN = [
+    main_part_intro(1, 3, "**Day 3, main part 2**."),
+    md(HOW_TO_RUN),
+    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
+    md("### Restore — Day 1's gate results, if attached"),
+    RESTORE,
+    md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
+    FEDERATION_MD, FEDERATION,
     md(r'''
-# FedSwarm — DAY 3: the main table, then R1 and R2 (Kaggle GPU)
+---
+# STEP 1 — the fitness fix: from Day 1's results, or by re-running the gate
+
+Halts only if the gate finds no arm that closes the corner -- in which case no FedACO sweep
+should run at all.
+'''),
+    GATE_IF_MISSING,
+    md("---\n# STEP 2 — main_reduced: however many of the 168 cells this session has time for"),
+    MAIN_SWEEP_CELL,
+    *save("Day 3, main part 2 -- notebooks/kaggle_day3b_main.ipynb. Attach THIS notebook's "
+          "output there to continue the same sweep; finished cells skip automatically."),
+]
+
+
+DAY3B_MAIN = [
+    main_part_intro(2, 3, "**Day 3, main part 3**."),
+    md(HOW_TO_RUN),
+    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
+    md("### Restore — Day 1's gate results and Day 3 main part 1's progress, if attached"),
+    RESTORE,
+    md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
+    FEDERATION_MD, FEDERATION,
+    md(r'''
+---
+# STEP 1 — the fitness fix: from Day 1's results, or by re-running the gate
+
+Halts only if the gate finds no arm that closes the corner -- in which case no FedACO sweep
+should run at all.
+'''),
+    GATE_IF_MISSING,
+    md("---\n# STEP 2 — main_reduced: continuing from part 1"),
+    MAIN_SWEEP_CELL,
+    *save("Day 3, main part 3 -- notebooks/kaggle_day3c_main_finish.ipynb. Attach THIS "
+          "notebook's output there to continue the same sweep; finished cells skip "
+          "automatically."),
+]
+
+
+DAY3C_MAIN_FINISH = [
+    main_part_intro(3, 3, "**Day 3, robustness** (R1 then R2), in a separate notebook."),
+    md(HOW_TO_RUN),
+    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
+    md("### Restore — Day 1's gate results and Day 3 main parts 1-2's progress, if attached"),
+    RESTORE,
+    md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
+    FEDERATION_MD, FEDERATION,
+    md(r'''
+---
+# STEP 1 — the fitness fix: from Day 1's results, or by re-running the gate
+
+Halts only if the gate finds no arm that closes the corner -- in which case no FedACO sweep
+should run at all.
+'''),
+    GATE_IF_MISSING,
+    md(r'''
+---
+# STEP 2 — main_reduced: finish whatever is left, then the IID band check and the table
+
+If the sweep's own first line below does not read `0 to run`, this part is not done --
+re-run this same notebook (attach its own latest output) before trusting the table beneath
+it. With almost no heterogeneity to exploit, every strategy should land in a narrow band on
+IID; a wide spread means something other than the method is driving the results.
+'''),
+    MAIN_SWEEP_CELL,
+    code(r'''
+!python scripts/check_iid_band.py --results-dir results/fl/main
+!python scripts/make_tables.py --results-dir results/fl/main --out paper/tables
+'''),
+    *save("Day 3, robustness -- notebooks/kaggle_day3_robustness.ipynb."),
+]
+
+
+# ======================================================================================
+# Day 3, robustness -- R1 then R2. Unchanged in substance from the old combined Day 3
+# file; split out into its own notebook now that the main table has its own sequence.
+
+DAY3_ROBUSTNESS = [
+    md(r'''
+# FedSwarm — DAY 3, robustness: R1, then R2 (Kaggle GPU)
 
 **Optional, saves ~20 minutes:** attach the **Day 1** notebook's output (right sidebar →
-**+ Add Input → Your Work**) — it holds the gate's results. Without it, this notebook re-runs the
-gate itself first.
+**+ Add Input → Your Work**) — it holds the gate's results. Without it, this notebook re-runs
+the gate itself first. The main table is not a prerequisite -- R1/R2 only need the gate's fix.
 
 | step | sweep | cells | GPU-h |
 |---|---|---|---|
-| 1 | `main_reduced` — 7 strategies × 3 regimes × 8 seeds (incl. `scaffold`) | 168 | ~35 |
-| 2 | `robustness_r1_reduced` — label-flip at 30% + the clean arm | 40 | ~8 |
-| 3 | `robustness_r2_reduced` — gaussian and sign-flip at 30% | 40 | ~8 |
+| 1 | `robustness_r1_reduced` — label-flip at 30% + the clean arm | 40 | ~8 |
+| 2 | `robustness_r2_reduced` — gaussian and sign-flip at 30% | 40 | ~8 |
 
-**~51 GPU-hours is five or six Kaggle sessions** and more than one account's weekly quota
-(~30 GPU-h). Split it across accounts or weeks. Every sweep resumes per cell: re-run with this
-notebook's previous output attached and it continues where it stopped.
+**~16 GPU-hours fits one Kaggle session.** Every sweep resumes per cell regardless, so a cut-off
+session just needs re-running with this notebook's own output attached.
 
 **R1 must finish before R2's table means anything.** R2 ships with no unattacked arm by design;
 its deltas are measured against R1's `clean` arm in the same `results/fl/robustness`.
 '''),
     md(HOW_TO_RUN),
     md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
-    md("### Restore — Day 1's gate results and any earlier Day 3 session, if attached"),
+    md("### Restore — Day 1's gate results, if attached"),
     RESTORE,
     md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
     FEDERATION_MD, FEDERATION,
     GATE_IF_MISSING,
     md(r'''
 ---
-# STEP 1 — the main table: 168 cells, ~35 GPU-h
-
-Then the IID band check. With almost no heterogeneity to exploit, every strategy should land in a
-narrow band on IID; a wide spread means something other than the method is driving the results,
-and nothing else in the table can be trusted until it is explained.
-'''),
-    code(r'''
-ensure_gate_fix()
-!python scripts/run_sweep.py --config configs/experiment/main_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT}
-'''),
-    code(r'''
-!python scripts/check_iid_band.py --results-dir results/fl/main
-!python scripts/make_tables.py --results-dir results/fl/main --out paper/tables
-'''),
-    md(r'''
----
-# STEP 2 and 3 — robustness: R1, then R2
+# STEP 1 and 2 — robustness: R1, then R2
 
 Plan §8: **any configuration where FedACO loses stays in the table** and is stated in the
 paper's limitations. Do not quietly drop a losing arm.
@@ -722,7 +816,10 @@ NOTEBOOKS = {
     "kaggle_day1_gate_and_a2.ipynb": ("d1", DAY1),
     "kaggle_day2a_a1.ipynb": ("d2a", DAY2A),
     "kaggle_day2b_a1.ipynb": ("d2b", DAY2B),
-    "kaggle_day3_main_and_robustness.ipynb": ("d3", DAY3),
+    "kaggle_day3a_main.ipynb": ("d3a", DAY3A_MAIN),
+    "kaggle_day3b_main.ipynb": ("d3b", DAY3B_MAIN),
+    "kaggle_day3c_main_finish.ipynb": ("d3c", DAY3C_MAIN_FINISH),
+    "kaggle_day3_robustness.ipynb": ("d3r", DAY3_ROBUSTNESS),
 }
 
 
