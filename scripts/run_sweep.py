@@ -381,6 +381,20 @@ def main() -> int:
         default=MEASURED_SECONDS_PER_ROUND,
         help="for the --dry-run cost projection",
     )
+    parser.add_argument(
+        "--time-limit-hours",
+        type=float,
+        default=None,
+        help=(
+            "stop starting new cells once this many hours have elapsed since this "
+            "invocation began (a cell already in flight always finishes -- this never "
+            "kills a running simulation). Checked before each cell, not during one, so "
+            "the actual wall clock can run somewhat over the limit by up to one cell's "
+            "duration. Exits 0 -- stopping on the time limit is expected, not a failure. "
+            "Re-run the same command to continue; completed cells are skipped as usual. "
+            "Unset means no limit (run until todo is empty, same as before this existed)."
+        ),
+    )
     args = parser.parse_args()
 
     config_path = Path(args.config)
@@ -485,8 +499,22 @@ def main() -> int:
 
     failures = []
     started = time.time()
+    time_limit_hit = False
     for i, cell in enumerate(todo, 1):
         elapsed = time.time() - started
+        # Checked before starting a cell, never during one: a cell already running is let
+        # finish, so this can run over the limit by at most one cell's duration but never
+        # kills a `flwr run` mid-simulation. `i > 1` so one invocation always makes
+        # progress even if a single cell alone exceeds the limit -- otherwise a tight
+        # limit against a slow cell would spin forever re-running and stopping on cell 1.
+        if args.time_limit_hours is not None and i > 1 and elapsed >= args.time_limit_hours * 3600:
+            print(
+                f"\n  time limit reached ({elapsed / 3600:.1f}h >= {args.time_limit_hours}h) -- "
+                f"{len(todo) - i + 1} cells left. Re-run the same command to continue; "
+                "completed cells are skipped."
+            )
+            time_limit_hit = True
+            break
         eta = (elapsed / max(i - 1, 1)) * (len(todo) - i + 1) if i > 1 else 0
         print(f"\n[{i}/{len(todo)}] {cell.label}" + (f"   (eta {eta / 3600:.1f}h)" if i > 1 else ""))
         try:
@@ -537,7 +565,12 @@ def main() -> int:
             },
         )
 
-    print(f"\n{len(todo) - len(failures)}/{len(todo)} cells completed in {(time.time() - started) / 3600:.1f}h")
+    # Cells actually attempted this invocation -- `len(todo)` only if the loop ran to
+    # completion. A time-limit stop breaks before attempting cell `i`, so `i - 1` of them
+    # were tried; using `len(todo)` here instead would overcount "completed" by every cell
+    # still left, since nothing in `failures` would have caught them either.
+    attempted = (i - 1) if time_limit_hit else len(todo)
+    print(f"\n{attempted - len(failures)}/{attempted} cells completed in {(time.time() - started) / 3600:.1f}h")
     if failures:
         print(f"{len(failures)} failed:")
         for label, reason in failures[:10]:

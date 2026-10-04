@@ -3027,3 +3027,40 @@ Day 3a instead of the retired file.
 
 870 tests pass (up from 840: three net new notebooks -- one retired, four added -- for the
 parametrized static, dynamic and builder-parity checks to run against), ruff clean.
+
+## 2026-10-04 -- Day 3's main table parts capped at 6 hours each, at the project owner's request
+
+The 3-part design above (2026-09-28) let each part run as long as a Kaggle session allowed,
+leaning entirely on `run_sweep.py`'s own "N already complete, M to run" line as the real
+signal rather than committing to a fixed part count or duration -- reasonable when per-round
+GPU cost was still an estimate, but the project owner now wants an actual cap: no part longer
+than 6 hours, not "however long the session has left."
+
+`run_sweep.py` gained `--time-limit-hours`: checked once per cell, before `run_cell` is
+called, never during one -- a cell already running always finishes, so the real wall clock
+can run over the limit by at most one cell's duration but a `flwr run` is never killed
+mid-simulation. `i > 1` guards the check so one invocation always attempts at least one cell,
+even if a single cell alone exceeds the limit; without that guard a tight limit against a slow
+cell would re-run forever, printing "time limit reached" on cell 1 every time and never making
+progress. The end-of-run summary now tracks `attempted` separately from `len(todo)`, since a
+time-limit stop means not every queued cell was tried -- counting them all as "completed" was
+the same class of bug the manifest's completed-vs-indexed distinction already guards against
+elsewhere in this file. Covered by two new tests in `test_sweep.py` asserting the check's
+position (before `run_cell`, inside the loop) and the `attempted` fix, via the same
+`inspect.getsource` pattern the existing federation-required test already used -- this file's
+established way of testing `main()`'s shape without mocking the subprocess layer.
+
+`main_reduced.yaml` is still 168 cells / ~35 GPU-h, and that estimate is still explicitly "an
+order of magnitude, not a quote" (`project_cost`'s own docstring) -- actual per-round cost at
+K=10 on a real GPU has never been measured. So, same reasoning as the 2026-09-28 split: a fixed
+part count is not load-bearing. At ~35h / 6h-per-part that is ceil(35/6) = 6 parts if the
+estimate holds; `kaggle_day3a_main.ipynb` through `kaggle_day3e_main.ipynb` each independently
+cap themselves at 6h and hand off to the next, and `kaggle_day3f_main_finish.ipynb` -- the
+"finish" part, carrying the IID band check and `make_tables` same as the old day3c did -- is
+explicitly documented as repeatable for whatever the estimate gets wrong, same pattern as
+before. `kaggle_day3c_main_finish.ipynb` is retired; `kaggle_day3a_main.ipynb` and
+`kaggle_day3b_main.ipynb` keep their names (still parts 1 and 2), the sweep command itself
+gains `--time-limit-hours 6`. Day 2b's own "NEXT" pointer is untouched -- it already named
+`kaggle_day3a_main.ipynb` by filename, which still exists.
+
+902 tests pass, ruff clean.

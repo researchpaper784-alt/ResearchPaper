@@ -290,6 +290,39 @@ def test_configure_federation_is_required_not_optional() -> None:
     assert "Refusing" in source, "a failed federation setup must abort, not warn"
 
 
+def test_time_limit_is_checked_before_a_cell_not_during_one() -> None:
+    """A Kaggle session is a hard wall clock, not a `flwr run` the runner can safely
+    interrupt mid-simulation -- killing one orphans the Ray actors it started and leaves
+    no result file. `--time-limit-hours` must stop the loop only at a cell boundary, and
+    always let at least one cell run so a single invocation that is already over budget
+    (a slow first cell, a short limit) still makes progress instead of exiting having
+    done nothing -- which, re-run forever, would never finish the sweep at all."""
+    import inspect
+
+    source = inspect.getsource(run_sweep.main)
+    assert "time_limit_hours" in source
+    # The check sits inside the per-cell loop, before `run_cell` is called -- i.e. it
+    # gates starting a new cell, not something awaited mid-run.
+    loop_start = source.index("for i, cell in enumerate(todo, 1):")
+    check = source.index("time_limit_hours", loop_start)
+    run_call = source.index("run_cell(", loop_start)
+    assert check < run_call, "the time-limit check must precede run_cell, not follow it"
+    # `i > 1` (not `i >= 1`) is the actual progress guarantee: a true `i > 1` guard means
+    # cell 1 always runs before the limit can stop anything.
+    assert "i > 1 and elapsed" in source or "i > 1\n" in source or "i > 1 and" in source
+
+
+def test_time_limit_hit_does_not_count_unattempted_cells_as_completed() -> None:
+    """`attempted` must shrink to what actually ran when the time limit stops the loop
+    early -- using the full `todo` length here would report cells nothing was ever
+    attempted on as silently "completed", which is the same class of bug the manifest's
+    own completed-vs-indexed distinction exists to prevent elsewhere in this file."""
+    import inspect
+
+    source = inspect.getsource(run_sweep.main)
+    assert "attempted = (i - 1) if time_limit_hit else len(todo)" in source
+
+
 def test_a_variantless_control_still_matches_its_own_result(tmp_path: Path) -> None:
     """The other half of the discrimination, and the one a key-presence check gets wrong.
 

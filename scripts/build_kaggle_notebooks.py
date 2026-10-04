@@ -645,16 +645,26 @@ else:
 
 # ======================================================================================
 # Day 3, main table -- split into sequential parts because 168 cells / ~35 GPU-h does not
-# fit one 12-hour Kaggle session (35h needs at least 3 of them back to back). Each part
-# runs the SAME `main_reduced.yaml` sweep command; `run_sweep.py` itself prints
-# "{done} already complete, {todo} to run" against the full 168 every time it starts, so
-# that line -- not a fixed part count -- is the real progress signal. If a part ends with
-# anything other than "0 to run", re-run that same file (attach its own latest output)
-# again before moving to the next one.
+# fit one 12-hour Kaggle session. Each part caps itself at 6 GPU-hours via
+# `run_sweep.py --time-limit-hours 6` (stops cleanly between cells, never kills a running
+# simulation) instead of letting a session run close to Kaggle's 12-hour wall clock --
+# the project owner asked for parts no longer than 6 hours each, rather than the previous
+# 3-part design that let each part run as long as the session allowed.
+#
+# At ~35 GPU-h / 6h-per-part that is ceil(35 / 6) = 6 parts if the cost estimate holds
+# exactly, but that estimate is explicitly "an order of magnitude, not a quote"
+# (run_sweep.py's own project_cost docstring) -- actual per-round cost at K=10 on a real
+# GPU has never been measured. So, same reasoning as the old 3-part design: a fixed part
+# count is not load-bearing here. Five parts (3a-3e) each independently time-box
+# themselves to 6h and hand off to the next; the sixth (3f) is the "finish" part --
+# explicitly repeatable, same pattern the old day3c used, for whatever the estimate got
+# wrong. Every part runs the SAME `main_reduced.yaml` sweep command; `run_sweep.py` itself
+# prints "{done} already complete, {todo} to run" against the full 168 every time it
+# starts, so that line is still the real progress signal, time limit or not.
 
 MAIN_SWEEP_CELL = code(r'''
 ensure_gate_fix()
-!python scripts/run_sweep.py --config configs/experiment/main_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT}
+!python scripts/run_sweep.py --config configs/experiment/main_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT} --time-limit-hours 6
 ''')
 
 
@@ -662,69 +672,62 @@ def main_part_intro(part: int, of: int, next_step: str) -> tuple[str, str]:
     return md(r'''
 # FedSwarm — DAY 3, main table: part ''' + str(part) + " of ~" + str(of) + r''' (Kaggle GPU)
 
-168 cells, ~35 GPU-h total -- roughly 3 Kaggle sessions back to back, since none of them fit
-35 hours alone. This file runs the same `main_reduced.yaml` sweep every part runs; finished
-cells are skipped automatically, so re-running it costs nothing beyond what is actually left.
+168 cells, ~35 GPU-h total. This file runs the same `main_reduced.yaml` sweep every part
+runs, capped at **6 hours** via `--time-limit-hours 6` -- it stops itself between cells well
+inside a 12-hour Kaggle session rather than running up against that limit. Finished cells
+are skipped automatically, so re-running any part costs nothing beyond what is actually left.
 
 **Read the sweep's own first line of output**, not this notebook's part number, to know
 whether to continue: it prints `"N already complete, M to run"` against the full 168 every
-time. If `M` is not `0` when this session ends, attach **this same notebook's own output**
-and run it again -- as many times as it takes. Once it reads `0 to run`, move on: ''' + next_step + r'''
+time, and a separate line when the 6-hour cap is what stopped it. If `M` is not `0` when this
+session ends, attach **this same notebook's own output** and run it again -- as many times as
+it takes. Once it reads `0 to run`, move on: ''' + next_step + r'''
 ''')
 
 
-DAY3A_MAIN = [
-    main_part_intro(1, 3, "**Day 3, main part 2**."),
-    md(HOW_TO_RUN),
-    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
-    md("### Restore — Day 1's gate results, if attached"),
-    RESTORE,
-    md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
-    FEDERATION_MD, FEDERATION,
-    md(r'''
+def _main_continue_part(part: int, next_filename: str, next_label: str) -> list:
+    restore_note = (
+        "Day 1's gate results, if attached" if part == 1
+        else f"Day 1's gate results and Day 3 main part{'s' if part > 2 else ''} "
+             f"{'1' if part == 2 else f'1-{part - 1}'}'s progress, if attached"
+    )
+    return [
+        main_part_intro(part, 6, f"**{next_label}**."),
+        md(HOW_TO_RUN),
+        md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
+        md(f"### Restore — {restore_note}"),
+        RESTORE,
+        md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
+        FEDERATION_MD, FEDERATION,
+        md(r'''
 ---
 # STEP 1 — the fitness fix: from Day 1's results, or by re-running the gate
 
 Halts only if the gate finds no arm that closes the corner -- in which case no FedACO sweep
 should run at all.
 '''),
-    GATE_IF_MISSING,
-    md("---\n# STEP 2 — main_reduced: however many of the 168 cells this session has time for"),
-    MAIN_SWEEP_CELL,
-    *save("Day 3, main part 2 -- notebooks/kaggle_day3b_main.ipynb. Attach THIS notebook's "
-          "output there to continue the same sweep; finished cells skip automatically."),
-]
+        GATE_IF_MISSING,
+        md("---\n# STEP 2 — main_reduced: up to 6 hours of the 168 cells"
+           + (", continuing from the parts before this one" if part > 1 else "")),
+        MAIN_SWEEP_CELL,
+        *save(f"Day 3, main part {part + 1} -- notebooks/{next_filename}. Attach THIS "
+              "notebook's output there to continue the same sweep; finished cells skip "
+              "automatically."),
+    ]
 
 
-DAY3B_MAIN = [
-    main_part_intro(2, 3, "**Day 3, main part 3**."),
+DAY3A_MAIN = _main_continue_part(1, "kaggle_day3b_main.ipynb", "Day 3, main part 2")
+DAY3B_MAIN = _main_continue_part(2, "kaggle_day3c_main.ipynb", "Day 3, main part 3")
+DAY3C_MAIN = _main_continue_part(3, "kaggle_day3d_main.ipynb", "Day 3, main part 4")
+DAY3D_MAIN = _main_continue_part(4, "kaggle_day3e_main.ipynb", "Day 3, main part 5")
+DAY3E_MAIN = _main_continue_part(5, "kaggle_day3f_main_finish.ipynb", "Day 3, main part 6 (finish)")
+
+
+DAY3F_MAIN_FINISH = [
+    main_part_intro(6, 6, "**Day 3, robustness** (R1 then R2), in a separate notebook."),
     md(HOW_TO_RUN),
     md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
-    md("### Restore — Day 1's gate results and Day 3 main part 1's progress, if attached"),
-    RESTORE,
-    md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
-    FEDERATION_MD, FEDERATION,
-    md(r'''
----
-# STEP 1 — the fitness fix: from Day 1's results, or by re-running the gate
-
-Halts only if the gate finds no arm that closes the corner -- in which case no FedACO sweep
-should run at all.
-'''),
-    GATE_IF_MISSING,
-    md("---\n# STEP 2 — main_reduced: continuing from part 1"),
-    MAIN_SWEEP_CELL,
-    *save("Day 3, main part 3 -- notebooks/kaggle_day3c_main_finish.ipynb. Attach THIS "
-          "notebook's output there to continue the same sweep; finished cells skip "
-          "automatically."),
-]
-
-
-DAY3C_MAIN_FINISH = [
-    main_part_intro(3, 3, "**Day 3, robustness** (R1 then R2), in a separate notebook."),
-    md(HOW_TO_RUN),
-    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
-    md("### Restore — Day 1's gate results and Day 3 main parts 1-2's progress, if attached"),
+    md("### Restore — Day 1's gate results and Day 3 main parts 1-5's progress, if attached"),
     RESTORE,
     md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
     FEDERATION_MD, FEDERATION,
@@ -740,10 +743,12 @@ should run at all.
 ---
 # STEP 2 — main_reduced: finish whatever is left, then the IID band check and the table
 
-If the sweep's own first line below does not read `0 to run`, this part is not done --
-re-run this same notebook (attach its own latest output) before trusting the table beneath
-it. With almost no heterogeneity to exploit, every strategy should land in a narrow band on
-IID; a wide spread means something other than the method is driving the results.
+This part is explicitly repeatable: if the sweep's own first line below does not read
+`0 to run` -- whether because the 6-hour cap stopped it again or the ~35h estimate simply
+undershot -- re-run this same notebook (attach its own latest output) before trusting the
+table beneath it. With almost no heterogeneity to exploit, every strategy should land in a
+narrow band on IID; a wide spread means something other than the method is driving the
+results.
 '''),
     MAIN_SWEEP_CELL,
     code(r'''
@@ -818,7 +823,10 @@ NOTEBOOKS = {
     "kaggle_day2b_a1.ipynb": ("d2b", DAY2B),
     "kaggle_day3a_main.ipynb": ("d3a", DAY3A_MAIN),
     "kaggle_day3b_main.ipynb": ("d3b", DAY3B_MAIN),
-    "kaggle_day3c_main_finish.ipynb": ("d3c", DAY3C_MAIN_FINISH),
+    "kaggle_day3c_main.ipynb": ("d3c", DAY3C_MAIN),
+    "kaggle_day3d_main.ipynb": ("d3d", DAY3D_MAIN),
+    "kaggle_day3e_main.ipynb": ("d3e", DAY3E_MAIN),
+    "kaggle_day3f_main_finish.ipynb": ("d3f", DAY3F_MAIN_FINISH),
     "kaggle_day3_robustness.ipynb": ("d3r", DAY3_ROBUSTNESS),
 }
 
