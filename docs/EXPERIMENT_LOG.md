@@ -3102,3 +3102,16 @@ projection, not a measurement, so each file is independently repeatable (attach 
 output, run again) if a part's estimate undershoots in practice.
 
 914 tests pass, ruff clean.
+
+## 2026-10-08 (later) -- robustness cap lowered to 8 hours, at the project owner's request
+
+Immediately revised: the 10h cap above is now 8h, same mechanism (`--time-limit-hours 8` on
+both `robustness_r1_reduced` and `robustness_r2_reduced`), no code change -- only the value
+passed and the two notebooks' own text. Worth noting since the ~8 GPU-h cost estimate for each
+sweep sits right at this cap with no margin: in practice each of R1 and R2 is now likely to need
+a second, repeatable part rather than finishing in one sitting, which is an accepted tradeoff of
+the tighter cap, not a bug -- both files already carry the "re-run this same notebook, attach
+its own latest output" guidance for exactly this case.
+
+914 tests pass (no test asserts a specific hour value, only the time-limit mechanism's
+presence and shape), ruff clean.

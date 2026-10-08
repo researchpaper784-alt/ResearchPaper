@@ -760,15 +760,16 @@ results.
 
 
 # ======================================================================================
-# Day 3, robustness -- R1, then R2, each its own notebook now, each capped at 10 GPU-hours
+# Day 3, robustness -- R1, then R2, each its own notebook now, each capped at 8 GPU-hours
 # via run_sweep_granular.py's own --time-limit-hours (sweep.run_sweep gained the same
 # check run_sweep.py already had for the main table: before a run, never mid-one). The
 # combined file let R1+R2 run back to back in one ~16h sitting -- the project owner asked
-# for parts no longer than 10 hours each instead, same reasoning as the main table's 6h
+# for parts no longer than 8 hours each instead, same reasoning as the main table's 6h
 # split: ~8h per sweep is an estimate (run_sweep_granular.py's own cost projection calls
-# the same basis "an order of magnitude, not a quote"), so each file independently
-# time-boxes itself and is repeatable if the estimate undershoots, rather than committing
-# to "R1 fits in one part, R2 fits in one part" as a guarantee.
+# the same basis "an order of magnitude, not a quote"), so an 8h cap sits right at that
+# estimate with no margin -- each file is likely to need a second, repeatable part in
+# practice, by design: it is independently time-boxed and safe to re-run (attach its own
+# latest output) rather than committing to "R1 fits in one part" as a guarantee.
 
 DAY3_ROBUSTNESS_R1 = [
     md(r'''
@@ -779,7 +780,7 @@ DAY3_ROBUSTNESS_R1 = [
 the gate itself first. The main table is not a prerequisite -- R1 only needs the gate's fix.
 
 `robustness_r1_reduced` — label-flip at 30% + the clean arm. 40 cells, ~8 GPU-h, capped at
-**10 hours** via `--time-limit-hours 10` so it stops itself well inside a 12-hour Kaggle
+**8 hours** via `--time-limit-hours 8` so it stops itself well inside a 12-hour Kaggle
 session rather than running up against that limit.
 
 **Read the sweep's own first line of output**, not this notebook's name, to know whether to
@@ -796,10 +797,10 @@ paper's limitations. Do not quietly drop a losing arm.
     md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
     FEDERATION_MD, FEDERATION,
     GATE_IF_MISSING,
-    md("---\n# STEP 1 — R1: up to 10 hours of the 40 cells"),
+    md("---\n# STEP 1 — R1: up to 8 hours of the 40 cells"),
     code(r'''
 ensure_gate_fix()
-!python scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT} --time-limit-hours 10
+!python scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT} --time-limit-hours 8
 '''),
     granular_summary("configs/experiment/robustness_r1_reduced.yaml", r'''
 clean_labels = [lab for lab in mine.values() if "/clean/" in lab]
@@ -823,7 +824,7 @@ R2's deltas are measured against R1's `clean` arm in the same `results/fl/robust
 should read 40/40 complete before this is worth starting.
 
 `robustness_r2_reduced` — gaussian and sign-flip at 30%. 40 cells, ~8 GPU-h, capped at
-**10 hours** via `--time-limit-hours 10`, same as R1.
+**8 hours** via `--time-limit-hours 8`, same as R1.
 
 **Read the sweep's own first line of output**, not this notebook's name: if it prints `"time
 limit reached"`, attach **this same notebook's own output** and run it again before trusting
@@ -836,10 +837,10 @@ the tables below.
     md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
     FEDERATION_MD, FEDERATION,
     GATE_IF_MISSING,
-    md("---\n# STEP 2 — R2: up to 10 hours of the 40 cells, then the final tables"),
+    md("---\n# STEP 2 — R2: up to 8 hours of the 40 cells, then the final tables"),
     code(r'''
 ensure_gate_fix()
-!python scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT} --time-limit-hours 10
+!python scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT} --time-limit-hours 8
 '''),
     code("!python scripts/make_tables.py --results-dir results/fl/robustness --out paper/tables"),
     *save("hand the tables in paper/tables/ to whoever writes paper §5 and the abstract."),
