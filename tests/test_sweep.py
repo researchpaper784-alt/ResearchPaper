@@ -648,3 +648,83 @@ def test_resume_works_across_a_custom_output_dir(tmp_path) -> None:
     )
 
     assert [e["status"] for e in entries] == ["skipped_completed"]
+
+
+def test_time_limit_stops_the_granular_runner_before_a_run_not_mid_one(tmp_path: Path) -> None:
+    """Same contract as `run_sweep.py`'s own `--time-limit-hours`, for the other runner
+    (`robustness_r1/r2_reduced.yaml` and friends go through this one): a Kaggle session is
+    a hard wall clock the runner must stop ahead of, never a `flwr run` it can safely kill
+    mid-simulation. A fake clock that jumps a fixed amount per call stands in for real
+    elapsed time, since this must not take real minutes to verify."""
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[{"name": "iid", "overrides": {}}],
+        seeds=[0, 1, 2, 3],
+        base_overrides={},
+        group="g",
+        base_dir=REPO_ROOT,
+    )
+
+    clock = {"t": 0.0}
+
+    def fake_now() -> float:
+        clock["t"] += 1000.0
+        return clock["t"]
+
+    entries = run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: 0,
+        time_limit_hours=0.1,  # 360s -- the fake clock's first jump alone exceeds this
+        now=fake_now,
+    )
+
+    # Progress guaranteed (at least the first run attempted) but not everything, and
+    # nothing beyond the limit was silently skipped-as-done -- it is just absent, for the
+    # caller to detect via len(entries) < len(runs) and re-run.
+    assert 1 <= len(entries) < len(runs)
+
+
+def test_time_limit_never_blocks_free_skip_or_dry_run_entries(tmp_path: Path) -> None:
+    """A cell that is already completed, or a dry run, costs no GPU time -- the limit
+    must never count against those, or a mostly-finished sweep would falsely report
+    'time limit reached' while every real cell left to run is actually free to check."""
+    import json
+
+    from fedswarm.sweep import RunSpec, predict_run_id, run_sweep
+
+    out = tmp_path / "out"
+    out.mkdir()
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[tool.flwr.app.config]\noutput-dir = "results/fl"\nseed = 0\n'
+        'strategy-name = "fedavg"\nnum-clients = 2\n'
+    )
+
+    runs = [
+        RunSpec(label=f"a{i}", group="g", overrides={"seed": i, "output-dir": str(out)})
+        for i in range(5)
+    ]
+    defaults = {"output-dir": "results/fl", "seed": 0, "strategy-name": "fedavg", "num-clients": 2}
+    for run in runs:
+        run_id = predict_run_id(defaults, run.overrides)
+        (out / f"{run_id}.json").write_text(json.dumps({"status": "completed"}))
+
+    entries = run_sweep(
+        runs,
+        pyproject_path=pyproject,
+        output_dir=str(out),
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: pytest.fail(f"should not have run anything: {cmd}"),
+        time_limit_hours=0.0,  # already "expired" from the first instant
+        now=lambda: 10_000.0,
+    )
+
+    assert len(entries) == len(runs)
+    assert all(e["status"] == "skipped_completed" for e in entries)

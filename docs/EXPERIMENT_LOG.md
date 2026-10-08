@@ -3064,3 +3064,41 @@ gains `--time-limit-hours 6`. Day 2b's own "NEXT" pointer is untouched -- it alr
 `kaggle_day3a_main.ipynb` by filename, which still exists.
 
 902 tests pass, ruff clean.
+
+## 2026-10-08 -- robustness (R1/R2) split the same way, capped at 10 hours each
+
+Same request extended to the other half of Day 3: R1+R2 (40+40 cells, ~16 GPU-h combined) used
+to run back to back in one notebook, close to the 12-hour Kaggle ceiling with no self-imposed
+cap. The project owner asked for 10-hour parts here too.
+
+R1 and R2 run through `run_sweep_granular.py` (`fedswarm.sweep.run_sweep`), a different,
+independently-developed runner from `run_sweep.py` (the main table's), reading a different YAML
+shape -- so the 2026-10-04 `--time-limit-hours` fix to `run_sweep.py` did not cover this path at
+all. `fedswarm.sweep.run_sweep` gained the equivalent: `time_limit_hours` and an injectable
+`now` callable (defaulting to `time.time`, mirroring the already-injectable `runner` callable
+this module uses for testability), checked only before a run that would actually execute -- a
+free `skipped_completed` or `planned` (dry-run) entry never counts against it, and a `>= 1`
+real-attempt guard means one invocation always makes progress even if its first real cell alone
+exceeds the limit. `run_sweep_granular.py` gained the matching `--time-limit-hours` CLI flag and
+now reports `len(entries) < len(runs)` as the time-limit signal (every other path -- dry-run,
+skip, lock, failure -- still appends one entry per run, so a short `entries` list is unambiguous
+without a dedicated status flag).
+
+Unlike `run_sweep.py`, this runner has a genuinely injectable clock as well as an injectable
+`runner`, so the two new tests (`test_time_limit_stops_the_granular_runner_before_a_run_not_mid_one`,
+`test_time_limit_never_blocks_free_skip_or_dry_run_entries`) exercise the real loop end to end
+with a fake clock standing in for elapsed hours, rather than `run_sweep.py`'s
+`inspect.getsource`-based shape assertions -- a real behavioural test was possible here, so it
+was used instead of weaker test.
+
+`DAY3_ROBUSTNESS` (one file, R1 then R2) is retired in favour of `DAY3_ROBUSTNESS_R1` and
+`DAY3_ROBUSTNESS_R2`: `kaggle_day3_robustness_r1.ipynb` runs R1 alone, capped at 10h, with its
+own clean-arm summary so it's visible whether R1 actually reached 40/40 (not just "time limit
+reached") before R2 is worth starting; `kaggle_day3_robustness_r2.ipynb` attaches R1's output,
+runs R2 alone (also capped at 10h), then the final `make_tables` pass. `kaggle_day3_robustness.ipynb`
+is deleted. At ~8h estimated per sweep against a 10h cap, one part each should suffice, but
+same reasoning as the main table's split: the ~8h figure is `run_sweep_granular.py`'s own cost
+projection, not a measurement, so each file is independently repeatable (attach its own latest
+output, run again) if a part's estimate undershoots in practice.
+
+914 tests pass, ruff clean.

@@ -71,6 +71,17 @@ def main() -> int:
     parser.add_argument(
         "--pyproject-path", default=str(REPO_ROOT / "pyproject.toml"), help="For predicting run_ids"
     )
+    parser.add_argument(
+        "--time-limit-hours",
+        type=float,
+        default=None,
+        help=(
+            "stop starting new runs once this many hours have elapsed since this "
+            "invocation began (a run already executing always finishes -- this never "
+            "kills one mid-flight). Unset means no limit. Re-run the same command to "
+            "continue; completed runs are skipped as usual."
+        ),
+    )
     args = parser.parse_args()
 
     # One expansion, shared with the notebooks via fedswarm.sweep.granular_runs, so "which
@@ -102,13 +113,22 @@ def main() -> int:
         dry_run=args.dry_run,
         cpus_per_client=args.cpus_per_client,
         gpus_per_client=args.gpus_per_client or 0.0,
+        time_limit_hours=args.time_limit_hours,
     )
 
     for entry, run in zip(entries, runs):
         print(f"  [{entry['status']:>17}] {run.label} ({entry['run_id']})")
 
+    # entries falls short of runs only when --time-limit-hours stopped the loop early --
+    # every other path (dry-run, skip, lock, failure) still appends one entry per run.
+    if len(entries) < len(runs):
+        print(
+            f"\n  time limit reached ({args.time_limit_hours}h) -- {len(runs) - len(entries)} "
+            "runs left. Re-run the same command to continue; completed runs are skipped."
+        )
+
     completed = sum(1 for e in entries if e["status"] in ("completed", "skipped_completed"))
-    print(f"\n{completed}/{len(entries)} runs completed (this call + already-done).")
+    print(f"\n{completed}/{len(runs)} runs completed (this call + already-done).")
     return 0
 
 

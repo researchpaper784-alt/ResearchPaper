@@ -402,12 +402,25 @@ def run_sweep(
     runner: Runner = _default_runner,
     cpus_per_client: int = 1,
     gpus_per_client: float = 0.0,
+    time_limit_hours: float | None = None,
+    now: Callable[[], float] = time.time,
 ) -> list[dict[str, Any]]:
     """Runs `runs` in the given order (call `order_seed_first` beforehand if that
     ordering is wanted), skipping any whose predicted run_id already has a completed
     result, and skipping any currently locked by another in-flight process. Returns
     the list of manifest entries this call itself wrote (dry-run: what it *would*
-    write, without touching locks, `flwr run`, or the manifest file)."""
+    write, without touching locks, `flwr run`, or the manifest file).
+
+    `time_limit_hours`, if set, stops starting new runs once this many hours have
+    elapsed since this call began -- checked only before a run that would actually
+    execute (a free `skipped_completed`/`planned` entry never counts against it), and
+    only once at least one run has actually been attempted this call, so a single
+    invocation always makes progress even if its first real cell alone exceeds the
+    limit. A run already executing is never interrupted. Entries simply stop short of
+    `len(runs)` when the limit stops the loop -- the caller (the Kaggle notebooks'
+    `--time-limit-hours`) reads `len(entries) < len(runs)` as "time limit, re-run to
+    continue", the same way `run_sweep.py`'s own `--time-limit-hours` does for
+    `main.yaml`/`ablation_all.yaml`/`robustness.yaml`."""
     defaults = pyproject_flat_defaults(pyproject_path)
     entries: list[dict[str, Any]] = []
     # Reconfigured per cell, but only when the value actually changes -- these configs
@@ -418,6 +431,8 @@ def run_sweep(
     # measured that way comes out FLAT -- which reads as evidence for the O(K^2) cost
     # being negligible, the very claim (C3) these sweeps exist to test.
     configured_supernodes: int | None = None
+    started = now()
+    real_attempts = 0
 
     for run in runs:
         # Resolved before the id, because the id hashes the config this returns.
@@ -435,6 +450,14 @@ def run_sweep(
         if dry_run:
             entries.append({"run_id": run_id, "label": run.label, "group": run.group, "status": "planned"})
             continue
+
+        if (
+            time_limit_hours is not None
+            and real_attempts >= 1
+            and (now() - started) >= time_limit_hours * 3600
+        ):
+            break
+        real_attempts += 1
 
         if not try_acquire_lock(run_id, lock_dir, lock_timeout_s):
             entry = {"run_id": run_id, "label": run.label, "group": run.group, "status": "skipped_locked"}

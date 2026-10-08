@@ -755,32 +755,39 @@ results.
 !python scripts/check_iid_band.py --results-dir results/fl/main
 !python scripts/make_tables.py --results-dir results/fl/main --out paper/tables
 '''),
-    *save("Day 3, robustness -- notebooks/kaggle_day3_robustness.ipynb."),
+    *save("Day 3, robustness part 1 -- notebooks/kaggle_day3_robustness_r1.ipynb."),
 ]
 
 
 # ======================================================================================
-# Day 3, robustness -- R1 then R2. Unchanged in substance from the old combined Day 3
-# file; split out into its own notebook now that the main table has its own sequence.
+# Day 3, robustness -- R1, then R2, each its own notebook now, each capped at 10 GPU-hours
+# via run_sweep_granular.py's own --time-limit-hours (sweep.run_sweep gained the same
+# check run_sweep.py already had for the main table: before a run, never mid-one). The
+# combined file let R1+R2 run back to back in one ~16h sitting -- the project owner asked
+# for parts no longer than 10 hours each instead, same reasoning as the main table's 6h
+# split: ~8h per sweep is an estimate (run_sweep_granular.py's own cost projection calls
+# the same basis "an order of magnitude, not a quote"), so each file independently
+# time-boxes itself and is repeatable if the estimate undershoots, rather than committing
+# to "R1 fits in one part, R2 fits in one part" as a guarantee.
 
-DAY3_ROBUSTNESS = [
+DAY3_ROBUSTNESS_R1 = [
     md(r'''
-# FedSwarm — DAY 3, robustness: R1, then R2 (Kaggle GPU)
+# FedSwarm — DAY 3, robustness part 1: R1 (Kaggle GPU)
 
 **Optional, saves ~20 minutes:** attach the **Day 1** notebook's output (right sidebar →
 **+ Add Input → Your Work**) — it holds the gate's results. Without it, this notebook re-runs
-the gate itself first. The main table is not a prerequisite -- R1/R2 only need the gate's fix.
+the gate itself first. The main table is not a prerequisite -- R1 only needs the gate's fix.
 
-| step | sweep | cells | GPU-h |
-|---|---|---|---|
-| 1 | `robustness_r1_reduced` — label-flip at 30% + the clean arm | 40 | ~8 |
-| 2 | `robustness_r2_reduced` — gaussian and sign-flip at 30% | 40 | ~8 |
+`robustness_r1_reduced` — label-flip at 30% + the clean arm. 40 cells, ~8 GPU-h, capped at
+**10 hours** via `--time-limit-hours 10` so it stops itself well inside a 12-hour Kaggle
+session rather than running up against that limit.
 
-**~16 GPU-hours fits one Kaggle session.** Every sweep resumes per cell regardless, so a cut-off
-session just needs re-running with this notebook's own output attached.
+**Read the sweep's own first line of output**, not this notebook's name, to know whether to
+continue: if it prints `"time limit reached"`, attach **this same notebook's own output** and
+run it again before moving on -- as many times as it takes.
 
-**R1 must finish before R2's table means anything.** R2 ships with no unattacked arm by design;
-its deltas are measured against R1's `clean` arm in the same `results/fl/robustness`.
+Plan §8: **any configuration where FedACO loses stays in the table** and is stated in the
+paper's limitations. Do not quietly drop a losing arm.
 '''),
     md(HOW_TO_RUN),
     md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
@@ -789,28 +796,50 @@ its deltas are measured against R1's `clean` arm in the same `results/fl/robustn
     md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
     FEDERATION_MD, FEDERATION,
     GATE_IF_MISSING,
-    md(r'''
----
-# STEP 1 and 2 — robustness: R1, then R2
-
-Plan §8: **any configuration where FedACO loses stays in the table** and is stated in the
-paper's limitations. Do not quietly drop a losing arm.
-'''),
+    md("---\n# STEP 1 — R1: up to 10 hours of the 40 cells"),
     code(r'''
 ensure_gate_fix()
-!python scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT}
-'''),
-    code(r'''
-ensure_gate_fix()
-!python scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT}
+!python scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT} --time-limit-hours 10
 '''),
     granular_summary("configs/experiment/robustness_r1_reduced.yaml", r'''
 clean_labels = [lab for lab in mine.values() if "/clean/" in lab]
 clean_done = [lab for lab in clean_labels if lab in f1]
 print(f"R1 clean arm: {len(clean_done)}/{len(clean_labels)} cells done")
 if len(clean_done) < len(clean_labels):
-    print("R2's deltas are measured against this arm. Until it is complete the R2 table below")
-    print("will show '—' for some rows -- which is NOT the same as 'no difference'.")
+    print("R2's deltas are measured against this arm -- R1 must read 40/40 above before R2 is")
+    print("worth starting, not just 'time limit reached' below.")
+'''),
+    *save("Day 3, robustness part 2 -- notebooks/kaggle_day3_robustness_r2.ipynb. Attach THIS "
+          "notebook's output there; R2's deltas are measured against R1's clean arm."),
+]
+
+
+DAY3_ROBUSTNESS_R2 = [
+    md(r'''
+# FedSwarm — DAY 3, robustness part 2: R2 (Kaggle GPU)
+
+Attach **Day 3, robustness part 1**'s output (right sidebar → **+ Add Input → Your Work**) --
+R2's deltas are measured against R1's `clean` arm in the same `results/fl/robustness`, so R1
+should read 40/40 complete before this is worth starting.
+
+`robustness_r2_reduced` — gaussian and sign-flip at 30%. 40 cells, ~8 GPU-h, capped at
+**10 hours** via `--time-limit-hours 10`, same as R1.
+
+**Read the sweep's own first line of output**, not this notebook's name: if it prints `"time
+limit reached"`, attach **this same notebook's own output** and run it again before trusting
+the tables below.
+'''),
+    md(HOW_TO_RUN),
+    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
+    md("### Restore — Day 1's gate results and R1's progress, if attached"),
+    RESTORE,
+    md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
+    FEDERATION_MD, FEDERATION,
+    GATE_IF_MISSING,
+    md("---\n# STEP 2 — R2: up to 10 hours of the 40 cells, then the final tables"),
+    code(r'''
+ensure_gate_fix()
+!python scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_reduced.yaml --gpus-per-client {GPUS_PER_CLIENT} --time-limit-hours 10
 '''),
     code("!python scripts/make_tables.py --results-dir results/fl/robustness --out paper/tables"),
     *save("hand the tables in paper/tables/ to whoever writes paper §5 and the abstract."),
@@ -827,7 +856,8 @@ NOTEBOOKS = {
     "kaggle_day3d_main.ipynb": ("d3d", DAY3D_MAIN),
     "kaggle_day3e_main.ipynb": ("d3e", DAY3E_MAIN),
     "kaggle_day3f_main_finish.ipynb": ("d3f", DAY3F_MAIN_FINISH),
-    "kaggle_day3_robustness.ipynb": ("d3r", DAY3_ROBUSTNESS),
+    "kaggle_day3_robustness_r1.ipynb": ("d3r1", DAY3_ROBUSTNESS_R1),
+    "kaggle_day3_robustness_r2.ipynb": ("d3r2", DAY3_ROBUSTNESS_R2),
 }
 
 

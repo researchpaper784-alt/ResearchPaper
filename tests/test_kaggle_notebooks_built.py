@@ -113,7 +113,7 @@ def test_later_days_run_the_gate_themselves_when_its_results_are_missing() -> No
                  "kaggle_day3a_main.ipynb", "kaggle_day3b_main.ipynb",
                  "kaggle_day3c_main.ipynb", "kaggle_day3d_main.ipynb",
                  "kaggle_day3e_main.ipynb", "kaggle_day3f_main_finish.ipynb",
-                 "kaggle_day3_robustness.ipynb"):
+                 "kaggle_day3_robustness_r1.ipynb", "kaggle_day3_robustness_r2.ipynb"):
         cells = BUILDER.NOTEBOOKS[name][1]
         assert BUILDER.GATE_IF_MISSING in cells, name
         # ...and before any sweep that needs the fix
