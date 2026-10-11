@@ -463,6 +463,9 @@ def _partition_id(context: Context) -> int:
 # top-level RecordDict key.
 _SCAFFOLD_CONTROL_PREFIX = "scaffold_c/"
 _SCAFFOLD_DELTA_PREFIX = "scaffold_dc/"
+# See the comment where this is used, train_handler: caps the per-step gradient pull the
+# SCAFFOLD correction term can exert, independent of the server-side global_c clip.
+_SCAFFOLD_CORRECTION_MAX_NORM = 1.0
 
 
 class _LabelFlipDataset(torch.utils.data.Dataset):
@@ -583,6 +586,24 @@ def train_handler(msg: Message, context: Context) -> Message:
             else OrderedDict((name, torch.zeros_like(t)) for name, t in global_c.items())
         )
         correction = OrderedDict((name, global_c[name] - local_c[name]) for name in global_c)
+        # `correction` is added as a *constant* per-step gradient term for all `tau` local
+        # steps (every step pulls every parameter by the same `-lr * correction`, before
+        # momentum). If it does not shrink round to round -- which a bounded-but-nonzero
+        # `global_c` does not guarantee, only that IT stays bounded -- that constant pull
+        # compounds under SGD momentum (0.9) into ballistic divergence of the MODEL itself
+        # even with global_c capped server-side (strategies/scaffold.py). Verified directly:
+        # with only the server-side clip, ||global_c|| plateaus near its bound by round ~40
+        # but ||w|| keeps growing past it, reaching 24M by round 90
+        # (scripts/debug_scaffold_divergence.py, docs/OPEN_QUESTIONS.md). Clipping the
+        # correction itself, at the point it is injected into local training, bounds that
+        # per-step pull directly -- a no-op whenever `correction` is already small, which
+        # is every round once the pathological small-tau clients stop dominating it.
+        correction_norm = float(
+            torch.sqrt(sum((t.float() ** 2).sum() for t in correction.values()))
+        )
+        if correction_norm > _SCAFFOLD_CORRECTION_MAX_NORM:
+            clip_scale = _SCAFFOLD_CORRECTION_MAX_NORM / (correction_norm + 1e-12)
+            correction = OrderedDict((name, t * clip_scale) for name, t in correction.items())
         params_before = OrderedDict((k, model.state_dict()[k].clone()) for k in global_c)
 
     metrics = local_train(
