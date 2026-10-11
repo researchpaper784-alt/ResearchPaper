@@ -1798,3 +1798,82 @@ checked against the known 168-cell total: 40+37+35+35+21). Flower prints the per
 exception directly (`"Received error in reply from node <id>: <exception>"`, confirmed format
 from the local repro above) — that line, once available from the real run, names the actual
 trigger instead of leaving it to further inference.
+
+### 2026-10-11, same day — ROOT CAUSE FOUND AND REPRODUCED (not a Kaggle-specific issue)
+
+The log requested above (`kaggle_day3d_main.ipynb`'s "Download Logs" export) turned out to be
+the **sweep runner's** one-line-per-cell summary (`subprocess.run` with no output capture, so
+Flower's own verbose `--stream` output goes straight to Kaggle's cell output — but the
+downloaded log only contains the sweep script's own progress/completion lines, not that
+output). It does not contain a per-client exception line, so it could not resolve this on its
+own. Separately, and more productively: `flwr run`'s per-invocation isolated `uv sync`
+environment in this container has an unrelated `pyarrow`/`numpy` ABI conflict that kills every
+`ClientAppActor` for every strategy (confirmed on plain `fedavg` too) — so a real `flwr run`
+repro was not available here either.
+
+**Worked around both: drove the real `Scaffold` strategy and the real `train_handler` in-process
+for 100 rounds, calling the actual project code directly with hand-built `Message`/`Context`
+objects (the same pattern `tests/test_fl_app.py`'s and `tests/test_baselines.py`'s existing
+scaffold unit tests already use, just looped across rounds with real, non-trivial training data
+— no Ray, no subprocess, so the container's pyarrow/numpy issue above never enters the path).**
+10 clients, `dirichlet(alpha=0.3)`, a 2,000-image synthetic fixture (large enough that
+`build_partition` succeeds reliably at `min-client-size=5`), otherwise matching
+`main_reduced.yaml`'s real settings (`local-batch-size=32`, `local-lr=0.01`, `local-epochs=1`).
+
+**The global model's parameter norm:**
+
+| round | `‖w‖` | `‖global_c‖` |
+|---|---:|---:|
+| 1 | 67.3 | 25.9 |
+| 2 | 80.3 | 17.0 |
+| 3 | 149.2 | 67.7 |
+| 10 | 23,588,493 | 11,021,507 |
+| 16 | NaN | NaN |
+
+**This is a real, reproducible numerical blow-up in SCAFFOLD's control-variate update, not a
+Kaggle/environment artifact.** The mechanism (`fl/app.py`'s `new_local_c` computation, the
+paper's own Option-II formula):
+
+```python
+new_local_c[name] = local_c[name] - global_c[name] + (params_before[name] - model.state_dict()[name]) / (tau * lr)
+```
+
+`tau = max(num_batches, 1)`. Under a skewed (`dirichlet`) partition with `min-client-size=5` and
+`local-batch-size=32`, several clients legitimately have `tau = 1` (one batch covers their whole
+local dataset) — so the division is by `1 * 0.01 = 0.01`, a **100x amplification** of that
+round's local update `(x − y_i)` into the control-variate delta. `aggregate_train` then adds
+this straight into `self._global_c` as a running sum (not an EMA, no decay, no clipping), and
+next round's correction term (`global_c − local_c`, added directly to every client's loss
+gradient) is proportionally larger — a positive feedback loop. With `momentum=0.9` in the local
+optimizer compounding it further, the blow-up above (67 → 23M in 10 rounds, NaN by round 16) is
+the result. The real Kaggle runs (`image-size=112`, a much larger model, `K=10` with the same
+`local-batch-size=32`/`min-client-size=5`) plausibly diverge even faster than this toy
+repro — consistent with the observed symptom being frozen from round 0 itself rather than
+round ~16: the real run most likely hits NaN within round 1, before the second evaluation ever
+happens, and the NaN-corrupted model's evaluation output is deterministic-but-degenerate (NaN
+weights produce a fixed degenerate prediction every round, which is what both `scaffold`'s
+"predicts one class" signature and its round-to-round frozen metric are — the same underlying
+cause presenting as two symptoms already recorded above in this file).
+
+**This is a real, known category of practical SCAFFOLD instability** (Option II's `c_i` update
+is sensitive to `K·η_l`, the total local SGD distance, and gets noisy/unstable when `K` — local
+steps — is small), not specific to this codebase's math being wrong; the formula matches the
+paper. The codebase has no stabilization against it (no clipping, no EMA, no guard on `tau`
+being small). **Candidate fixes, not applied here pending the project owner's choice** (this is
+a design/hyperparameter decision, like the Figures-1/2 entry above, not a one-line patch):
+
+1. Clip `new_local_c`'s per-tensor norm (or the correction term) to a fixed bound before it's
+   used — cheapest, changes convergence behavior in a way that needs re-validation.
+2. Use an EMA for `self._global_c` instead of a raw running sum (`global_c = β·global_c + (1-β)·update`)
+   — closer to how similar instabilities are handled elsewhere, but is a deviation from the
+   paper's Option II as implemented.
+3. Raise `min-client-size` relative to `local-batch-size` (or lower `local-batch-size`) so `tau`
+   is never 1 — treats the symptom's trigger, not the underlying sensitivity; the scheme is
+   still fragile at `tau=2` or `3`, just less likely to hit it.
+4. Lower `scaffold-server-lr` below its default `1.0` — directly dampens the feedback loop's
+   gain, cheapest to try, easiest to justify (it is already an exposed, documented knob).
+
+Whichever is chosen, re-run this same in-process repro script (kept at
+`/tmp/.../scratchpad/debug_scaffold.py` this session, not committed — worth moving into
+`scripts/` or a test if this becomes a real fix) over 100 rounds and confirm `‖w‖` stays bounded
+before spending any Kaggle GPU-hours re-running `scaffold`'s arm of `main_reduced.yaml`.
