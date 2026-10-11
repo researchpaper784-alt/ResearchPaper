@@ -3,7 +3,7 @@
 You are picking this up cold. Read this file and nothing else first; it tells you where the
 ground truth for everything is.
 
-Branch: **`claude/happy-hamilton-c5jjil`**. 913/913 tests pass, working tree clean, everything
+Branch: **`claude/happy-hamilton-c5jjil`**. 928/928 tests pass, working tree clean, everything
 below is pushed. (If a local edit ever leaves `pyproject.toml` with the gate fix applied --
 needed to regenerate tables/figures, see §5's note on it -- `test_config_defaults.py` fails 4
 tests until `git checkout -- pyproject.toml`; that is expected, not a regression.)
@@ -29,10 +29,10 @@ the failure sharper, not better.**
 | `a2-reduced` | 25 (of a nominal 30; 5 cells coincide with A1's) | done — same directory as A1, combined 105/105 |
 | `main-reduced` | 168 | done — pulled into `results/fl/main`, `paper/tables/main.{md,csv,tex}` regenerated locally |
 | `r1-reduced` | 40 | done |
-| `r2-reduced` | 40 | done — combined 80/80 in `results/fl/robustness`. **Raw per-cell JSONs not yet in this clone**, only the printed `robustness.md` table recovered from the Kaggle notebook's log output (see §5 item 1) |
+| `r2-reduced` | 40 | done — combined 80/80 in `results/fl/robustness`, raw per-cell JSONs pulled into this clone 2026-10-11 (Google Drive folder, `gdown --folder`) and `paper/tables/robustness.{md,csv,tex}` regenerated from them, not from the recovered log table |
 
-Nothing left to run on Kaggle. What is left is local: writing, citations, and pulling the
-robustness JSONs in properly (§5).
+Nothing left to run on Kaggle except the SCAFFOLD re-run already in progress (§5 item 1).
+Everything else left is local: see §5.
 
 ## 2. The single most important thing to know
 
@@ -116,12 +116,12 @@ the *evidence* (A1, A2), not the decisions.
 
 ```bash
 make setup                      # uv venv, editable install
-make test                       # 914 tests, ~2 min (4 fail iff pyproject.toml has the gate fix applied -- see §5.3)
+make test                       # 928 tests, ~2 min (4 fail iff pyproject.toml has the gate fix applied -- see §5.3)
 
 # Already done, this clone (regenerate if results/ changes):
-make tables tables-ablation                     # main.csv/md/tex, ablation.csv/md/tex -- regenerated 2026-10-11
-make figures-ablation figures-data              # alpha_heatmap, alpha_entropy, gain_vs_heterogeneity, 9 partition figures
-# tables-robustness and figures (main's convergence/comparison) do NOT work yet -- see §5.1 and §5.2
+make tables tables-ablation tables-robustness   # main/ablation/robustness .csv/.md/.tex -- regenerated 2026-10-11
+make figures figures-ablation figures-robustness figures-data   # all real figures, including Figure 6
+make verify-phase9                              # byte-identical twice, all three sweeps -- actually run, passing
 ```
 
 Every sweep this project planned has run on Kaggle. **Do not start a new GPU session for
@@ -130,24 +130,26 @@ only that cell, the sweep runners resume per-cell.
 
 ## 5. What is left
 
-All of results-pulling, table/figure regeneration, the paper prose, the citations, and the
-SCAFFOLD bug (root-caused, reproduced, and fixed — see below) are **done** as of 2026-10-11.
-What is actually left:
+All of results-pulling, table/figure regeneration, the paper prose, the citations, the
+SCAFFOLD bug (root-caused, reproduced, and fixed — see below), and the verify-phase9 acceptance
+check are **done** as of 2026-10-11. What is actually left:
 
 | # | work | GPU-h | state |
 |---|---|---|---|
-| 1 | **Re-run SCAFFOLD's arm of `main_reduced.yaml` on real Kaggle hardware** | ~3.7 (24 cells × ~550-575s, measured from the broken run's own log -- not the whole 168-cell sweep) | the fix (three bounds in `fl/app.py`/`strategies/scaffold.py`, below) is confirmed stable over the full 100-round budget in-process, but Table 1's SCAFFOLD row in this repo is still the **old, broken** one until this real re-run lands. `paper/05_RESULTS.md` §5.1 says so explicitly. **Ready-to-run notebook: `notebooks/kaggle_day3_scaffold_refit.ipynb`** -- attach Day 3 main's finished output, Run All, Save Version. Deletes only the old broken SCAFFOLD result files (by `git_sha`, not by metric values), re-runs just its 24 cells via `--only scaffold`, then regenerates Table 1 and Figures 1/2 for real. |
+| 1 | **Re-run SCAFFOLD's arm of `main_reduced.yaml` on real Kaggle hardware** | ~3.7 (24 cells × ~550-575s, measured from the broken run's own log -- not the whole 168-cell sweep) | **in progress** -- the project owner is running `notebooks/kaggle_day3_scaffold_refit.ipynb` on Kaggle now. The fix (three bounds in `fl/app.py`/`strategies/scaffold.py`, below) is confirmed stable over the full 100-round budget in-process, but Table 1's SCAFFOLD row in this repo is still the **old, broken** one until this real re-run lands and its output is pulled in. `paper/05_RESULTS.md` §5.1 says so explicitly. |
 | 2 | ~~Fix `figure_convergence`/`figure_comparison`~~ | 0 | **done 2026-10-11** -- `scripts/make_tables.py`'s new `varying_keys()` makes "default" mean "constant across the results being tabulated together", not "matches pyproject.toml's bare value". Figures 1/2/colony-health all regenerate on real data now; `tests/test_tables.py` has both the real bug (constant `num-clients` → `default`) and the thing a naive fix would have broken (R5-like varying `num-clients` stays distinct) as actual tests. Full writeup: `docs/OPEN_QUESTIONS.md`, the "FIXED" entry under "Figures 1 and 2 ... skip every real sweep". |
-| 3 | `make verify-phase9` -- an actual run | 0 | regenerates every table/figure twice and byte-compares (plan §9.3's acceptance criterion). All three sweeps' real data is now present, but the script's single `--expected-seeds` doesn't fit this project's mixed seed counts (8 for main/A1, 5 for A2/robustness) without being run once per subdirectory -- never actually run end-to-end. |
-| 4 | Add **Adp-FL-PSO as a baseline** | ~8 | not implemented; it is the direct competitor. Lowest priority -- the paper's finding does not depend on it. |
+| 3 | ~~`make verify-phase9` -- an actual run~~ | 0 | **done 2026-10-11** -- the single `--expected-seeds`/combined `results/fl` design never fit this project's mixed seed counts (8 for main/A1, 5 for A2/robustness) or the unrelated `results/fl/gate` health-check runs; running it for the first time surfaced exactly that (6 false "incomplete cell" failures). Split into `verify-phase9-main`/`-ablation`/`-robustness`, each with the same `--results-dir`/`--expected-seeds` pairing `tables`/`tables-ablation`/`tables-robustness` already use. All three now PASS byte-for-byte on a second pass. |
+| 4 | Add **Adp-FL-PSO as a baseline** | ~8 | **declined by the project owner, 2026-10-11** ("adp-FL-PSO ko add mat karo") -- not implemented, not planned. The paper's finding does not depend on it; it stays a related-work citation (`paper/REFERENCES.md`), not an experiment. |
 | 5 | Zenodo DOI, `v1.0` tag | 0 | tag pushes 403 here (§6) |
-| 6 | **Human pass on citations, §5's framing, and the abstract** | 0 | everything was written/resolved by an agent this session -- automated literature search and a first read of the tables, not peer judgment. Worth a close read before submission, `paper/00_ABSTRACT.md`'s own checklist says the same. |
+| 6 | **Human pass on citations, §5's framing, and the abstract** | 0 | everything was written/resolved by an agent this session -- automated literature search and a first read of the tables, not peer judgment. Worth a close read before submission, `paper/00_ABSTRACT.md`'s own checklist says the same. The stale `[CITE]`-era banners in `paper/README.md`/`paper/02_RELATED_WORK.md` pointing at the old "no literature access" state were cleaned up 2026-10-11 so this read starts from an accurate map, not a leftover warning. |
 
 **When regenerating figures for more than one sweep by hand:** `make_figures.py` writes
 `convergence.png`/`comparison.png`/etc. under the same filename regardless of `--results-dir` --
-pass `--only ablation` / `--only robustness` for those sweeps (as `make figures-ablation`
-already does) and generate `results/fl/main`'s figures last/plain, or one regeneration silently
-overwrites another's headline figures on disk. Caught and fixed once already this session.
+pass `--only ablation` / `--only robustness` for those sweeps (`make figures-ablation` and the
+new `make figures-robustness` both already do) and generate `results/fl/main`'s figures
+last/plain, or one regeneration silently overwrites another's headline figures on disk. Caught
+and fixed once already this session; `figures-robustness` exists specifically so no one has to
+remember the `--only` by hand a second time.
 
 `pyproject.toml`'s gate fix stays session-local by design (CLAUDE.md): regenerating tables or
 figures locally needs `scripts/apply_gate_fix.py --from-results results/fl/gate --apply-verdict`
@@ -176,7 +178,7 @@ norm clip (`global_c_max_norm=10.0`); (3) the correction term itself is capped
 (1)+(2) alone still let `‖w‖` reach 24M by round 90, since a bounded-but-nonzero correction
 applied every round under SGD momentum (0.9) diverges on its own. All three together: `‖w‖`
 goes 67.7 → 73.7 over the full 100 rounds, ordinary training. All three are no-ops whenever the
-pathology they target isn't present; the full 913-test suite and the existing scaffold unit
+pathology they target isn't present; the full 928-test suite and the existing scaffold unit
 tests pass unchanged.
 
 ### §5's honest status
