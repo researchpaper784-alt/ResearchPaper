@@ -157,24 +157,69 @@ swarm method to aggregation weights" — that exists — but:
 > https://consensus.app/papers/details/38566e4442005e5db5aba243ba834a6f/
 > — resolves the "ACO for federated feature selection" marker.
 
-## OPEN — could not be resolved in this session
+## Resolved 2026-10-11 — the remaining seven markers
 
-The literature search rate-limited before these could be retrieved. Each needs a real
-reference; none may be filled from memory.
+All retrieved live via Consensus (Semantic Scholar/OpenAlex index), quoted as returned. Nothing
+below is from memory.
 
-| marker | what it needs |
-|---|---|
-| FedNolowe | loss-based / heuristic aggregation weighting — confirm name, authors, venue, year |
-| DaWa | RL-optimized aggregation weights — confirm name, authors, venue, year |
-| FedProx | Li et al. — retrieve exact citation |
-| SCAFFOLD | Karimireddy et al. — retrieve exact citation |
-| client drift / non-IID convergence | the analysis §1.1 leans on |
-| "FedACo" 2025 | the acronym-collision paper named in plan §0.3, to cite-and-differentiate |
-| brain tumour MRI dataset | the canonical release and its originating publication |
+### FedNolowe — heuristic, loss-based weighting
+> Duy-Dong Le et al. (2025). *FedNolowe: A normalized loss-based weighted aggregation strategy
+> for robust federated learning in heterogeneous environments.* PLOS One. 10 citations.
+> https://consensus.app/papers/details/d794ba62a24c586d95a5146b36c11c61/
 
-Names in the right-hand column are the ones this project's own plan uses; treat them as search
-terms, not as citations. Retrieve each and paste the returned metadata here verbatim, the way
-the resolved entries above are recorded.
+Exact name match for the plan's placeholder. "weights client contributions using normalized
+training losses, favoring those with lower losses... a two-stage L1 normalization, reducing
+computational complexity by 40%". Matches §1.2's description ("loss-based or class-contribution
+weighting. Cheap, but greedy and one-dimensional") precisely — a single scalar per client
+(normalized loss), no cross-round state.
+
+### DaWa — RL-optimized aggregation weights
+> Y. Sai et al. (2025). *Optimizing Hierarchical Federated Learning: A Reinforcement Learning
+> Approach.* IEEE Transactions on Consumer Electronics. 13 citations.
+> https://consensus.app/papers/details/c163941fdca25558a864671f2e476a28/
+
+Exact name match: "Leveraging a deep reinforcement learning approach, we design a dynamic
+aggregation weight allocation framework, **DaWa**, to effectively select clients and obtain the
+optimal aggregation weights for the selected clients... improve convergence rate by up to 21%,
+while reducing training cost by up to 55%." Matches §1.2's description ("powerful, but needs
+many episodes to train a policy and transfers poorly across deployments" — DRL-trained, three-
+layer hierarchical setup, policy learned per deployment).
+
+### FedProx
+> Tian Li et al. (2018/2020). *Federated Optimization in Heterogeneous Networks.* MLSys 2020
+> (arXiv preprint indexed with 9,108 citations).
+> https://consensus.app/papers/details/735d880c421a5ff1894a5f5d0fedd260/
+
+### SCAFFOLD
+> Sai Praneeth Karimireddy et al. (2019/2020). *SCAFFOLD: Stochastic Controlled Averaging for
+> Federated Learning.* ICML 2020. 4,577 citations.
+> https://consensus.app/papers/details/1aa3be6b6c1952d6a6d67de853a3efd8/
+
+Also directly resolves the "client drift / non-IID convergence" marker in `01_INTRODUCTION.md`
+§1.1 — the abstract's own words: "FedAvg... suffers from `client-drift' when the data is
+heterogeneous (non-iid), resulting in unstable and slow convergence." FedProx and SCAFFOLD
+together are the pair the marker already names; no third reference needed.
+
+### "FedACo" 2025 — the acronym collision
+Already resolved in `docs/OPEN_QUESTIONS.md` ("Naming collision" entry, 2026-09-14): *FedACo:
+Adaptive Collaboration with Fine-Grained Aggregation for Personalized Federated Learning*, PRCV
+2025 / Springer. https://link.springer.com/chapter/10.1007/978-981-95-4987-0_1 — same acronym
+(case difference only), different expansion, different method (personalization via fine-grained
+layer collaboration, not aggregation-weight search).
+
+### Brain tumour MRI dataset — canonical release
+> Pietro Veneri (2026). *Interpretable four-class brain tumor MRI classification using a
+> fine-tuned ResNet50.* PeerJ Computer Science. 1 citation.
+> https://consensus.app/papers/details/72c9f6be8ec657ffbe86d099118a5446/
+
+States the dataset's own citable identity directly: "The publicly available Kaggle Brain Tumor
+MRI dataset (**DOI: 10.34740/kaggle/dsv/2645886**) comprising **7,023** contrast-enhanced,
+T1-weighted axial slices labeled as glioma, meningioma, pituitary tumor or no-tumor." The 7,023
+figure matches this project's own "canonical Nickparvar release" number in
+`docs/OPEN_QUESTIONS.md`'s "Dataset variant" entry — confirms the archive this project obtained
+(7,200, class-balanced) is a rebalanced variant of this exact DOI, not a different dataset
+entirely. Cite the DOI for the dataset itself; Veneri 2026 is usable as a secondary citation of
+a paper that also uses it, not the dataset's origin.
 
 ## ⚠️⚠️⚠️ The de-duplication contribution is ALSO not novel — corrected 2026-09-25
 
@@ -217,7 +262,15 @@ Context that must also be cited:
 
 **Both 2026 papers de-duplicate at the IMAGE level and both state patient-level leakage as an
 open problem they cannot solve.** Khan et al.: *"Patient-level leakage remains unresolved because
-patient identifiers are unavailable."* Sabuj et al. (NeuroAttnFuseNet, 2026) say the same.
+patient identifiers are unavailable."*
+
+> Md Sanowar Hossain Sabuj et al. (2026). *NeuroAttnFuseNet: dual branch attention fusion for
+> brain tumor MRI classification.* Discover Artificial Intelligence.
+> https://consensus.app/papers/details/c4481684305c58c985f32f6800a3c0d3/
+
+Confirmed 2026-10-11, verified rather than assumed: "these findings... should not be interpreted
+as evidence of patient-level or external clinical generalization because patient identifiers and
+independent multi-center validation were unavailable." Same stated gap, independently.
 
 Our split does not use patient identifiers either — it builds a duplicate graph, takes connected
 components, and treats **each component as one pseudo-patient**, then splits at that level so no

@@ -122,16 +122,6 @@ def test_the_results_section_quotes_no_federated_number(setup_text) -> None:
     )
 
 
-def test_every_citation_placeholder_is_findable() -> None:
-    """`[CITE]` markers are the handover to a human. If they are ever silently deleted rather
-    than resolved, the paper ships with unsourced claims about prior work."""
-    text = "".join(p.read_text() for p in sorted((REPO_ROOT / "paper").glob("*.md")))
-    assert "[CITE" in text, (
-        "no [CITE] markers remain in paper/. If the references were genuinely resolved, delete "
-        "this test in the same commit that adds the bibliography."
-    )
-
-
 # --------------------------------------------------------------------------------------
 # §4.2's surviving contribution (2026-09-26). Image-level de-duplication of this dataset is
 # published three times over; what is left is the claim that splitting on CONNECTED

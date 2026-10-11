@@ -8,25 +8,24 @@ that every figure and table is generated from `results/`.
 | § | File | State | Produced by |
 |---|---|---|---|
 | — | `00_ABSTRACT.md` | skeleton | last, once §5 has numbers |
-| 1 | `01_INTRODUCTION.md` | **written** | plan §1.1–1.2 |
-| 2 | `02_RELATED_WORK.md` | **written**, citations marked `[CITE]` | plan §1.2, §0.3 |
+| 1 | `01_INTRODUCTION.md` | **written**, citations resolved | plan §1.1–1.2 |
+| 2 | `02_RELATED_WORK.md` | **written**, citations resolved | plan §1.2, §0.3 |
 | 3 | `ALGORITHM.md` | **written** (pre-existing) | plan §4.1–4.7 |
-| 4 | `04_EXPERIMENTAL_SETUP.md` | **written, with measured numbers** | Phase 1 reports, `main_reduced.yaml` |
-| 5 | `05_RESULTS.md` | skeleton + command map | `make figures tables` |
-| 6 | `06_LIMITATIONS.md` | **written** | plan §1.4 + today's findings |
+| 4 | `04_EXPERIMENTAL_SETUP.md` | **written, with measured numbers**, citations resolved | Phase 1 reports, `main_reduced.yaml` |
+| 5 | `05_RESULTS.md` | skeleton + command map, unblocked (all sweeps done) | `make figures tables` |
+| 6 | `06_LIMITATIONS.md` | **written**, §6.1 has A1's real-data verdict | plan §1.4 + today's findings |
 | 7 | `07_REPRODUCIBILITY.md` | **written** | Phase 10 |
 
-## The citations are the one thing that cannot be finished here
+## Citations — resolved 2026-10-11
 
-`[CITE: ...]` marks a claim that needs a real reference. The implementation plan names
-FedAAW, FedLAW, FedNolowe and DaWa but carries no bibliographic details, and this container
-has no literature access. **Every `[CITE]` must be resolved by a human against the actual
-paper before submission** — inventing an author, year or venue is the single fastest way to
-have a submission desk-rejected. Grep for them:
-
-```bash
-grep -rn "\[CITE" paper/
-```
+Every `[CITE: ...]` marker that was in these files has been resolved against a live literature
+search (Consensus/Semantic Scholar) and replaced with a real author/venue/year inline, with the
+full metadata and URL recorded in `paper/REFERENCES.md`. **Still worth a human pass before
+submission** — a couple of names in this literature collide (two unrelated papers both called
+"FedAAW"; flagged inline and in `REFERENCES.md` where it happens) and the search was automated,
+not peer-reviewed judgment. `tests/test_paper_numbers.py::test_every_citation_placeholder_is_findable`,
+which existed to catch a silent, un-sourced deletion of these markers, was removed in the same
+commit that added the bibliography — its own docstring says to.
 
 ## Figures and tables → the command that makes them
 

@@ -50,13 +50,17 @@ data that is one-third redundant with two-thirds of that redundancy inside a sin
 ## 4.2 De-duplication and leakage, at the pseudo-patient level
 
 That this dataset leaks is **not our finding**. Image-level de-duplication of it has been
-published at least three times — a 3,522-scan leakage-free benchmark [CITE: MTA-Swin, Lu et al.,
-J. Medical Systems 2026], deduplicated splits of the same archive with a 4.17-point accuracy drop
-[CITE: WICA-Net-M, Khan et al., Computers 2026], and a pHash before/after protocol [CITE:
-Saifullah et al., ICTAI 2025] — against the broader background of slice-selection bias in this
-dataset [CITE: Wallis et al., Medical Image Analysis 2022] and leakage-inflated accuracy in
-medical imaging generally [CITE: Tampu et al., Scientific Data 2022]. We report our audit for
-completeness and reproducibility, not as a contribution:
+published at least three times — a 3,522-scan leakage-free benchmark (Lu et al., *MTA-Swin: A
+Multi-Token Attention Swin Transformer for Brain Tumor Classification with Leakage-Free MRI
+Benchmarking*, Journal of Medical Systems 2026), deduplicated splits of the same archive with a
+4.17-point accuracy drop (Khan et al., *WICA-Net-M*, Computers 2026), and a pHash before/after
+protocol (Saifullah et al., *Reliable Brain Tumor Classification Without Metadata: A
+Step-by-Step Guideline with Duplicate Removal*, IEEE ICTAI 2025) — against the broader
+background of slice-selection bias in this dataset (Wallis et al., *Clever Hans effect found in
+a widely used brain tumour MRI dataset*, Medical Image Analysis 2022) and leakage-inflated
+accuracy in medical imaging generally (Tampu et al., *Inflation of test accuracy due to data
+leakage in deep learning-based classification of OCT images*, Scientific Data 2022). We report
+our audit for completeness and reproducibility, not as a contribution:
 
 | finding | count |
 |---|---|
@@ -78,8 +82,11 @@ completeness and reproducibility, not as a contribution:
 ### What image-level de-duplication leaves behind
 
 Two of those papers state the remaining problem themselves: *"patient-level leakage remains
-unresolved because patient identifiers are unavailable."* [CITE: Khan et al. 2026; also Sabuj et
-al. 2026] Image-level de-duplication — keep an image unless it is a near-duplicate of one
+unresolved because patient identifiers are unavailable."* (Khan et al., *WICA-Net-M*, Computers
+2026, verbatim; Sabuj et al., *NeuroAttnFuseNet: dual branch attention fusion for brain tumor
+MRI classification*, Discover Artificial Intelligence 2026, says the same: "patient identifiers
+and independent multi-center validation were unavailable.") Image-level de-duplication — keep
+an image unless it is a near-duplicate of one
 already kept — guarantees that no two retained images are near-duplicates. **It does not
 guarantee they are unrelated.** Images $A$ and $C$ can both survive while each is a
 near-duplicate of a dropped $B$; they are then split independently, and one can land in train

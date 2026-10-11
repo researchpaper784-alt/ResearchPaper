@@ -136,14 +136,30 @@ only that cell, the sweep runners resume per-cell.
 | 1 | **Get the real `results/fl/robustness/*.json`** (80 files) **off Kaggle** | 0 | what's in this clone now is `paper/tables/robustness.md` reconstructed by hand from the R2 notebook's printed log, not regenerated from raw JSONs. No `.csv`/`.tex`, no robustness figures, `make verify-phase9` cannot cover it. Same zip-and-Google-Drive path that worked for main/ablation works here -- the notebook's Output tab, zipped. |
 | 2 | **Fix `figure_convergence`/`figure_comparison`** (Figures 1-2, the headline ones) | 0 | both silently skip every real sweep -- `_variant_of` marks any result whose `num-clients` differs from `pyproject.toml`'s bare `2` as non-"default", and no real config in this project uses `2`. Root-caused and written up in `docs/OPEN_QUESTIONS.md` ("Figures 1 and 2 ... skip every real sweep"), **not fixed** -- the naive fix (exempt `num-clients`) silently breaks R5's client-scaling study the same quiet way the 2026-09-24 variant bug did. Needs a design decision, not a patch. |
 | 3 | `pyproject.toml`'s gate fix is session-local by design (CLAUDE.md) | 0 | regenerating tables/figures locally means running `scripts/apply_gate_fix.py --from-results results/fl/gate --apply-verdict` first (sets `aco-gamma-entropy` 0.1→0.45) and `git checkout -- pyproject.toml` after, or `test_config_defaults.py` fails (4 tests) because the committed default is meant to stay 0.1. |
-| 4 | **§5 results prose + abstract** | 0 | unblocked now that 1-2 above are resolved enough to write from (main/ablation fully; robustness from the recovered table). §6.1's `[pending: A1 on real data]` is filled in (2026-10-11, numbers above) but is a first read, not run through significance testing yet. |
-| 5 | **23 open `[CITE]` markers** | 0 | needs literature access. `grep -rn "\[CITE" paper/` lists them: 6 in `01_INTRODUCTION.md`, 12 in `02_RELATED_WORK.md`, 5 in `04_EXPERIMENTAL_SETUP.md`. Several already carry a real author/year/venue and need verification rather than discovery (MTA-Swin/Lu 2026, WICA-Net-M/Khan 2026, Saifullah 2025, Wallis 2022, Tampu 2022). |
+| 4 | ~~§5 results prose + abstract~~ | 0 | **done 2026-10-11**, first draft -- see below, not yet the abstract |
+| 5 | ~~23 open `[CITE]` markers~~ | 0 | **done 2026-10-11** -- all resolved against a live Consensus/Semantic Scholar search, metadata in `paper/REFERENCES.md`, `test_every_citation_placeholder_is_findable` removed per its own instruction. Still worth a human pass before submission -- automated search, not peer judgment. |
 | 6 | Add **Adp-FL-PSO as a baseline** | ~8 | not implemented; it is the direct competitor. Lowest priority of what's left -- the paper's finding does not depend on it. |
 | 7 | Zenodo DOI, `v1.0` tag | 0 | tag pushes 403 here (§6) |
+| 8 | **Fix the SCAFFOLD baseline** | 0 (debug, not GPU) | found while writing §5.1: 15/24 of its `results/fl/main` runs collapse to predicting a single class and never recover, which is why `check_iid_band.py` fails. `docs/OPEN_QUESTIONS.md` ("SCAFFOLD collapses..."). Blocks trusting Table 1's SCAFFOLD row and the main-table figures as currently computed. |
+| 9 | Pull `results/`, `paper/tables/`, `paper/figures/` from this clone | 0 | **done 2026-10-11**, committed in `05d3cda` and the commit that added this revision |
 
-Never invent an author, year or venue for item 5. **Item 4 is still the real risk, not any GPU
-row — there are none left.** Eight pages with two related-work sections is a person's undivided
-attention for days.
+Never invent an author, year or venue, even with item 5 done -- a future `[CITE]` added by hand
+follows the same rule. **Item 8 (SCAFFOLD) is now the sharpest open risk** — it sits inside
+Table 1, the paper's first table, and the current write-up (§5.1) works around it by caveat
+rather than by fix. Item 1 (robustness raw JSONs) is the other real gap: §5.3 is written from a
+reconstructed table, not the normal pipeline.
+
+### §5's honest status, past the table in HANDOVER's own bookkeeping
+
+`paper/05_RESULTS.md` now has real prose for every subsection, not a skeleton. Two things in it
+are marked **not settled** rather than asserted as findings, and should stay that way until
+resolved: the SCAFFOLD row (§5.1, item 8 above) and the robustness table's provenance (§5.3,
+item 1 above). Both A1 (§5.2) and A2 (§5.2b) read as genuine, if preliminary, findings — A2 in
+particular: **full cross-round persistence beats the method's own default and beats no
+persistence, in both regimes it was tested in.** That is the one place in the real data where
+the mechanism this project is actually named for does something the closest published prior
+work cannot. §1.2 of `HANDOVER.md` above still calls A2 "the most important experiment in the
+project" — that call looks right in hindsight, not just in expectation.
 
 ## 6. Landmines — each of these has already cost someone a day
 

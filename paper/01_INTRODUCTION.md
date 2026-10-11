@@ -11,8 +11,9 @@ Under non-IID client data these weights are suboptimal. In multi-hospital medica
 the setting this paper targets — scanner vendor, field strength, acquisition protocol and case
 mix all differ between sites, so client updates point in conflicting directions. A client whose
 update opposes the consensus still contributes in proportion to its dataset size, dragging the
-global model and slowing convergence. [CITE: client drift / non-IID convergence, e.g. the
-FedProx and SCAFFOLD analyses]
+global model and slowing convergence (Li et al., *Federated Optimization in Heterogeneous
+Networks*, MLSys 2020; Karimireddy et al., *SCAFFOLD: Stochastic Controlled Averaging for
+Federated Learning*, ICML 2020 — SCAFFOLD names this failure mode "client drift" directly).
 
 The weight vector $\alpha$ is therefore a natural thing to optimize rather than fix.
 
@@ -22,18 +23,27 @@ Work on adaptive aggregation weights splits four ways:
 
 - **Analytically derived** — minimize a convergence upper bound. Elegant, but the bound rests
   on smoothness and bounded-dissimilarity assumptions that do not hold for deep CNNs.
-  [CITE: FedAAW]
+  (Li et al., *Federated Learning With Adaptive Aggregation Weights for Non-IID Data in Edge
+  Networks*, IEEE TCCN 2025 — ⚠️ a second, unrelated paper shares the FedAAW name, see
+  `paper/REFERENCES.md`.)
 - **Learned** — gradient-learn the weights on a server-side proxy validation set. Strong, but
   requires the server to hold data, which is often the exact thing federation exists to avoid.
-  [CITE: FedLAW]
+  (Li et al., *Revisiting Weighted Aggregation in Federated Learning with Neural Networks*
+  [FedLAW], 2023.)
 - **Heuristic** — loss-based or class-contribution weighting. Cheap, but greedy and
-  one-dimensional. [CITE: FedNolowe]
+  one-dimensional. (Le et al., *FedNolowe: A normalized loss-based weighted aggregation
+  strategy for robust federated learning in heterogeneous environments*, PLOS One 2025.)
 - **RL-optimized** — powerful, but needs many episodes to train a policy and transfers poorly
-  across deployments. [CITE: DaWa]
+  across deployments. (Sai et al., *Optimizing Hierarchical Federated Learning: A
+  Reinforcement Learning Approach* [DaWa], IEEE TCE 2025.)
 
 Swarm intelligence has appeared in federated learning, but at the **systems layer**: ACO for
-scheduling model-update transmission, PSO for edge-device selection, ACO for federated
-*feature* selection. [CITE: each of these three]
+scheduling model-update transmission and PSO for edge-device selection (Rjoub et al., *A
+Hybrid Swarm Intelligence Approach for Optimizing Multimodal LLM Deployment in Edge-Cloud-based
+Federated Learning Environments*, Computer Communications 2025), and ACO for federated
+*feature* selection (Sun et al., *Federated multi-label feature selection via manifold sparse
+constraints and game-theoretic evolutionary ant colony optimization*, J. King Saud University
+CIS 2025).
 
 ⚠️ **The gap is substantially narrower than this project assumed, in two ways.** First, swarm
 optimization of the aggregation weight vector is *already published*: Adp-FL-PSO applies PSO at

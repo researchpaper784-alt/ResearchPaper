@@ -1725,3 +1725,33 @@ did. Workaround for now: the data needed for Figures 1/2 is fully present in `re
 and `paper/tables/main.csv` (every per-round curve, every final mean±std) — they can be written
 by hand from the table/raw JSON for a first paper draft without `make figures` if the deadline
 is tighter than this fix.
+
+## SCAFFOLD collapses to a single predicted class in most of its own main-table runs — 2026-10-11
+
+`scripts/check_iid_band.py --results-dir results/fl/main` **fails**: spread of strategy means
+under `iid` is 0.6844 against a 0.0500 band (and against 2x seed noise of 0.0388) —
+`paper/05_RESULTS.md`'s own §5.1 instruction is "if the IID column shows a wide spread, stop",
+so this is written up rather than narrated past.
+
+**Root cause, checked directly on the real result JSONs, not inferred from the aggregate
+number alone:** `scaffold`'s `per_class_recall` at the final round is `{glioma: 0, meningioma:
+0, notumor: 0, pituitary: 1}` (or the equivalent for a different single class) in **15 of its
+24 `results/fl/main` runs (62.5%)**, across all three regimes, not just `iid` — the model has
+collapsed to predicting one class for every input and never recovered. This is the same
+degenerate-single-class signature `HANDOVER.md` §2 names as "the expected random-init signature"
+for **round 0** of a healthy run — here it persists to round 100.
+
+**Consequence for the main table:** `scaffold`'s row (`paper/tables/main.csv`/`.md`) is not a
+measurement of SCAFFOLD's relative merit on this task; it is close to the score of a trivial
+one-class classifier. `fedlaw` and `krum` also sit well below `fedavg`/`fedprox`/`trimmed-mean`/
+`fedaco` even under `iid` (where a competent method should land close to the pack — Phase 1.4
+measured this partition's JS divergence at 0.007, almost no heterogeneity to exploit), which is
+worth checking the same way before trusting those two rows either; `scaffold` is the only one
+confirmed collapsed by this check.
+
+**Not fixed here.** This needs the SCAFFOLD strategy implementation checked (control-variate
+update, `mu`/learning-rate interaction, or a partition edge case) against a working reference
+run, which is debugging work, not a results-writing task. Until it is: **§5.1 and any main-table
+figure must either exclude `scaffold` or mark it explicitly as non-convergent**, and should not
+report it as "SCAFFOLD underperforms the other baselines" without that caveat — that is a
+different and much weaker claim than what the raw number implies.

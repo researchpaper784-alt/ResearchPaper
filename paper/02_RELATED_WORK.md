@@ -13,22 +13,30 @@ have been proposed.
 **Analytically derived weights.** Choose $\alpha$ to minimize a convergence upper bound. The
 appeal is that the weights follow from the analysis rather than from a heuristic; the cost is
 that the bound requires smoothness and bounded gradient dissimilarity, neither of which holds
-for the deep CNNs actually deployed. [CITE: FedAAW — confirm name, venue, year, and whether
-the bound is on the global objective or on drift]
+for the deep CNNs actually deployed. (Li et al., *Federated Learning With Adaptive Aggregation
+Weights for Non-IID Data in Edge Networks* [FedAAW], IEEE TCCN 2025 — the bound is on the
+global objective, via a closed-form weight expression that minimizes it. ⚠️ A second, unrelated
+paper also uses the name FedAAW, see `paper/REFERENCES.md`.)
 
 **Learned weights.** Treat $\alpha$ as parameters and gradient-learn them on a server-held
 proxy validation set. This is the strongest prior family and the closest comparison to our
 work, so FedLAW is a baseline in §5.1 rather than only a citation. Its requirement is also its
 limitation: the server must hold representative data, which in cross-silo medical federation is
-frequently the constraint that motivated federating in the first place. [CITE: FedLAW]
+frequently the constraint that motivated federating in the first place. (Li et al., *Revisiting
+Weighted Aggregation in Federated Learning with Neural Networks* [FedLAW], 2023.)
 
 **Heuristic weights.** Weight by local loss, or by class contribution. Cheap and needs no
 server data, but greedy and effectively one-dimensional — a single scalar signal per client
-ordered monotonically. [CITE: FedNolowe; also the class-contribution weighting line]
+ordered monotonically. (Le et al., *FedNolowe: A normalized loss-based weighted aggregation
+strategy for robust federated learning in heterogeneous environments*, PLOS One 2025 — weights
+by normalized training loss, two-stage L1 normalization.)
 
 **RL-optimized weights.** Learn a weighting policy with reinforcement learning. Expressive, but
 sample-hungry — many episodes to train a policy — and the policy transfers poorly to a
-federation with different client composition. [CITE: DaWa]
+federation with different client composition. (Sai et al., *Optimizing Hierarchical Federated
+Learning: A Reinforcement Learning Approach* [DaWa], IEEE Transactions on Consumer Electronics
+2025 — a DRL-trained client-selection-and-weighting policy for a three-layer hierarchical FL
+setup.)
 
 **Client-vector weights — the closest prior work.** FedAWA optimizes aggregation weights from
 client update vectors, with no proxy dataset, up-weighting clients whose updates align with the
@@ -55,11 +63,20 @@ Swarm methods appear in federated learning almost entirely at the **systems laye
 the aggregation layer:
 
 - **ACO for communication scheduling** — which clients transmit updates when, to reduce
-  contention or energy. [CITE]
-- **PSO for device selection** — choosing the participating subset per round. [CITE]
+  contention or energy. (Rjoub et al., *A Hybrid Swarm Intelligence Approach for Optimizing
+  Multimodal LLM Deployment in Edge-Cloud-based Federated Learning Environments*, Computer
+  Communications 2025 — ACO optimizes transmission of model updates.)
+- **PSO for device selection** — choosing the participating subset per round. (Same Rjoub et
+  al. 2025: PSO selects edge devices in the same pipeline.)
 - **ACO for federated feature selection** — a discrete search over features, run federatedly.
-  [CITE]
-- **Swarm methods for communication efficiency** more broadly. [CITE]
+  (Sun et al., *Federated multi-label feature selection via manifold sparse constraints and
+  game-theoretic evolutionary ant colony optimization* [Fed-MGACO], J. King Saud University CIS
+  2025.)
+- **Swarm methods more broadly, at the client-selection layer.** (Khan et al., *Swarm
+  Intelligence-Driven Client Selection for Federated Learning in Cybersecurity Applications*,
+  2024 — benchmarks nine swarm-intelligence algorithms, including ACO and PSO, for client
+  selection; finds Grey Wolf Optimization beating both, a second independent signal that ACO is
+  not the strongest swarm choice in FL settings generally.)
 
 These operate on *who participates* or *what is transmitted*. **But swarm optimization of the
 aggregation weight vector itself is also already published**, and an earlier draft of this
@@ -97,12 +114,19 @@ cannot provide, which matters for how §5.2's result should be read.
 An unrelated 2025 paper uses the acronym "FedACo". This work was renamed **FedSwarm** to avoid
 the collision; earlier internal documents and some code paths still say "FedACO". The two are
 unrelated and the difference should be stated in a footnote rather than left for a reviewer to
-discover. [CITE: the 2025 FedACo paper, to cite-and-differentiate]
+discover. (The collision: *FedACo: Adaptive Collaboration with Fine-Grained Aggregation for
+Personalized Federated Learning*, PRCV 2025 / Springer,
+https://link.springer.com/chapter/10.1007/978-981-95-4987-0_1 — personalization via
+fine-grained layer collaboration; shares the acronym by coincidence, not the method.)
 
 ## 2.4 Robustness and Byzantine aggregation
 
 Krum, Trimmed-Mean and coordinate-wise median are the standard robust aggregators and are
-baselines in §5.3. [CITE: Krum; Trimmed-Mean/median] A weighting method that inspects per-client
+baselines in §5.3. (Krum: Blanchard et al., *Machine Learning with Adversaries: Byzantine
+Tolerant Gradient Descent*, NeurIPS 2017, 3,028 citations — $O(n^2(d+\log n))$ time complexity,
+worth stating next to our own $O(K^2d)$ Gram precompute. Trimmed-Mean: Wang et al., *Federated
+learning framework based on trimmed mean aggregation rules*, Expert Systems with Applications
+2025.) A weighting method that inspects per-client
 updates has the *opportunity* to down-weight adversaries as a side effect — whether it does is
 measured in §5.3, not assumed. It also has the same limitation as those methods: it requires
 per-client updates at the server and so is incompatible with plain secure aggregation (§6.2).
