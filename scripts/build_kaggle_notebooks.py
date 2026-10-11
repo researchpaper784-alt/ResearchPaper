@@ -847,6 +847,110 @@ ensure_gate_fix()
 ]
 
 
+# ======================================================================================
+# Day 3, SCAFFOLD re-fit -- the one remaining GPU task in the whole project (2026-10-11).
+# Everything else (gate, A1, A2, main, R1, R2) is done; this notebook exists only because
+# SCAFFOLD's control-variate update was found to diverge to NaN by round ~16 of 100
+# (docs/OPEN_QUESTIONS.md, "ROOT CAUSE FOUND AND REPRODUCED" / "FIXED, confirmed over the
+# full 100-round budget") -- fixed in code (fl/app.py, strategies/scaffold.py), confirmed
+# stable in-process, but never re-run for real. 24 cells (3 regimes x 8 seeds) -- measured
+# directly from the broken run's own log (~550-575s/cell, day3-d.log), ~3.7 GPU-h, not the
+# whole 168-cell main_reduced.yaml's ~35h -- run alone via `--only scaffold` rather than
+# re-running the other 144 already-good cells.
+
+SCAFFOLD_REFIT = [
+    md(r'''
+# FedSwarm — SCAFFOLD re-fit (Kaggle GPU)
+
+**The last GPU task in the project.** SCAFFOLD's control-variate update was found to
+diverge to NaN by round ~16 of 100 under this sweep's real settings — not a Kaggle or
+environment artifact, reproduced and root-caused entirely offline
+(`docs/OPEN_QUESTIONS.md`, "ROOT CAUSE FOUND AND REPRODUCED"). Fixed with three bounds in
+`src/fedswarm/fl/app.py` and `src/fedswarm/strategies/scaffold.py`, confirmed stable over
+a full 100-round in-process repro (`‖w‖` grows smoothly 67.7 → 73.7, not to NaN) — this
+notebook is that fix's first real run.
+
+**Attach Day 3 main's finished output** (right sidebar → **+ Add Input → Your Work** →
+whichever of `kaggle_day3a_main.ipynb` … `kaggle_day3f_main_finish.ipynb` holds the full
+168/168 `results/fl/main`) — this notebook only re-runs SCAFFOLD's 24 cells (3 regimes × 8
+seeds, `--only scaffold`), not the other 144, which are already correct. It deletes the
+**old, broken** SCAFFOLD result files it finds after attaching (confirmed by their
+`provenance.git_sha` predating this fix) so the resumable sweep runner does not mistake
+them for already-done work and skip the re-run.
+
+~3.7 GPU-h (24 cells × ~550-575s each, measured directly from the broken run's own log) --
+comfortably inside a single 12-hour Kaggle session, no time-limit cap needed.
+'''),
+    md(HOW_TO_RUN),
+    md("## 1. Setup — GPU check, then clone from GitHub"), PREFLIGHT, CLONE, INSTALL, DATASET,
+    md("### Restore — Day 3 main's finished output, if attached"),
+    RESTORE,
+    md("## 2. Build the image cache (~3 min, once per session)"), CACHE,
+    FEDERATION_MD, FEDERATION,
+    GATE_IF_MISSING,
+    md(r'''
+---
+# STEP 1 — drop the old, broken SCAFFOLD results
+
+Every other strategy's results are untouched. Only SCAFFOLD's result files are removed
+here, and only because the code that produced them no longer exists — `aggregate_train`
+used to accumulate an unbounded control variate; it does not anymore. A result written
+under **this session's own clone** (this cell's `git_sha`, fixed code by construction,
+since the clone step above already checked out this branch's current `HEAD`) is a resume
+checkpoint, not stale — kept. One written under any other `git_sha` predates it and is
+removed, whatever its metric values say; this cell does not try to guess "broken" from the
+numbers, only from which code produced them.
+'''),
+    code(r'''
+import json
+import subprocess
+from pathlib import Path
+
+this_sha = subprocess.run(
+    ["git", "-C", "/kaggle/working/ResearchPaper", "rev-parse", "HEAD"],
+    capture_output=True, text=True, check=True,
+).stdout.strip()
+print("this session's git_sha:", this_sha)
+
+removed = 0
+for f in Path("results/fl/main").glob("*.json"):
+    try:
+        d = json.loads(f.read_text())
+    except (json.JSONDecodeError, OSError):
+        continue
+    cfg = d.get("config", {}).get("run_config", {})
+    if cfg.get("strategy-name") != "scaffold":
+        continue
+    if d.get("provenance", {}).get("git_sha") == this_sha:
+        continue  # a resume checkpoint from this same session, already on the fixed code
+    f.unlink()
+    removed += 1
+print(f"removed {removed} old SCAFFOLD result file(s) -- the sweep below will redo exactly these")
+'''),
+    md("---\n# STEP 2 — re-run just SCAFFOLD's 24 cells"),
+    code(r'''
+ensure_gate_fix()
+!python scripts/run_sweep.py --config configs/experiment/main_reduced.yaml --only scaffold --stream --gpus-per-client {GPUS_PER_CLIENT}
+'''),
+    md(r'''
+---
+# STEP 3 — confirm the fix, then the real table and figures
+
+`check_iid_band.py` is the same check that caught this in the first place — it should
+pass now. `make_tables`/`make_figures` regenerate Table 1 and Figures 1/2 from the
+now-correct `results/fl/main` (168/168 again, SCAFFOLD included and no longer degenerate).
+'''),
+    code(r'''
+!python scripts/check_iid_band.py --results-dir results/fl/main
+!python scripts/make_tables.py --results-dir results/fl/main --out paper/tables
+!python scripts/make_figures.py --results-dir results/fl/main
+'''),
+    *save("hand the regenerated paper/tables/main.* and paper/figures/{convergence,comparison,"
+          "colony_health}.png to whoever is finishing paper §5 -- this was the last open GPU "
+          "task in the project."),
+]
+
+
 NOTEBOOKS = {
     "kaggle_day1_gate_and_a2.ipynb": ("d1", DAY1),
     "kaggle_day2a_a1.ipynb": ("d2a", DAY2A),
@@ -859,6 +963,7 @@ NOTEBOOKS = {
     "kaggle_day3f_main_finish.ipynb": ("d3f", DAY3F_MAIN_FINISH),
     "kaggle_day3_robustness_r1.ipynb": ("d3r1", DAY3_ROBUSTNESS_R1),
     "kaggle_day3_robustness_r2.ipynb": ("d3r2", DAY3_ROBUSTNESS_R2),
+    "kaggle_day3_scaffold_refit.ipynb": ("d3sr", SCAFFOLD_REFIT),
 }
 
 

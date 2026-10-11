@@ -1718,13 +1718,51 @@ wrong for the fourth. The real fix is more likely: "default" for figure purposes
 — but that is a design change to shared code, not a one-line patch, and R5 hasn't run yet to
 confirm the fix against real multi-K data in the one sweep where it matters.
 
-**Not fixed here.** Left for the project owner to decide the right semantics before touching
-`make_figures.py`/`make_tables.py`, since getting it wrong silently breaks either the headline
-figures (current state) or R5's scaling analysis (the naive fix) the same quiet way the last one
-did. Workaround for now: the data needed for Figures 1/2 is fully present in `results/fl/main`
-and `paper/tables/main.csv` (every per-round curve, every final mean±std) — they can be written
-by hand from the table/raw JSON for a first paper draft without `make figures` if the deadline
-is tighter than this fix.
+### A second effect of the same fix, found regenerating the tables: `p (Holm)` and Cohen's `d` were also silently empty
+
+`add_deltas`/`add_significance` (`make_tables.py`) compute a delta, a paired Wilcoxon p-value
+and Cohen's `d` only for rows whose `variant == "default"` — the identical filter
+`figure_convergence`/`figure_comparison` used, so it had the identical bug: every real sweep's
+table (`main`, `robustness`) printed `—` in the `p (Holm)` and `d` columns for every row, not
+because the test wasn't computable but because no row ever read `"default"`. Fixed by the same
+change below. `paper/tables/main.csv`/`robustness.csv`, regenerated, now carry real values —
+e.g. FedACO vs FedAvg at `dirichlet_0.3`: `d = -1.07`, `p = 0.766` (not even at the 8-seed/
+18-comparison adjusted floor of 0.1406 the table's own footer states, so the seeds do not
+uniformly favor either side). **Not independently re-read or interpreted further here** — that
+is `HANDOVER.md`'s "human pass on citations, §5's framing, and the abstract" item, now with
+real numbers behind it rather than placeholders.
+
+### FIXED, 2026-10-11 (same day) — "default" is now relative to the loaded results, not pyproject
+
+Implemented the semantics this entry predicted: **a config key is an experimental condition
+only if the results actually being tabulated together disagree on its value** — not whether it
+differs from `pyproject.toml`'s bare default. New `make_tables.varying_keys(results)` scans the
+whole loaded set once and returns the keys (outside `_NOT_A_CONDITION`) that take more than one
+distinct value across it; `cell_key`/`_variant_of` take this as an optional second argument and
+only mark a key when it's in that set (an explicit-value-on-some-rows / absent-on-others split
+counts as varying too — resolved against `_defaults()` for the absent side, not just compared
+literally, so a key set on half the results and implicitly left at its default on the other
+half isn't miscounted as constant). `summarize()` (`make_tables.py`'s and `make_figures.py`'s
+real entry point) computes and threads it through automatically.
+
+This is exactly the "this results directory's own modal value" idea from above, generalized
+correctly: `main`/`ablation`/`robustness` R1+R2 each hold `num-clients` fixed at one value, so
+it drops out and every row reads `"default"` again — Figures 1/2/colony-health now render
+(confirmed on real data: `paper/figures/convergence.png`, `comparison.png`,
+`colony_health.png`, all regenerated). `configs/experiment/robustness_r5_client_scaling.yaml`,
+*if it is ever run*, would hold multiple `num-clients` values in one results directory — the
+key would correctly stay a real, marked condition there (`K=5`, `K=10`, `K=20`, ... rather than
+collapsing), the exact failure mode adding `num-clients` to `_NOT_A_CONDITION` outright would
+have caused. Verified directly, not just reasoned about: `tests/test_tables.py` has both cases
+as actual tests (a synthetic multi-`num-clients` set correctly stays split; a constant one
+correctly collapses to `"default"`), not only the real single-K sweeps this project has run so
+far. Regenerating one sweep's figures no longer silently overwrites another's, in this fix —
+but `make_figures.py` itself still writes `convergence.png`/`comparison.png`/etc. under the same
+filename regardless of `--results-dir`, same as before (`--only robustness`/`--only ablation`
+restrict which figures a given call touches, already how `ablations.png` avoided this; generate
+`results/fl/main`'s figures *last*, or always pass `--only`, to avoid one sweep's regeneration
+overwriting another's headline figures on disk — a mistake made and caught once already this
+session).
 
 ## SCAFFOLD collapses to a single predicted class in most of its own main-table runs — 2026-10-11
 
@@ -1914,7 +1952,7 @@ individually a no-op whenever the pathology they target is not present (confirme
 suite pass unchanged).
 
 **Not yet done:** re-run on real Kaggle hardware (cheap — scaffold is one arm of
-`main_reduced.yaml`, ~0.1 GPU-h) to get a real, trustworthy `scaffold` row for Table 1 and
+`main_reduced.yaml`, ~3.7 GPU-h -- 24 cells, measured from the broken run's own log) to get a real, trustworthy `scaffold` row for Table 1 and
 re-check `scripts/check_iid_band.py`. `paper/05_RESULTS.md` §5.1 and `docs/OPEN_QUESTIONS.md`'s
 earlier "SCAFFOLD collapses..." entry above still describe the *symptom* correctly — this entry
 is the resolution, not a replacement for them.

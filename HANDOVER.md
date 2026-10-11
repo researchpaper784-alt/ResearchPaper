@@ -136,12 +136,18 @@ What is actually left:
 
 | # | work | GPU-h | state |
 |---|---|---|---|
-| 1 | **Re-run SCAFFOLD's arm of `main_reduced.yaml` on real Kaggle hardware** | ~0.1 | the fix (three bounds in `fl/app.py`/`strategies/scaffold.py`, below) is confirmed stable over the full 100-round budget in-process, but Table 1's SCAFFOLD row in this repo is still the **old, broken** one until this real re-run lands. `paper/05_RESULTS.md` §5.1 says so explicitly. |
-| 2 | **Fix `figure_convergence`/`figure_comparison`** (Figures 1-2, the headline ones) | 0 | both silently skip every real sweep -- `_variant_of` marks any result whose `num-clients` differs from `pyproject.toml`'s bare `2` as non-"default", and no real config in this project uses `2`. Root-caused in `docs/OPEN_QUESTIONS.md` ("Figures 1 and 2 ... skip every real sweep"), **not fixed** -- the naive fix (exempt `num-clients`) silently breaks R5's client-scaling study the same quiet way the 2026-09-24 variant bug did. Needs a design decision, not a patch. |
+| 1 | **Re-run SCAFFOLD's arm of `main_reduced.yaml` on real Kaggle hardware** | ~3.7 (24 cells × ~550-575s, measured from the broken run's own log -- not the whole 168-cell sweep) | the fix (three bounds in `fl/app.py`/`strategies/scaffold.py`, below) is confirmed stable over the full 100-round budget in-process, but Table 1's SCAFFOLD row in this repo is still the **old, broken** one until this real re-run lands. `paper/05_RESULTS.md` §5.1 says so explicitly. **Ready-to-run notebook: `notebooks/kaggle_day3_scaffold_refit.ipynb`** -- attach Day 3 main's finished output, Run All, Save Version. Deletes only the old broken SCAFFOLD result files (by `git_sha`, not by metric values), re-runs just its 24 cells via `--only scaffold`, then regenerates Table 1 and Figures 1/2 for real. |
+| 2 | ~~Fix `figure_convergence`/`figure_comparison`~~ | 0 | **done 2026-10-11** -- `scripts/make_tables.py`'s new `varying_keys()` makes "default" mean "constant across the results being tabulated together", not "matches pyproject.toml's bare value". Figures 1/2/colony-health all regenerate on real data now; `tests/test_tables.py` has both the real bug (constant `num-clients` → `default`) and the thing a naive fix would have broken (R5-like varying `num-clients` stays distinct) as actual tests. Full writeup: `docs/OPEN_QUESTIONS.md`, the "FIXED" entry under "Figures 1 and 2 ... skip every real sweep". |
 | 3 | `make verify-phase9` -- an actual run | 0 | regenerates every table/figure twice and byte-compares (plan §9.3's acceptance criterion). All three sweeps' real data is now present, but the script's single `--expected-seeds` doesn't fit this project's mixed seed counts (8 for main/A1, 5 for A2/robustness) without being run once per subdirectory -- never actually run end-to-end. |
 | 4 | Add **Adp-FL-PSO as a baseline** | ~8 | not implemented; it is the direct competitor. Lowest priority -- the paper's finding does not depend on it. |
 | 5 | Zenodo DOI, `v1.0` tag | 0 | tag pushes 403 here (§6) |
 | 6 | **Human pass on citations, §5's framing, and the abstract** | 0 | everything was written/resolved by an agent this session -- automated literature search and a first read of the tables, not peer judgment. Worth a close read before submission, `paper/00_ABSTRACT.md`'s own checklist says the same. |
+
+**When regenerating figures for more than one sweep by hand:** `make_figures.py` writes
+`convergence.png`/`comparison.png`/etc. under the same filename regardless of `--results-dir` --
+pass `--only ablation` / `--only robustness` for those sweeps (as `make figures-ablation`
+already does) and generate `results/fl/main`'s figures last/plain, or one regeneration silently
+overwrites another's headline figures on disk. Caught and fixed once already this session.
 
 `pyproject.toml`'s gate fix stays session-local by design (CLAUDE.md): regenerating tables or
 figures locally needs `scripts/apply_gate_fix.py --from-results results/fl/gate --apply-verdict`

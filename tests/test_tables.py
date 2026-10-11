@@ -24,6 +24,7 @@ from make_tables import (  # noqa: E402
     cell_key,
     summarize,
     to_markdown,
+    varying_keys,
 )
 
 
@@ -606,3 +607,89 @@ def test_no_shared_seed_still_reports_no_delta() -> None:
 
     assert rows[1]["delta"] is None
     assert rows[1]["delta_paired"] is False
+
+
+# ======================================================================================
+# `varying_keys` -- a key is a condition only if the loaded results disagree on it
+# (2026-10-11: Figures 1-2, figure_convergence/figure_comparison, filter to
+# `variant == "default"` and had never had data for any real sweep, because
+# pyproject.toml's bare `num-clients` default (2) matches no real config -- every real
+# result read as a non-"default" `K=...` variant. docs/OPEN_QUESTIONS.md, "Figures 1 and 2
+# ... skip every real sweep".)
+# ======================================================================================
+
+
+def test_a_key_constant_across_the_loaded_results_is_not_a_condition() -> None:
+    """The actual bug: every real sweep fixes num-clients at one value (10 or 20), never
+    pyproject's bare default (2) -- so every real result used to read as a `K=...`
+    variant and figure_convergence/figure_comparison never had a "default" row to plot."""
+    results = [
+        _result("fedavg", "dirichlet", seed, 0.5, alpha=0.3, **{"num-clients": 10})
+        for seed in range(3)
+    ]
+    varying = varying_keys(results)
+    assert "num-clients" not in varying
+    for r in results:
+        assert cell_key(r, varying)[2] == "default"
+
+
+def test_a_key_that_actually_varies_is_still_a_real_condition() -> None:
+    """The reason the fix cannot just add num-clients to _NOT_A_CONDITION:
+    configs/experiment/robustness_r5_client_scaling.yaml exists specifically to vary it,
+    and a results directory that genuinely holds multiple num-clients values must keep
+    distinguishing them -- collapsing them would be the exact 2026-09-24
+    aco-gamma-dispersion bug (42 distinct arms collapsing onto one cell key) again."""
+    results = [
+        _result("fedavg", "dirichlet", 0, 0.5, alpha=0.3, **{"num-clients": k})
+        for k in (5, 10, 20)
+    ]
+    varying = varying_keys(results)
+    assert "num-clients" in varying
+    labels = {cell_key(r, varying)[2] for r in results}
+    assert labels == {"K=5", "K=10", "K=20"}
+
+
+def test_a_key_set_on_only_some_results_counts_as_varying() -> None:
+    """A key present (and non-default) on half the loaded results and simply absent --
+    falling back to pyproject's default -- on the other half is exactly as much a real
+    condition as one explicitly set to two different values. Missing this undercounts
+    variation: only the "set" half would contribute a value, reading as a constant
+    single-valued key rather than as varying."""
+    on = _result("fedaco", "iid", 0, 0.9, **{"aco-safety-fallback": False})
+    off = _result("fedaco", "iid", 1, 0.8)  # key absent -- implicit pyproject default
+    varying = varying_keys([on, off])
+    assert "aco-safety-fallback" in varying
+    assert cell_key(on, varying)[2] == "no-fallback"
+    assert cell_key(off, varying)[2] == "default"
+
+
+def test_varying_is_none_by_default_and_keeps_the_old_whole_config_behavior() -> None:
+    """Callers that have not been updated to compute `varying_keys` (none left in this
+    repo, but the parameter defaults to None rather than requiring it) get the original
+    behavior: every knob that differs from pyproject.toml's default is marked, regardless
+    of whether this particular call's results agree on it."""
+    import tomllib
+    from pathlib import Path
+
+    import make_tables
+
+    defaults = tomllib.loads(
+        (Path(make_tables.__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    )["tool"]["flwr"]["app"]["config"]
+    make_tables._defaults.cache_clear()
+
+    assert make_tables._variant_of({**defaults, "num-clients": 10}) == "K=10"
+
+
+def test_summarize_feeds_varying_keys_through_so_real_sweeps_label_as_default() -> None:
+    """The integration point: `summarize` (what `make_tables.py` and `make_figures.py`
+    both actually call) must compute `varying_keys` itself and use it -- a unit-level pass
+    on `cell_key` alone would not have caught the original bug, since nothing forced the
+    real entry point to pass it through."""
+    results = [
+        _result("fedavg", "dirichlet", seed, 0.6, alpha=0.3, **{"num-clients": 10})
+        for seed in range(3)
+    ]
+    rows = summarize(results, expected_seeds=3)
+    assert len(rows) == 1
+    assert rows[0]["variant"] == "default"

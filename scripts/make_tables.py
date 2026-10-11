@@ -71,7 +71,7 @@ def load_results(results_dir: Path) -> list[dict]:
     return out
 
 
-def cell_key(result: dict) -> tuple[str, str, str]:
+def cell_key(result: dict, varying: "frozenset[str] | None" = None) -> tuple[str, str, str]:
     config = result.get("config", {})
     run_config = config.get("run_config", {})
     strategy = str(config.get("strategy", run_config.get("strategy-name", "unknown")))
@@ -80,7 +80,51 @@ def cell_key(result: dict) -> tuple[str, str, str]:
     # are different experimental conditions and must never be pooled into one row.
     if regime == "dirichlet" and run_config.get("alpha") is not None:
         regime = f"dirichlet_{run_config['alpha']}"
-    return strategy, regime, _variant_of(run_config)
+    return strategy, regime, _variant_of(run_config, varying)
+
+
+def varying_keys(results: list[dict]) -> frozenset[str]:
+    """Which config keys actually distinguish one loaded result from another.
+
+    Exists because "differs from `pyproject.toml`'s default" and "is an experimental
+    condition in *this* results directory" are not the same question, and `_variant_of`
+    used to only ask the first one. `num-clients` is the key this broke on, 2026-10-11:
+    the bare default is `2` (a dev/CI smoke value), and no real sweep -- `main_reduced`,
+    every ablation, every robustness arm run so far -- uses it, so every real result read
+    as a non-"default" `K=...` variant. `figure_convergence`/`figure_comparison`
+    (`make_figures.py`), the paper's two headline figures, filter to
+    `variant == "default"` and so had no data to plot for any real sweep, ever.
+
+    The fix is not to exempt `num-clients` outright (`_NOT_A_CONDITION`) -- `R5`
+    (`configs/experiment/robustness_r5_client_scaling.yaml`) exists specifically to vary
+    it, and a results directory that actually contains multiple `num-clients` values must
+    keep treating it as the condition it is, or R5's own rows collapse into one exactly
+    the way the 2026-09-24 `aco-gamma-dispersion` bug collapsed A1's five search methods.
+    Instead: a key only counts as a condition if the *loaded results themselves* disagree
+    on its value. Constant across every row in this call -> not a condition here,
+    regardless of what `pyproject.toml` says (`main`/`ablation`/`robustness`, today, where
+    every row shares `num-clients=10`). Varies across at least two rows -> a real
+    condition, compared against `pyproject.toml`'s default as before (`R5`, if it is ever
+    run -- every sweep that has actually run so far holds `num-clients` fixed within its
+    own results directory, so this never fires on them).
+    """
+    # A key set explicitly on some results and left unset (falling back to pyproject's
+    # default) on others is exactly as "varying" as one set to two different values --
+    # resolve every result against `_defaults()` before comparing, the same fallback
+    # `_variant_of` itself uses, rather than only looking at keys each run_config happens
+    # to carry literally. Missing the fallback here undercounts variation: a key absent
+    # from half the results and explicitly set on the other half would otherwise show as
+    # a single value (only the "set" half contributes one), reading as constant.
+    defaults = _defaults()
+    all_run_configs = [r.get("config", {}).get("run_config", {}) for r in results]
+    all_keys = {k for rc in all_run_configs for k in rc} | set(defaults)
+    seen: dict[str, set[str]] = defaultdict(set)
+    _missing = object()
+    for key in all_keys - _NOT_A_CONDITION:
+        for run_config in all_run_configs:
+            value = run_config.get(key, defaults.get(key, _missing))
+            seen[key].add(repr(value))
+    return frozenset(key for key, values in seen.items() if len(values) > 1)
 
 
 @functools.lru_cache(maxsize=1)
@@ -134,8 +178,14 @@ def _mark_name(key: str) -> str:
     return key
 
 
-def _variant_of(run_config: dict) -> str:
+def _variant_of(run_config: dict, varying: "frozenset[str] | None" = None) -> str:
     """Reconstruct the experimental condition from the resolved config.
+
+    `varying`, when given (see `varying_keys`), restricts marking to keys that actually
+    differ across the results being tabulated together -- a key constant across the whole
+    loaded set is never a condition *for this table*, whatever `pyproject.toml` says.
+    `None` keeps the old whole-config-vs-pyproject-default behavior, for any caller that
+    has not been updated to compute it.
 
     The sweep runner knows the arm's name, but a result file records only the resolved
     config, so the condition has to be recovered from whatever differs from the defaults.
@@ -166,6 +216,8 @@ def _variant_of(run_config: dict) -> str:
 
     for key in sorted(run_config):
         if key in _NOT_A_CONDITION or key not in defaults:
+            continue
+        if varying is not None and key not in varying:
             continue
         actual, default = run_config[key], defaults[key]
         if isinstance(default, bool) or isinstance(actual, bool):
@@ -212,9 +264,10 @@ def _round_mean(result: dict, key: str) -> float | None:
 
 
 def summarize(results: list[dict], expected_seeds: int | None) -> list[dict]:
+    varying = varying_keys(results)
     grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for result in results:
-        grouped[cell_key(result)].append(result)
+        grouped[cell_key(result, varying)].append(result)
 
     rows = []
     for (strategy, regime, variant), runs in sorted(grouped.items()):

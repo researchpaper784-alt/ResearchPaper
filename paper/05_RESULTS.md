@@ -14,7 +14,10 @@ writing them as findings would overstate what the data supports.
 
 Table 1 (`paper/tables/main.csv`/`.md`): 7 strategies (FedAvg, FedProx, Trimmed-Mean, Krum,
 FedLAW, SCAFFOLD, FedACO) × 3 regimes (`dirichlet_0.1`, `dirichlet_0.3`, `iid`) × 8 seeds,
-168/168 cells complete.
+168/168 cells complete. `p (Holm)` and Cohen's `d` are populated now (a second effect of the
+Figures-1/2 fix below — `docs/OPEN_QUESTIONS.md` has the detail); read them against the
+table's own footer, which states the 8-seed/18-comparison adjusted-p floor directly — these
+have not been independently re-read or interpreted further in this draft.
 
 **The IID band check fails, and the result points at one baseline, not at the method under
 test.** `scripts/check_iid_band.py` — written specifically to catch this before it is
@@ -40,7 +43,7 @@ enough to still diverge even with the first two in place). Confirmed stable over
 100-round budget: `‖w‖` grows from 67.7 to 73.7 — ordinary training, not divergence.
 
 **This table's SCAFFOLD row is still the old, broken one** — the fix has not yet been re-run on
-Kaggle (cheap: SCAFFOLD is one arm of `main_reduced.yaml`, ~0.1 GPU-h). Until that real re-run
+Kaggle (~3.7 GPU-h: SCAFFOLD is 24 of `main_reduced.yaml`'s 168 cells, not the whole sweep). Until that real re-run
 lands, the action from before still holds: **exclude the SCAFFOLD row or mark it explicitly as
 non-convergent** wherever this table is read. Krum and FedLAW also sit below the
 FedAvg/FedProx/Trimmed-Mean/FedACO cluster even under `iid` and are worth the same scrutiny,
@@ -58,9 +61,12 @@ no clean trend of "gain grows with heterogeneity" — if anything the opposite, 
 relative position is worst at `dirichlet_0.3`, not at the most heterogeneous setting. Figure 9
 (`gain_vs_heterogeneity.png`, generated) is the sharper way to look at this than the table.
 
-Figures 1–2 (convergence curves, final comparison bars) **could not be generated** —
-`docs/OPEN_QUESTIONS.md` ("Figures 1 and 2 ... skip every real sweep") — the per-round curves
-and final means are in `main.csv` and the raw JSONs' `rounds` field in the meantime.
+Figures 1–2 (`convergence.png`, `comparison.png`) **are now generated** — the
+`figure_convergence`/`figure_comparison` bug (`docs/OPEN_QUESTIONS.md`, "Figures 1 and 2 ...
+skip every real sweep") is fixed as of 2026-10-11. They confirm the reading above directly: the
+SCAFFOLD baseline (§5.1, item 1 in `HANDOVER.md`) is visibly flat near the bottom of every
+panel, not recovering across 100 rounds, and `comparison.png`'s error bars make FedACO's lack
+of a win in any regime immediately legible rather than something to infer from the table.
 
 ## 5.2 The equal-budget comparison (A1) — real data, not the synthetic screen
 
@@ -179,7 +185,3 @@ throughout.
 **Figure 7 (sensitivity heatmap).** A6 varies one hyperparameter at a time, so its cells form a
 cross, not a grid. `make_figures.py` refuses to emit it rather than render a mostly-empty
 heatmap that reads as a grid. Stated as a gap in §6.3.
-
-**Figures 1 and 2** (convergence, final comparison). Data is present; the figure-generation code
-has a found-not-fixed bug (`docs/OPEN_QUESTIONS.md`). Not a missing-data gap like Figure 7 — a
-missing-fix gap.

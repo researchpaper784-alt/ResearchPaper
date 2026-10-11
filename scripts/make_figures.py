@@ -55,7 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # Reused rather than reimplemented: the figures and the tables must group, label and
 # judge completeness identically, or a figure and its table will disagree about what a
 # cell is.
-from make_tables import add_deltas, cell_key, load_results, summarize  # noqa: E402
+from make_tables import add_deltas, cell_key, load_results, summarize, varying_keys  # noqa: E402
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -172,9 +172,10 @@ def figure_convergence(results: list[dict], out: Path) -> Path | None:
     if not regimes:
         return None
 
+    varying = varying_keys(results)
     by_cell: dict[tuple[str, str], list[list[float]]] = defaultdict(list)
     for result in results:
-        strategy, regime, variant = cell_key(result)
+        strategy, regime, variant = cell_key(result, varying)
         if variant != "default":
             continue
         curve = [
@@ -446,9 +447,10 @@ def figure_colony_health(results: list[dict], out: Path, num_levels: int) -> Pat
     printed on top of each other. A panel each costs space and reads unambiguously.
     """
     ceiling = math.log(num_levels)
+    varying = varying_keys(results)
     series: dict[str, list[list[float]]] = defaultdict(list)
     for result in results:
-        strategy, regime, variant = cell_key(result)
+        strategy, regime, variant = cell_key(result, varying)
         if strategy != "fedaco" or variant != "default":
             continue
         curve = [
