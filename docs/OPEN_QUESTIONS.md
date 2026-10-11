@@ -1755,3 +1755,46 @@ run, which is debugging work, not a results-writing task. Until it is: **§5.1 a
 figure must either exclude `scaffold` or mark it explicitly as non-convergent**, and should not
 report it as "SCAFFOLD underperforms the other baselines" without that caveat — that is a
 different and much weaker claim than what the raw number implies.
+
+### 2026-10-11, later — mechanism confirmed; exact trigger still open
+
+Investigated further. `src/fedswarm/strategies/scaffold.py`'s control-variate math (the
+`c - c_i` correction, the Option-II `c_i` update in `fl/app.py::train_handler`) checked line by
+line against the SCAFFOLD paper's update rule — **no sign error or formula mismatch found.**
+
+**The frozen-metric symptom has a confirmed mechanical cause.** Every scaffold result in
+`results/fl/main` reads the *exact same* `test_macro_f1`/`test_loss`/`per_class_recall` at every
+one of its 101 logged rounds — not just similar, bit-identical. Reading the installed
+`flwr.serverapp.strategy.strategy.Strategy.start()` source directly (not assumed): after
+`aggregate_train`, `arrays` is updated only `if agg_arrays is not None`; when
+`Scaffold.aggregate_train` returns `(None, None)` — which it does whenever `valid_replies` is
+empty, i.e. every client's training reply has `msg.has_error()` — the loop silently keeps
+training *and* evaluating against the previous round's (eventually round-0's) frozen arrays,
+forever, with no error surfaced at the run level (`status: "completed"` is still correct, from
+Flower's point of view nothing failed). This reproduces the exact observed symptom exactly, by
+construction of the library code, not by inference from the aggregate number alone.
+
+**What is not yet confirmed: why every client reply errors, specifically for SCAFFOLD.**
+`tests/test_fl_app.py::test_train_handler_scaffold_*` calls `train_handler` directly with a
+hand-built `Message`/`Context` and passes — so the client-side code does not crash on a
+synthetic, minimal input. The real Kaggle runs use the real model/data/Ray actor path, which
+these unit tests do not exercise.
+
+**Local reproduction attempted, blocked by an unrelated environment bug in this container, not
+by anything in SCAFFOLD.** `flwr run`'s per-invocation isolated dependency environment
+(`/root/.flwr/runtime-envs/...`, a fresh `uv sync` each time — the same mechanism
+`docs/OPEN_QUESTIONS.md`'s "flwr run executes an installed copy" entry describes) resolves a
+`pyarrow` that requires NumPy ≥2.0 against a NumPy 1.26.4 it installs alongside it, so **every**
+`ClientAppActor` dies on startup for **every** strategy tried locally (confirmed: plain `fedavg`
+fails identically) — not a SCAFFOLD-specific failure, and unrelated to the real Kaggle hardware
+where every other strategy trained successfully. Clearing `/root/.flwr/runtime-envs/` and
+retrying reproduces the same pin conflict, so it is this container's dependency resolution, not
+a stale cache.
+
+**Next step, waiting on the Kaggle session's own log** (the `kaggle_day3d_main.ipynb` commit,
+2026-10-08 ~05:56–11:45 UTC, scaffold cells specifically ~08:31–10:17 UTC — identified from
+`results/fl/main`'s own `provenance.hostname`/`timestamp_utc` fields grouped by session, cross-
+checked against the known 168-cell total: 40+37+35+35+21). Flower prints the per-client
+exception directly (`"Received error in reply from node <id>: <exception>"`, confirmed format
+from the local repro above) — that line, once available from the real run, names the actual
+trigger instead of leaving it to further inference.

@@ -71,17 +71,18 @@ Full metadata for every reference in this paragraph is in `paper/REFERENCES.md`.
 
 ## 1.3 What this paper reports
 
-> ⚠️ **This section is written against the evidence as of 2026-09-25 and must be rewritten once
-> ablation A1 runs on real data.** Three screens on a heterogeneous synthetic fixture found the
-> colony *losing* to every equal-budget control, not tying it (see §6.1 and
-> `docs/EXPERIMENT_LOG.md`). Plan §11's week-5 gate calls for reframing on exactly that result.
-> The framing below is the one the current evidence supports. If A1 reverses it, the
-> alternative framing is spelled out at the end of this file so the switch is a swap, not a
-> rewrite.
+> **Updated 2026-10-11: ablation A1 has now run on real data (80/80 cells, 8 seeds,
+> `configs/experiment/ablation_a1_reduced.yaml`), and it does not reverse this framing — it
+> sharpens it.** The three synthetic-fixture screens (below, item 2) found the colony losing to
+> every equal-budget control. The real-data run finds something adjacent but distinct: under
+> real heterogeneity, *no* equal-budget search method beats the FedAvg point, ACO included but
+> not uniquely so (full numbers: §5.2, §6.1). The alternative framing at the end of this file,
+> kept for the record, does not apply — the negative framing is the one the real-data evidence
+> supports, not only the synthetic one.
 
 We set out to test whether an ant-colony metaheuristic over the aggregation weight vector
-outperforms fixed and learned weighting. We report three findings, of which the second is
-negative and, we argue, more useful than the first would have been.
+outperforms fixed and learned weighting. We report four findings, of which the second and third
+are negative and, we argue, more useful than a positive first finding would have been.
 
 1. **A surrogate fitness for aggregation weights admits a degenerate optimum, and standard
    diagnostics do not reveal it.** On real data the best single-client vertex — put all weight
@@ -91,15 +92,30 @@ negative and, we argue, more useful than the first would have been.
    somewhere useless. The failure mode arrives as the *search improves*. We give a closed-form
    condition for when the penalty term is large enough to remove the degeneracy.
 
-2. **At equal evaluation budget, the colony does not beat simpler search.** Coordinate grid
-   search, PSO, a GA and uniform random search all gained more. We identify the mechanism, and
-   it is not about ant colony optimization: the per-client desirability signal spans ~0.04
-   against a level spacing of 0.25, so every client's argmax lands on the same level; a uniform
-   level assignment renormalizes to the size-proportional weights exactly; so the greedy branch
-   of the ACS construction rule reproduces **the FedAvg point** 70% of the time at $q_0 = 0.7$.
-   The colony is anchored to the reference it is meant to improve on.
+2. **At equal evaluation budget, the colony does not beat simpler search — on a synthetic
+   heterogeneous fixture or on real data.** On the synthetic fixture, coordinate grid search,
+   PSO, a GA and uniform random search all gained more. On real data (§5.2), the picture
+   changes: under heterogeneity, none of the five methods — ACO included — beats the FedAvg
+   point; ACO sits in the worse half of the five, close to PSO and random, well behind GA and
+   coordinate-grid. We identify a mechanism for the synthetic result that is not about ant
+   colony optimization specifically: the per-client desirability signal spans ~0.04 against a
+   level spacing of 0.25, so every client's argmax lands on the same level; a uniform level
+   assignment renormalizes to the size-proportional weights exactly; so the greedy branch of
+   the ACS construction rule reproduces **the FedAvg point** 70% of the time at $q_0 = 0.7$.
+   The colony is anchored to the reference it is meant to improve on; the real-data result shows
+   this is not only an ACO problem, under this fitness and this search-budget, for the simpler
+   methods tested too.
 
-3. **The server-side cost is negligible.** The Gram-matrix formulation makes a fitness
+3. **Cross-round pheromone persistence is the one place the method does something its closest
+   published prior work cannot, and on real data it does.** FedAWA, Adp-FL-PSO and FedPSO — the
+   published work closest to this method (§2.1–2.2) — are all stateless across federation
+   rounds. Ablation A2 (5 seeds, two heterogeneous regimes) tests persistence directly: full
+   persistence beats both no persistence and the method's own `decayed` default in both regimes
+   tested, by a wide margin at the more heterogeneous of the two. This is a genuine positive
+   result, not hedged like items 1–2, though at 5 seeds it is an effect size rather than a
+   significance claim (§6.5).
+
+4. **The server-side cost is negligible.** The Gram-matrix formulation makes a fitness
    evaluation $O(K)$ after an $O(K^2 d)$ precompute, measured at **2.6% of round wall-clock**
    at $K=10$. The cost claim holds; the $O(K^2)$ *shape* is not visible over the measured range,
    and we say so rather than fitting a curve to it.
@@ -108,16 +124,25 @@ negative and, we argue, more useful than the first would have been.
 `corner_margin`, the fitness gap between the best single-client vertex and the reference point
 — which detects the degeneracy above from quantities a round already computes. (ii) A
 closed-form expression for the penalty weight that removes it. (iii) An equal-budget comparison
-that isolates *which* search method matters, with the anchoring mechanism identified. (iv) A
-component-level pseudo-patient split. Image-level de-duplication of this dataset is already
-published; we show it still leaves 7.9% of retained images chain-linked to another retained
-image and split independently, and remove that by splitting on connected components of the
-near-duplicate graph (§4.2). We also separate a confound prior work names but does not
-quantify: the archive's exact class balance is manufactured by duplicating one class (§4.1).
+that isolates *which* search method matters, with the anchoring mechanism identified, run on
+both a synthetic fixture and real data. (iv) The first real-data measurement of whether
+cross-round persistence pays for search-based aggregation weighting, isolating it from every
+other published method in this space. (v) A component-level pseudo-patient split. Image-level
+de-duplication of this dataset is already published; we show it still leaves 7.9% of retained
+images chain-linked to another retained image and split independently, and remove that by
+splitting on connected components of the near-duplicate graph (§4.2). We also separate a
+confound prior work names but does not quantify: the archive's exact class balance is
+manufactured by duplicating one class (§4.1).
 
 ---
 
-## Alternative framing, if A1 comes back positive
+## Alternative framing — did not apply (A1's real-data result is in, 2026-10-11)
+
+**Kept for the record, not deleted, per this file's own original instruction** ("the switch is
+a swap, not a rewrite") — but the swap is not needed. A1 on real data did not separate the
+colony from the controls; §1.3 above is the framing the evidence supports. Delete this section
+entirely once a human has confirmed §1.3's real-data numbers are read correctly; until then it
+documents what would have had to be true for this alternative to apply, and clearly was not.
 
 Delete §1.3 above and use this. Do **not** run both.
 

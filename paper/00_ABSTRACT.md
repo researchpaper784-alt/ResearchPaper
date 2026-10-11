@@ -1,32 +1,45 @@
-# Abstract — write this last
+# Abstract
 
-Blocked on §5 having numbers. Drafting it now means hand-typing a result, which plan §9.3
-forbids for exactly the reason that it then diverges from the table.
+*Draft, 2026-10-11 — all sweeps have run, §5 has numbers. Still worth a close human read before
+submission: an abstract compresses a lot, and compression is where overclaiming hides.*
 
-**Structure to fill, once `make tables` has run:**
+We study whether an ant-colony metaheuristic over the federated-learning aggregation weight
+vector — searching a per-round reweighting of client updates, with pheromone persisting across
+rounds as a record of client reliability — improves on fixed and learned weighting for
+non-IID, multi-site brain-tumour MRI classification. We report four findings. First, the
+natural surrogate fitness for this search admits a degenerate optimum that standard health
+signals do not reveal: the best single-client vertex outscores the FedAvg reference point in
+every round we measured (15/15, mean margin +0.63), and we give a closed-form condition on the
+penalty term that removes it. Second, at equal evaluation budget the colony does not separate
+from simpler search — not on a synthetic heterogeneous fixture, where coordinate-grid search,
+particle swarm optimization, a genetic algorithm and uniform random search all gain more, and
+not on real data, where *none* of the five methods, ACO included, beats the FedAvg point under
+heterogeneity. Third, cross-round pheromone persistence — the one mechanism here with no
+analogue in the closest published prior work on swarm-optimized aggregation weights — does pay
+on real data: full persistence outperforms both no persistence and the method's own default in
+both heterogeneous regimes tested. Fourth, the server-side search cost is negligible (2.6% of
+round wall-clock at K=10), and we report the measured constant rather than fitting the
+unobserved O(K²) shape to it. Methodologically, we contribute a reusable diagnostic for
+degenerate objectives in search-based aggregation weighting (`corner_margin`) with its
+closed-form remedy, the first equal-budget comparison across five search methods for this
+problem on both synthetic and real data, the first real-data test of whether cross-round state
+helps it, and a component-level, pseudo-patient data split that catches chain-linked leakage an
+image-level de-duplication pass (already published on this archive) leaves behind. Experiments
+cover one dataset, K=10 clients, three partition regimes, 6 converged baselines (a seventh,
+SCAFFOLD, was found non-convergent on this setup and is reported but excluded from headline
+comparisons — §5.1), and 8 seeds where a significance claim is made. We argue the diagnostic,
+the protocol, and the persistence result are the paper's contribution — not a claim that this
+search method improves federated aggregation.
 
-1. One sentence on the setting: non-IID federated brain-tumour MRI across simulated sites.
-2. One sentence on what was tried: an ACO metaheuristic over the aggregation weight vector,
-   with pheromone persisting across rounds.
-3. **The finding.** Framing depends on A1 — see the two options in `01_INTRODUCTION.md`. If the
-   negative framing holds, lead with the degenerate optimum (measured: best single-client vertex
-   beat the reference point in 15/15 rounds) and the equal-budget result, not with the method.
-4. The reusable contributions: the `corner_margin` diagnostic, its closed-form penalty
-   threshold, the equal-budget protocol, component-level pseudo-patient splitting (image-level
-   de-dup is published; the contribution is the 7.9% it leaves chain-linked).
-5. One sentence of scope: one dataset, K=10, 3 regimes, 6 baselines, 8 seeds.
+---
 
-**Numbers to pull in, each from a generated artifact rather than retyped:**
+## Checklist before this is final
 
-| claim | source |
-|---|---|
-| headline macro-F1 and delta vs FedAvg | `paper/tables/main_*.tex` |
-| p-value and effect size | same table (Holm-corrected, 3-comparison family) |
-| equal-budget ranking | `paper/tables/ablation_*.tex` |
-| overhead percentage | overhead table / Figure 5 |
-| centralized ceiling | `docs/EXPERIMENT_LOG.md` 2026-09-16 — already measured |
-| leakage and redundancy | `data/processed/leakage_report.json` — already measured |
-
-**Do not claim** significance against any baseline other than FedAvg: 8 seeds supports a
-three-comparison family (§4.6). `make tables` prints the requirement for whatever family the
-table actually contains.
+- [ ] Confirm every number above against the regenerated tables one more time after items in
+      `HANDOVER.md` §5 (robustness raw JSONs, SCAFFOLD fix, Figures 1-2) land — none of those
+      change this abstract's numbers, but SCAFFOLD's fix could change "6 converged baselines"
+      to 7, which would need a wording pass here too.
+- [ ] A human, not an automated search, should re-read the four findings against the full
+      `05_RESULTS.md` and confirm none of them overstate what a first read of the tables
+      supports — particularly finding 2 (real-data equal-budget) and finding 3 (A2 at 5 seeds).
+- [ ] Word count / venue formatting — not checked here, this is content only.
