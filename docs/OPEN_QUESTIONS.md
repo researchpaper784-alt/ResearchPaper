@@ -1877,3 +1877,44 @@ Whichever is chosen, re-run this same in-process repro script (kept at
 `/tmp/.../scratchpad/debug_scaffold.py` this session, not committed — worth moving into
 `scripts/` or a test if this becomes a real fix) over 100 rounds and confirm `‖w‖` stays bounded
 before spending any Kaggle GPU-hours re-running `scaffold`'s arm of `main_reduced.yaml`.
+
+### 2026-10-11, same day — FIXED, confirmed over the full 100-round budget
+
+Committed in three steps (`09ca831`, `41f98a8`, kept at `scripts/debug_scaffold_divergence.py`
+rather than the earlier scratchpad copy):
+
+1. **Client-side clip** (`fl/app.py::train_handler`): a client's contribution to the control
+   variate can never exceed its own actual local movement that round (`update_norm`, already
+   measured) — bounds the single worst trigger (`tau=1` clients) at its source.
+2. **Server-side EMA + hard norm clip** (`strategies/scaffold.py::Scaffold`): `self._global_c`
+   was an undamped running sum (textbook integral windup for a term that persists across every
+   round). Now `global_c_decay=0.9` (EMA) plus `global_c_max_norm=10.0` (hard clip, same
+   mechanism as gradient-norm clipping) — the clip is what actually guarantees boundedness.
+3. **This alone was not enough**: with only 1-2, `‖global_c‖` correctly plateaued near its cap
+   by round ~40, but `‖w‖` (the model) kept growing past it — reached 24M by round 90. A
+   bounded-but-nonzero `correction` term, injected as a *constant* per-step gradient every
+   round under SGD momentum (0.9), drives ballistic divergence on its own, independent of
+   `global_c`'s own norm. Fix: clip `correction` itself (`_SCAFFOLD_CORRECTION_MAX_NORM = 1.0`),
+   right where it is computed in `train_handler`, before `local_train` uses it.
+
+**All three together, confirmed over the real 100-round budget**
+(`scripts/debug_scaffold_divergence.py`, `dirichlet(0.3)`, K=10, `min-client-size=5`,
+`local-batch-size=32` — `main_reduced.yaml`'s real settings except `image-size` for speed):
+
+| round | `‖w‖` | `‖global_c‖` |
+|---|---:|---:|
+| 1 | 67.69 | 1.54 |
+| 50 | 69.26 | 0.54 |
+| 100 | 73.72 | 0.59 |
+
+Smooth, bounded growth (≈9% over 100 rounds — ordinary training, not divergence), no NaN,
+`‖global_c‖` never leaves a `[0.3, 1.5]` band the whole run. All three fixes are each
+individually a no-op whenever the pathology they target is not present (confirmed: existing
+`tests/test_baselines.py`/`tests/test_fl_app.py` scaffold unit tests and the full 913-test
+suite pass unchanged).
+
+**Not yet done:** re-run on real Kaggle hardware (cheap — scaffold is one arm of
+`main_reduced.yaml`, ~0.1 GPU-h) to get a real, trustworthy `scaffold` row for Table 1 and
+re-check `scripts/check_iid_band.py`. `paper/05_RESULTS.md` §5.1 and `docs/OPEN_QUESTIONS.md`'s
+earlier "SCAFFOLD collapses..." entry above still describe the *symptom* correctly — this entry
+is the resolution, not a replacement for them.

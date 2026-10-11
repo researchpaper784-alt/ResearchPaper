@@ -1,19 +1,24 @@
-"""Reproduces the SCAFFOLD control-variate blow-up found 2026-10-11 (docs/OPEN_QUESTIONS.md,
-"ROOT CAUSE FOUND AND REPRODUCED") entirely in-process -- no Ray, no `flwr run` subprocess, so
-it works even in environments where the per-run isolated simulation env is broken.
+"""Verifies the fix for the SCAFFOLD control-variate blow-up found and fixed 2026-10-11
+(docs/OPEN_QUESTIONS.md, "ROOT CAUSE FOUND AND REPRODUCED" / "FIXED, confirmed over the full
+100-round budget") entirely in-process -- no Ray, no `flwr run` subprocess, so it works even in
+environments where the per-run isolated simulation env is broken.
 
 Drives the real `Scaffold` strategy and the real `train_handler` through 100 rounds by hand,
 the same way `tests/test_fl_app.py`'s and `tests/test_baselines.py`'s existing scaffold unit
 tests build a single round's Message/Context, just looped with real non-trivial training data.
 
 Prints the global model's parameter norm and the global control variate's norm every 10 rounds
-(and every round near a change in behavior). On the current code this diverges from O(10) to
-O(10^7) within 10 rounds and reaches NaN by round ~16, under dirichlet(0.3), K=10,
+(and every round near a change in behavior). Before the fix, this diverged from O(10) to
+O(10^7) within 10 rounds and reached NaN by round ~16, under dirichlet(0.3), K=10,
 min-client-size=5, local-batch-size=32 -- settings matching `configs/experiment/main_reduced.yaml`.
+With the fix (the correction clip in `fl/app.py::train_handler`, plus the global_c decay and
+clip in `strategies/scaffold.py::Scaffold`), `||w||` instead grows smoothly from ~68 to ~74
+over the full 100 rounds -- ordinary training, not divergence.
 
-Use this to confirm whether a proposed fix (clipping, EMA for the global control variate, a
-`scaffold-server-lr` below 1.0, or a `tau` floor) actually keeps `||w||` bounded before spending
-any Kaggle GPU-hours re-running SCAFFOLD's arm of a real sweep.
+Use this to confirm any further change to SCAFFOLD (a different clip/decay value, a different
+mechanism entirely) still keeps `||w||` bounded before spending any Kaggle GPU-hours re-running
+SCAFFOLD's arm of a real sweep -- a regression here would be silent otherwise, the same way the
+original bug was.
 
 Run: .venv/bin/python scripts/debug_scaffold_divergence.py
 """
