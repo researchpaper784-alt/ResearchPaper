@@ -118,11 +118,12 @@ Table 4 (`paper/tables/robustness.md`): label-flipping at 30% (R1), Gaussian and
 update attacks at 30% (R2), against FedAvg / Krum / Trimmed-Mean / FedACO, with the `clean` arm
 (R1) as the 0%-attacker reference. 80/80 cells across both sweeps.
 
-**Caveat before anything else:** this table was reconstructed from the R2 Kaggle session's own
-printed log, not regenerated from the raw per-cell JSONs — those are not yet in this clone
-(`HANDOVER.md` §5 item 1). No `.csv`/`.tex`, no robustness figures, and `make verify-phase9`
-does not cover this sweep yet. Treat the ranking below as provisional until the raw files are
-pulled and the table is regenerated through the normal pipeline.
+**Regenerated from the real raw JSONs, 2026-10-11** (`results/fl/robustness`, 80/80 files,
+pulled from Kaggle) — the table below matches the earlier reconstruction from the Kaggle
+session's printed log exactly (same numbers to four decimals), which is a good independent
+cross-check that the reconstruction was accurate. `.csv`/`.tex` and `paper/figures/robustness.png`
+(Figure 6) are now generated through the normal pipeline; `make verify-phase9` still needs a
+run to confirm byte-identical regeneration, but the data itself is no longer provisional.
 
 Reading the `dirichlet_0.3` table as printed: under the clean arm and every attack arm, the
 ranking is consistently **FedAvg ≳ Trimmed-Mean > FedACO ≈ Krum**, with Krum clearly worst under
