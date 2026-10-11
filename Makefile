@@ -15,7 +15,6 @@ PY ?= .venv/bin/python
 # finishes. The runners refuse to start when a GPU is present and this is empty; they name
 # the fraction to use (1/num-clients lets them all share one card). Leave it empty on CPU.
 #   make main GPUS=0.05
-EXPECTED_SEEDS ?= 5
 GPUS ?=
 GPUS_ARG = $(if $(GPUS),--gpus-per-client $(GPUS),)
 FLWR ?= .venv/bin/flwr
@@ -294,11 +293,29 @@ c-all: a2-reduced main-reduced r1-reduced r2-reduced
 # Plan §9.3's acceptance criterion: every figure and table regenerates from results/ with
 # no manual steps, byte-for-byte identically on a second pass. Nothing checked this until
 # 2026-09-24, and the first run found two faults no unit test could see -- both needed the
-# whole chain pointed at real result files. Set PARTITIONS to the labels your results carry.
-PARTITIONS ?= dirichlet_0.3 iid
-verify-phase9:
-	$(PY) scripts/verify_phase9_repro.py --results-dir results/fl \
-		--expected-seeds $(EXPECTED_SEEDS) --partitions $(PARTITIONS)
+# whole chain pointed at real result files.
+#
+# One combined --results-dir results/fl pass cannot express this project's real layout:
+# main/ablation/robustness carry different seed counts (8/5/5) and results/fl/gate is a
+# handful of health-check runs never meant to clear any --expected-seeds floor, so a single
+# combined run either flags real sweeps' complete cells as incomplete or silently swallows
+# gate's genuinely-incomplete ones -- it was never run end-to-end before 2026-10-11, when
+# doing so surfaced exactly this. Each sweep gets its own pass instead, matching the
+# --results-dir/--expected-seeds pairing `tables`/`tables-ablation`/`tables-robustness`
+# already use; ablation has no non-fedaco baseline, so it compares fedaco's own variants.
+verify-phase9: verify-phase9-main verify-phase9-ablation verify-phase9-robustness
+
+verify-phase9-main:
+	$(PY) scripts/verify_phase9_repro.py --results-dir results/fl/main \
+		--expected-seeds 8 --baselines fedavg --partitions dirichlet_0.3 iid
+
+verify-phase9-ablation:
+	$(PY) scripts/verify_phase9_repro.py --results-dir results/fl/ablation \
+		--expected-seeds 5 --baselines fedaco --partitions dirichlet_0.1 dirichlet_0.3 iid
+
+verify-phase9-robustness:
+	$(PY) scripts/verify_phase9_repro.py --results-dir results/fl/robustness \
+		--expected-seeds 5 --baselines fedavg krum trimmed-mean --partitions dirichlet_0.3
 
 verify-repro:
 	$(PY) scripts/verify_repro.py
