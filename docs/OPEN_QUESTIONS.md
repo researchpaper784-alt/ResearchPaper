@@ -1684,3 +1684,44 @@ person now owning the project reviewed the evidence and chose framing A. The rev
 documented (the alternative framing at the end of `paper/01_INTRODUCTION.md`) because A1 on real
 data can still overturn the *evidence* — but the decision itself is made, and §1.3 should be
 written as the paper's actual position rather than hedged.
+
+## Figures 1 and 2 (`figure_convergence`, `figure_comparison`) skip every real sweep — 2026-10-11
+
+Discovered regenerating figures from the real `results/fl/main` (168/168, pulled off Kaggle)
+after Day 3 finished: `make figures` writes the three figures that do not filter on variant
+(`alpha_heatmap`, `alpha_entropy`, `gain_vs_heterogeneity`) and reports
+`skipped (no data): convergence, comparison, ...` even though 168 complete, correctly-labeled
+results are present and `_variant_of` is resolving correctly (confirmed: every row reads
+`K=10`, the real condition, not a stale hardcoded label — the 2026-09-24 fix for that exact
+class of bug, logged above, is working as intended).
+
+**Root cause, verified directly, not guessed:** `pyproject.toml`'s bare `[tool.flwr.app.config]`
+default is `num-clients = 2` (a dev/CI smoke value). `_variant_of` correctly marks any run whose
+`num-clients` differs from that as a non-"default" variant. But **no real experiment config in
+this project uses `num-clients = 2`** — `main_reduced.yaml` and every ablation/robustness config
+use `10`, `main.yaml` (never run, see the compute-budget entries above) uses `20`. So every
+real result ever produced reads as a `K=10` (or `K=20`) variant, never literally `"default"` —
+and `figure_convergence`/`figure_comparison` (`scripts/make_figures.py`), the paper's two
+headline figures, both filter to `rows if r["variant"] == "default"`. They have never once had
+data to plot, for any sweep this project has run, including the smoke fixture that caught the
+*other* variant bug on 2026-09-24 (that fixture apparently did not override `num-clients` away
+from 2, which is why it didn't also catch this one).
+
+**Why this is not the same bug as the 2026-09-24 one, and not a one-line revert:** `num-clients`
+is a genuine experimental condition in at least one real sweep —
+`configs/experiment/robustness_r5_client_scaling.yaml` exists specifically to vary it. Adding
+`"num-clients"` to `make_tables.py`'s `_NOT_A_CONDITION` (the fix that would unblock Figures 1/2
+for `main`/`ablation`/`robustness` R1+R2) would silently collapse R5's own client-scaling rows
+into a single "default" bucket the same way the 2026-09-24 bug did — correct for three sweeps,
+wrong for the fourth. The real fix is more likely: "default" for figure purposes should mean
+*this results directory's own modal `num-clients`*, not literally the value in `pyproject.toml`
+— but that is a design change to shared code, not a one-line patch, and R5 hasn't run yet to
+confirm the fix against real multi-K data in the one sweep where it matters.
+
+**Not fixed here.** Left for the project owner to decide the right semantics before touching
+`make_figures.py`/`make_tables.py`, since getting it wrong silently breaks either the headline
+figures (current state) or R5's scaling analysis (the naive fix) the same quiet way the last one
+did. Workaround for now: the data needed for Figures 1/2 is fully present in `results/fl/main`
+and `paper/tables/main.csv` (every per-round curve, every final mean±std) — they can be written
+by hand from the table/raw JSON for a first paper draft without `make figures` if the deadline
+is tighter than this fix.

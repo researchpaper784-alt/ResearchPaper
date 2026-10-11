@@ -1,10 +1,12 @@
-# Handover — FedSwarm, as of 2026-09-25
+# Handover — FedSwarm, as of 2026-10-11
 
 You are picking this up cold. Read this file and nothing else first; it tells you where the
 ground truth for everything is.
 
-Branch: **`claude/happy-hamilton-c5jjil`**. 724 tests pass, `ruff check .` clean, working tree
-clean, in sync with origin.
+Branch: **`claude/happy-hamilton-c5jjil`**. 910/914 tests pass locally (the 4 failures are
+`test_config_defaults.py` false alarms from applying the gate fix to `pyproject.toml` to
+regenerate tables/figures — revert `pyproject.toml` and they pass; see §5 item 3), working tree
+has new results/tables/figures (not yet committed — see §5 item 0).
 
 ---
 
@@ -13,9 +15,24 @@ clean, in sync with origin.
 FedSwarm applies an ant-colony metaheuristic to the **aggregation weight vector** in federated
 learning — instead of FedAvg's fixed $n_k$-proportional weights, a colony searches for weights
 each round, with pheromone persisting across rounds as a memory of client reliability. The task
-is 4-class brain tumour MRI classification across simulated hospital sites. The code is
-finished and tested. **The science is barely started, and the central claim is currently
-failing.**
+is 4-class brain tumour MRI classification across simulated hospital sites. **All ~75 GPU-hours
+of planned experiments are now done** (gate, A1, A2, main table, R1, R2 — see §1a). The code is
+finished and tested. **The central claim is still failing, and A1's real-data run (§2) makes
+the failure sharper, not better.**
+
+## 1a. GPU work — complete, as of 2026-10-11
+
+| sweep | cells | status |
+|---|---|---|
+| `gate-fitness` | 8 | done |
+| `a1-reduced` | 80 | done — pulled into `results/fl/ablation`, `paper/tables/ablation.{md,csv,tex}` regenerated locally |
+| `a2-reduced` | 25 (of a nominal 30; 5 cells coincide with A1's) | done — same directory as A1, combined 105/105 |
+| `main-reduced` | 168 | done — pulled into `results/fl/main`, `paper/tables/main.{md,csv,tex}` regenerated locally |
+| `r1-reduced` | 40 | done |
+| `r2-reduced` | 40 | done — combined 80/80 in `results/fl/robustness`. **Raw per-cell JSONs not yet in this clone**, only the printed `robustness.md` table recovered from the Kaggle notebook's log output (see §5 item 1) |
+
+Nothing left to run on Kaggle. What is left is local: writing, citations, and pulling the
+robustness JSONs in properly (§5).
 
 ## 2. The single most important thing to know
 
@@ -39,6 +56,22 @@ spans ~0.04 against a level spacing of 0.25, so every client's argmax lands on t
 uniform level assignment renormalises to $n_k$-proportional weights **exactly**; so the greedy
 branch of the construction rule reproduces the FedAvg point ~70% of the time. The colony is
 anchored to the thing it is supposed to beat.
+
+**A1 on real data has now run (80/80 cells, 8 seeds) and the shape of the result changed:**
+
+| regime | fedavg point | random | ga | coordinate_grid | pso | **aco** |
+|---|---:|---:|---:|---:|---:|---:|
+| iid | 0.7880 | +0.0053 | +0.0033 | +0.0043 | +0.0036 | **+0.0035** |
+| dirichlet_0.3 | 0.6654 | -0.1163 | -0.0331 | -0.0397 | -0.1009 | **-0.1015** |
+
+On the synthetic fixture every non-ACO method *beat* the FedAvg point and ACO alone did not —
+a result about ACO specifically. On real data under heterogeneity **no method beats the FedAvg
+point**, random included (worst of the five, at -0.1163). ACO is not uniquely bad here (pso is
+within 0.0006 of it) but it is not rescued either — it stays in the worse half, well behind
+ga/coordinate_grid. At iid all five are within 0.0020 of each other, as expected (§5.1's gate).
+Full numbers and the cross-check against `paper/tables/main.csv` are in `paper/06_LIMITATIONS.md`
+§6.1 — **treat that as a first read, not yet re-run through the Wilcoxon/Holm significance
+machinery** (`scripts/aggregate_results.py`).
 
 **And the novelty claim was never true either.** A literature search on 2026-09-25 found
 published work in the exact slot:
@@ -79,60 +112,38 @@ and it was written as a routine ablation before anyone realised it carries the c
 These are settled. Write the paper as though they are true, not hedged. What can still change is
 the *evidence* (A1, A2), not the decisions.
 
-## 4. What to run, in order
-
-Set `GPUS` on a GPU box. This is not optional — see §6.
+## 4. What is left is local now — no GPU box needed for any of it
 
 ```bash
 make setup                      # uv venv, editable install
-make test                       # 724 tests, ~50s
+make test                       # 914 tests, ~2 min (4 fail iff pyproject.toml has the gate fix applied -- see §5.3)
 
-# Person B — the critical path. Nothing else is worth starting before this resolves.
-make gate-fitness GPUS=0.1      # 8 cells, ~15 min. Decides WHICH fitness fix to use.
-make a1-reduced   GPUS=0.1      # 80 cells, ~17 GPU-h. The go/no-go on the framing.
-
-# Person C — 278 cells, ~58 GPU-h, in DECISION order. r1 MUST precede r2 (see §6).
-make a2-reduced   GPUS=0.1      # 30 cells,  ~6 GPU-h  <-- FIRST: carries the contribution
-make main-reduced GPUS=0.1      # 168 cells, ~35 GPU-h (7 strategies, incl. scaffold)
-make r1-reduced   GPUS=0.1      # 40 cells,  ~8 GPU-h
-make r2-reduced   GPUS=0.1      # 40 cells,  ~8 GPU-h
-
-# Person A — after any results exist
-make tables tables-ablation tables-robustness figures figures-data
-make verify-phase9              # regenerates everything twice, byte-compares
+# Already done, this clone (regenerate if results/ changes):
+make tables tables-ablation                     # main.csv/md/tex, ablation.csv/md/tex -- regenerated 2026-10-11
+make figures-ablation figures-data              # alpha_heatmap, alpha_entropy, gain_vs_heterogeneity, 9 partition figures
+# tables-robustness and figures (main's convergence/comparison) do NOT work yet -- see §5.1 and §5.2
 ```
 
-`make b-all` and `make c-all` chain each person's set. Every sweep resumes per-cell, so a killed
-Kaggle session costs only the cell in flight.
-
-**Before spending GPU hours on anything you have edited:**
-
-```bash
-python scripts/synthetic_heterogeneous_dataset.py --out-dir /tmp/fx --num-images 600 --image-size 32
-make preflight-configs FIXTURE=/tmp/fx CONFIGS='configs/experiment/*.yaml'
-```
-
-155 arms, ~100 minutes of CPU. It proves every code path executes. It proves nothing about
-whether numbers mean anything.
+Every sweep this project planned has run on Kaggle. **Do not start a new GPU session for
+anything in this file** unless one of items 4-5 below turns up a config you don't trust — re-run
+only that cell, the sweep runners resume per-cell.
 
 ## 5. What is left
 
 | # | work | GPU-h | state |
 |---|---|---|---|
-| 1 | `gate-fitness` → `a1-reduced` | 17 | ready, never run |
-| 2 | `main-reduced`, `r1`, `r2`, **`a2`** | 58 | ready, never run |
-| 3 | Phase 9: statistics, figures, tables | 0 | built and byte-verified, never run on real results |
-| 4 | **The paper** — §5 results prose + abstract | 0 | blocked on 1–2 |
-| 5 | **11 open `[CITE]` markers** | 0 | needs literature access |
-| 6 | Add **Adp-FL-PSO as a baseline** | ~8 | not implemented; it is the direct competitor |
+| 0 | **Commit `results/`, `paper/tables/`, `paper/figures/`** | 0 | pulled from Kaggle into this clone 2026-10-11, not yet committed. `results/*` is gitignored by design (CLAUDE.md) -- only the tables/figures belong in git. |
+| 1 | **Get the real `results/fl/robustness/*.json`** (80 files) **off Kaggle** | 0 | what's in this clone now is `paper/tables/robustness.md` reconstructed by hand from the R2 notebook's printed log, not regenerated from raw JSONs. No `.csv`/`.tex`, no robustness figures, `make verify-phase9` cannot cover it. Same zip-and-Google-Drive path that worked for main/ablation works here -- the notebook's Output tab, zipped. |
+| 2 | **Fix `figure_convergence`/`figure_comparison`** (Figures 1-2, the headline ones) | 0 | both silently skip every real sweep -- `_variant_of` marks any result whose `num-clients` differs from `pyproject.toml`'s bare `2` as non-"default", and no real config in this project uses `2`. Root-caused and written up in `docs/OPEN_QUESTIONS.md` ("Figures 1 and 2 ... skip every real sweep"), **not fixed** -- the naive fix (exempt `num-clients`) silently breaks R5's client-scaling study the same quiet way the 2026-09-24 variant bug did. Needs a design decision, not a patch. |
+| 3 | `pyproject.toml`'s gate fix is session-local by design (CLAUDE.md) | 0 | regenerating tables/figures locally means running `scripts/apply_gate_fix.py --from-results results/fl/gate --apply-verdict` first (sets `aco-gamma-entropy` 0.1→0.45) and `git checkout -- pyproject.toml` after, or `test_config_defaults.py` fails (4 tests) because the committed default is meant to stay 0.1. |
+| 4 | **§5 results prose + abstract** | 0 | unblocked now that 1-2 above are resolved enough to write from (main/ablation fully; robustness from the recovered table). §6.1's `[pending: A1 on real data]` is filled in (2026-10-11, numbers above) but is a first read, not run through significance testing yet. |
+| 5 | **23 open `[CITE]` markers** | 0 | needs literature access. `grep -rn "\[CITE" paper/` lists them: 6 in `01_INTRODUCTION.md`, 12 in `02_RELATED_WORK.md`, 5 in `04_EXPERIMENTAL_SETUP.md`. Several already carry a real author/year/venue and need verification rather than discovery (MTA-Swin/Lu 2026, WICA-Net-M/Khan 2026, Saifullah 2025, Wallis 2022, Tampu 2022). |
+| 6 | Add **Adp-FL-PSO as a baseline** | ~8 | not implemented; it is the direct competitor. Lowest priority of what's left -- the paper's finding does not depend on it. |
 | 7 | Zenodo DOI, `v1.0` tag | 0 | tag pushes 403 here (§6) |
 
-`grep -rn "\[CITE" paper/` lists the open citations. Never invent an author, year or venue.
-
-**Item 4 is the real risk, not the GPU rows.** 75 GPU-hours is a `make` target. Eight pages with
-two related-work sections is a person's undivided attention for days, and as of now nobody is
-assigned to it. Sections 1, 2, 4, 6 and 7 are already written (`paper/`); §5 and the abstract
-need the numbers.
+Never invent an author, year or venue for item 5. **Item 4 is still the real risk, not any GPU
+row — there are none left.** Eight pages with two related-work sections is a person's undivided
+attention for days.
 
 ## 6. Landmines — each of these has already cost someone a day
 

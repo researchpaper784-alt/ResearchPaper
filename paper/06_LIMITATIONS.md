@@ -6,14 +6,46 @@ implementation; §6.1 and §6.5 are what the experiments added.
 ## 6.1 The central claim did not survive its own control
 
 Our equal-budget comparison (§5.2) is the experiment the method's premise rests on, and it does
-not support the premise. Three screens on a heterogeneous synthetic fixture, and [**pending:
-A1 on real data**] the real run, find the colony gaining less than uniform random search at
-identical evaluation budget and identical fitness.
+not support the premise. Three screens on a heterogeneous synthetic fixture found the colony
+gaining less than uniform random search at identical evaluation budget and identical fitness.
+**A1 on real data (80/80 cells, 8 seeds, `configs/experiment/ablation_a1_reduced.yaml`) has now
+run, and changes the shape of the finding rather than reversing it:**
+
+| regime | fedavg point | random | ga | coordinate_grid | pso | **aco** |
+|---|---:|---:|---:|---:|---:|---:|
+| iid | 0.7880 | +0.0053 | +0.0033 | +0.0043 | +0.0036 | **+0.0035** |
+| dirichlet_0.3 | 0.6654 | -0.1163 | -0.0331 | -0.0397 | -0.1009 | **-0.1015** |
+
+(macro-F1 gain over the FedAvg point, mean of 8 seeds; `dirichlet_0.3`'s aco row cross-checks
+exactly against `paper/tables/main.csv`'s own fedaco/dirichlet_0.3 cell, -0.1015, which is the
+same run under two different sweeps' bookkeeping.)
+
+**What changed from the synthetic screens:** there, every non-aco method beat the FedAvg point
+and aco alone did not — a result about aco specifically. Here, under real heterogeneity, **no
+method beats the FedAvg point** — random search included, at -0.1163 the single worst score in
+the table. The ranking among methods is preserved in neither direction: aco is not uniquely bad
+(pso lands within 0.0006 of it), but it is also not rescued by real data — it remains in the
+worse half, essentially tied with pso and clearly behind ga/coordinate_grid, both of which
+confine the real cost of the full search to roughly a third of aco's and random's.
+
+At `iid` all five cluster within 0.0020 of each other and the delta column shows nothing larger
+than two-hundredths of a macro-F1 point — the narrow IID band the pipeline is built to expect
+(§5.1's gate), and not where this comparison has anything to say.
+
+**Reading this honestly:** on real, heterogeneous data, the equal-budget premise fails for the
+whole family of search-based weighting, not only for ACO — which is a different and arguably
+more interesting negative result than the synthetic screens alone suggested, but it does not
+rescue ACO, which still underperforms the two cheaper, simpler search methods (ga,
+coordinate_grid) under the one condition (dirichlet_0.3) where the comparison is informative.
 
 We report this as the result rather than working around it, for two reasons. The mechanism is
 identified and is a property of the *desirability heuristic's dynamic range*, not of ant colony
 optimization — so it is informative about search-based aggregation weighting in general. And
 the diagnostic that found it (§5.2) is reusable by anyone proposing a search over $\alpha$.
+
+*(Numbers above are a first read of `paper/tables/ablation.csv` right after the sweep finished —
+worth a second pass with the actual significance test, `scripts/aggregate_results.py`'s
+Wilcoxon/Holm machinery, before this goes in the paper as a claim rather than a table.)*
 
 Readers should take the paper's positive contributions as (i) the degeneracy diagnostic and its
 closed-form remedy, (ii) the equal-budget methodology, and (iii) the de-duplicated split — not
