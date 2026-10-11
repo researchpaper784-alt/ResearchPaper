@@ -1,9 +1,10 @@
 # 2. Related work
 
-> **Every `[CITE]` in this file must be resolved against the actual paper by a human.** The
-> implementation plan names these works without bibliographic detail and this repository has no
-> literature access. Inventing an author, year or venue is the fastest route to a desk reject.
-> `grep -rn "\[CITE" paper/` lists them all.
+> **Citations resolved 2026-10-11** against a live literature search (Consensus/Semantic
+> Scholar); see `paper/README.md`'s "Citations" section and `paper/REFERENCES.md` for the full
+> metadata and URLs. The search was automated, not peer-reviewed judgment, so this section is
+> still worth a human pass before submission — in particular the "FedAAW" name collision flagged
+> inline and in `REFERENCES.md`.
 
 ## 2.1 Adaptive aggregation weights
 

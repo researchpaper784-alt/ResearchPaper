@@ -189,6 +189,12 @@ figures:
 figures-ablation:
 	$(PY) scripts/make_figures.py --results-dir results/fl/ablation --only ablation
 
+# --only robustness, not the bare default: without it this writes convergence.png and
+# comparison.png from robustness's single-regime data too, clobbering the real ones `figures`
+# just wrote from results/fl/main. Confirmed this is still live 2026-10-11.
+figures-robustness:
+	$(PY) scripts/make_figures.py --results-dir results/fl/robustness --only robustness
+
 # Phase 9. Aggregates over seeds and writes Markdown + CSV to paper/tables/. Exits
 # nonzero when any cell has fewer seeds than expected, so an incomplete sweep cannot be
 # quoted from by accident.

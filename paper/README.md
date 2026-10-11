@@ -12,7 +12,7 @@ that every figure and table is generated from `results/`.
 | 2 | `02_RELATED_WORK.md` | **written**, citations resolved | plan §1.2, §0.3 |
 | 3 | `ALGORITHM.md` | **written** (pre-existing) | plan §4.1–4.7 |
 | 4 | `04_EXPERIMENTAL_SETUP.md` | **written, with measured numbers**, citations resolved | Phase 1 reports, `main_reduced.yaml` |
-| 5 | `05_RESULTS.md` | skeleton + command map, unblocked (all sweeps done) | `make figures tables` |
+| 5 | `05_RESULTS.md` | **written**, first-pass prose grounded in real tables (all sweeps done) | `make figures tables` |
 | 6 | `06_LIMITATIONS.md` | **written**, §6.1 has A1's real-data verdict | plan §1.4 + today's findings |
 | 7 | `07_REPRODUCIBILITY.md` | **written** | Phase 10 |
 
@@ -38,10 +38,11 @@ commit that added the bibliography — its own docstring says to.
 | Figure 3 (α heatmap) | `make figures` |
 | Figure 4 (pheromone / α entropy) | `make figures` |
 | Figure 5 (overhead vs K) | `make overhead` then `make figures` |
-| Figure 6 (robustness curves) | `make figures` |
+| Figure 6 (robustness curves) | `make figures-robustness` (not `make figures` — that only loads `results/fl/main` and would skip it; see the Makefile comment on that target for a real clobbering bug it avoids) |
 | Figure 8 (partition diagnostics) | `make figures-data` |
 | Figure 9 (gain vs measured heterogeneity) | `make figures` |
 | Figure 7 (sensitivity heatmap) | **no sweep exists** — A6 is one-at-a-time, so its cells form a cross, not a grid. Needs a small factorial config written after A6 names the two knobs that matter. Dropped from the 9-day set. |
 
-`make verify-phase9` regenerates every artifact twice and compares byte-for-byte, which is
-plan §9.3's acceptance criterion.
+`make verify-phase9` (main, ablation and robustness each in their own pass, since they carry
+different seed counts) regenerates every artifact twice and compares byte-for-byte, which is
+plan §9.3's acceptance criterion. Actually run end-to-end and passing as of 2026-10-11.
