@@ -3,10 +3,10 @@
 You are picking this up cold. Read this file and nothing else first; it tells you where the
 ground truth for everything is.
 
-Branch: **`claude/happy-hamilton-c5jjil`**. 910/914 tests pass locally (the 4 failures are
-`test_config_defaults.py` false alarms from applying the gate fix to `pyproject.toml` to
-regenerate tables/figures — revert `pyproject.toml` and they pass; see §5 item 3), working tree
-has new results/tables/figures (not yet committed — see §5 item 0).
+Branch: **`claude/happy-hamilton-c5jjil`**. 913/913 tests pass, working tree clean, everything
+below is pushed. (If a local edit ever leaves `pyproject.toml` with the gate fix applied --
+needed to regenerate tables/figures, see §5's note on it -- `test_config_defaults.py` fails 4
+tests until `git checkout -- pyproject.toml`; that is expected, not a regression.)
 
 ---
 
@@ -130,36 +130,60 @@ only that cell, the sweep runners resume per-cell.
 
 ## 5. What is left
 
+All of results-pulling, table/figure regeneration, the paper prose, the citations, and the
+SCAFFOLD bug (root-caused, reproduced, and fixed — see below) are **done** as of 2026-10-11.
+What is actually left:
+
 | # | work | GPU-h | state |
 |---|---|---|---|
-| 0 | **Commit `results/`, `paper/tables/`, `paper/figures/`** | 0 | pulled from Kaggle into this clone 2026-10-11, not yet committed. `results/*` is gitignored by design (CLAUDE.md) -- only the tables/figures belong in git. |
-| 1 | ~~Get the real `results/fl/robustness/*.json` off Kaggle~~ | 0 | **done 2026-10-11** -- 80/80 files pulled (Google Drive folder share, via `gdown --folder`), `.csv`/`.tex`/`robustness.png` (Figure 6) regenerated through the normal pipeline, matches the earlier log-reconstruction exactly. `make verify-phase9` still needs an actual run to confirm byte-identical regeneration across all three sweeps together. |
-| 2 | **Fix `figure_convergence`/`figure_comparison`** (Figures 1-2, the headline ones) | 0 | both silently skip every real sweep -- `_variant_of` marks any result whose `num-clients` differs from `pyproject.toml`'s bare `2` as non-"default", and no real config in this project uses `2`. Root-caused and written up in `docs/OPEN_QUESTIONS.md` ("Figures 1 and 2 ... skip every real sweep"), **not fixed** -- the naive fix (exempt `num-clients`) silently breaks R5's client-scaling study the same quiet way the 2026-09-24 variant bug did. Needs a design decision, not a patch. |
-| 3 | `pyproject.toml`'s gate fix is session-local by design (CLAUDE.md) | 0 | regenerating tables/figures locally means running `scripts/apply_gate_fix.py --from-results results/fl/gate --apply-verdict` first (sets `aco-gamma-entropy` 0.1→0.45) and `git checkout -- pyproject.toml` after, or `test_config_defaults.py` fails (4 tests) because the committed default is meant to stay 0.1. |
-| 4 | ~~§5 results prose + abstract~~ | 0 | **done 2026-10-11** -- both §5 and `paper/00_ABSTRACT.md` have real drafts now; §1.3's framing updated to match A1's real-data result (confirms the negative framing, does not reverse it) |
-| 5 | ~~23 open `[CITE]` markers~~ | 0 | **done 2026-10-11** -- all resolved against a live Consensus/Semantic Scholar search, metadata in `paper/REFERENCES.md`, `test_every_citation_placeholder_is_findable` removed per its own instruction. Still worth a human pass before submission -- automated search, not peer judgment. |
-| 6 | Add **Adp-FL-PSO as a baseline** | ~8 | not implemented; it is the direct competitor. Lowest priority of what's left -- the paper's finding does not depend on it. |
-| 7 | Zenodo DOI, `v1.0` tag | 0 | tag pushes 403 here (§6) |
-| 8 | ~~Fix the SCAFFOLD baseline~~ | ~0.1 (only the real re-run left) | **FIXED AND VERIFIED, 2026-10-11** -- `docs/OPEN_QUESTIONS.md`'s "FIXED, confirmed over the full 100-round budget" entry has the full writeup. Root cause: `(x−y_i)/(tau·lr)` in the `c_i` update amplified ~100x for small-`tau` clients (legitimate under `min-client-size=5`/`local-batch-size=32`), accumulating into `self._global_c` as an undamped running sum -- NaN by round 16 of 100, reproduced in-process with `scripts/debug_scaffold_divergence.py` (no Ray/Kaggle needed). Fixed with three bounds, each individually necessary (confirmed by testing each increment): (1) clip a client's contribution to its own `update_norm`, (2) EMA + hard norm clip on the server-side accumulator, (3) clip the correction term itself at the point it's injected into local training -- (1)+(2) alone still let `‖w‖` reach 24M by round 90; adding (3) holds it to 67.7→73.7 over the full 100 rounds, ordinary training. All three are no-ops when the pathology isn't present; full 913-test suite and existing scaffold unit tests pass unchanged. **Only remaining step: re-run SCAFFOLD's arm of `main_reduced.yaml` on real Kaggle hardware** (~0.1 GPU-h) to get a trustworthy row for Table 1 -- `paper/05_RESULTS.md` §5.1 still reads the OLD broken row until that lands. |
-| 9 | Pull `results/`, `paper/tables/`, `paper/figures/` from this clone | 0 | **done 2026-10-11**, committed in `05d3cda` and the commit that added this revision |
+| 1 | **Re-run SCAFFOLD's arm of `main_reduced.yaml` on real Kaggle hardware** | ~0.1 | the fix (three bounds in `fl/app.py`/`strategies/scaffold.py`, below) is confirmed stable over the full 100-round budget in-process, but Table 1's SCAFFOLD row in this repo is still the **old, broken** one until this real re-run lands. `paper/05_RESULTS.md` §5.1 says so explicitly. |
+| 2 | **Fix `figure_convergence`/`figure_comparison`** (Figures 1-2, the headline ones) | 0 | both silently skip every real sweep -- `_variant_of` marks any result whose `num-clients` differs from `pyproject.toml`'s bare `2` as non-"default", and no real config in this project uses `2`. Root-caused in `docs/OPEN_QUESTIONS.md` ("Figures 1 and 2 ... skip every real sweep"), **not fixed** -- the naive fix (exempt `num-clients`) silently breaks R5's client-scaling study the same quiet way the 2026-09-24 variant bug did. Needs a design decision, not a patch. |
+| 3 | `make verify-phase9` -- an actual run | 0 | regenerates every table/figure twice and byte-compares (plan §9.3's acceptance criterion). All three sweeps' real data is now present, but the script's single `--expected-seeds` doesn't fit this project's mixed seed counts (8 for main/A1, 5 for A2/robustness) without being run once per subdirectory -- never actually run end-to-end. |
+| 4 | Add **Adp-FL-PSO as a baseline** | ~8 | not implemented; it is the direct competitor. Lowest priority -- the paper's finding does not depend on it. |
+| 5 | Zenodo DOI, `v1.0` tag | 0 | tag pushes 403 here (§6) |
+| 6 | **Human pass on citations, §5's framing, and the abstract** | 0 | everything was written/resolved by an agent this session -- automated literature search and a first read of the tables, not peer judgment. Worth a close read before submission, `paper/00_ABSTRACT.md`'s own checklist says the same. |
 
-Never invent an author, year or venue, even with item 5 done -- a future `[CITE]` added by hand
-follows the same rule. **Item 8 (SCAFFOLD) is now the sharpest open risk** — it sits inside
-Table 1, the paper's first table, and the current write-up (§5.1) works around it by caveat
-rather than by fix. Item 1 (robustness raw JSONs) is the other real gap: §5.3 is written from a
-reconstructed table, not the normal pipeline.
+`pyproject.toml`'s gate fix stays session-local by design (CLAUDE.md): regenerating tables or
+figures locally needs `scripts/apply_gate_fix.py --from-results results/fl/gate --apply-verdict`
+first and `git checkout -- pyproject.toml` after, or `test_config_defaults.py` fails (4 tests)
+because the committed default is meant to stay 0.1.
 
-### §5's honest status, past the table in HANDOVER's own bookkeeping
+Never invent an author, year or venue, even with the citations resolved -- a future `[CITE]`
+added by hand follows the same rule.
 
-`paper/05_RESULTS.md` now has real prose for every subsection, not a skeleton. Two things in it
-are marked **not settled** rather than asserted as findings, and should stay that way until
-resolved: the SCAFFOLD row (§5.1, item 8 above) and the robustness table's provenance (§5.3,
-item 1 above). Both A1 (§5.2) and A2 (§5.2b) read as genuine, if preliminary, findings — A2 in
-particular: **full cross-round persistence beats the method's own default and beats no
-persistence, in both regimes it was tested in.** That is the one place in the real data where
-the mechanism this project is actually named for does something the closest published prior
-work cannot. §1.2 of `HANDOVER.md` above still calls A2 "the most important experiment in the
-project" — that call looks right in hindsight, not just in expectation.
+### SCAFFOLD -- root-caused, reproduced, and fixed, 2026-10-11
+
+Found while writing §5.1: every SCAFFOLD run in `results/fl/main` was frozen bit-identical
+from round 0 to round 100 (`check_iid_band.py` fails because of it). Root cause, confirmed by
+direct in-process reproduction (`scripts/debug_scaffold_divergence.py`, no Ray/Kaggle needed):
+the `c_i` control-variate update's `(x−y_i)/(tau·lr)` term amplifies ~100x for small-`tau`
+clients (legitimate under this sweep's real `min-client-size=5`/`local-batch-size=32`), and the
+result accumulates into `self._global_c` as an undamped running sum -- an unguarded integral
+term, NaN by round 16 of 100. The formula itself matches the SCAFFOLD paper; this codebase just
+never bounded it.
+
+Fixed with three bounds, each independently necessary (confirmed by testing each increment in
+isolation): (1) a client's contribution to the control variate is capped at its own actual
+`update_norm`; (2) the server-side accumulator gets an EMA (`global_c_decay=0.9`) plus a hard
+norm clip (`global_c_max_norm=10.0`); (3) the correction term itself is capped
+(`_SCAFFOLD_CORRECTION_MAX_NORM=1.0`) right where it's injected into local training --
+(1)+(2) alone still let `‖w‖` reach 24M by round 90, since a bounded-but-nonzero correction
+applied every round under SGD momentum (0.9) diverges on its own. All three together: `‖w‖`
+goes 67.7 → 73.7 over the full 100 rounds, ordinary training. All three are no-ops whenever the
+pathology they target isn't present; the full 913-test suite and the existing scaffold unit
+tests pass unchanged.
+
+### §5's honest status
+
+`paper/05_RESULTS.md` now has real prose for every subsection, not a skeleton, built from the
+real tables/figures of all three sweeps (main, ablation, robustness). One thing in it is marked
+**not settled** rather than asserted as a finding: Table 1's SCAFFOLD row, pending item 1 above.
+A1 (§5.2) and A2 (§5.2b) read as genuine, if preliminary, findings -- A2 in particular: **full
+cross-round persistence beats the method's own default and beats no persistence, in both
+regimes it was tested in.** That is the one place in the real data where the mechanism this
+project is actually named for does something the closest published prior work cannot. §1.2 of
+`HANDOVER.md` above still calls A2 "the most important experiment in the project" -- that call
+looks right in hindsight, not just in expectation.
 
 ## 6. Landmines — each of these has already cost someone a day
 
