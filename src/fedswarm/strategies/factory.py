@@ -209,7 +209,12 @@ def _build_strategy(
         )
 
     if name == "scaffold":
-        return Scaffold(**common, server_lr=float(run_config.get("scaffold-server-lr", 1.0)))
+        return Scaffold(
+            **common,
+            server_lr=float(run_config.get("scaffold-server-lr", 1.0)),
+            global_c_decay=float(run_config.get("scaffold-global-c-decay", 0.9)),
+            global_c_max_norm=float(run_config.get("scaffold-global-c-max-norm", 10.0)),
+        )
 
     if name == "fedlaw":
         if model is None or val_loader is None or device is None:

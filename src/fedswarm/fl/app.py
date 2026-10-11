@@ -659,15 +659,41 @@ def train_handler(msg: Message, context: Context) -> Message:
     if global_c is not None and local_c is not None and params_before is not None:
         lr = float(config.get("lr", context.run_config.get("local-lr", 0.01)))
         tau = max(metrics["num_batches"], 1)
+        post_state = model.state_dict()
+        drift = OrderedDict(
+            (name, params_before[name] - post_state[name]) for name in global_c
+        )
+        # Option II's `(x - y_i) / (tau * lr)` is an average-local-gradient *estimate* --
+        # sound when tau*lr covers enough local SGD distance to average over, unsound when
+        # it does not. Under a skewed partition a client can legitimately see tau=1 (one
+        # batch is its whole local dataset, `min-client-size` smaller than
+        # `local-batch-size`): dividing a normal-sized step by `1 * 0.01` injects a 100x
+        # *amplified* vector into `self._global_c`, which the server accumulates as an
+        # undamped running sum (`strategies/scaffold.py::aggregate_train`) -- so the
+        # amplification compounds every round rather than averaging out. Verified by
+        # direct reproduction (`scripts/debug_scaffold_divergence.py`, 2026-10-11,
+        # docs/OPEN_QUESTIONS.md): ||w|| goes 67 -> 23.6M in 10 rounds -> NaN by round 16
+        # under exactly main_reduced.yaml's real settings, with this guard absent.
+        #
+        # Fix: a client's contribution to the *global* control variate can be no larger in
+        # magnitude than the client's own actual local movement that round
+        # (`update_norm`, the un-amplified `||x - y_i||` `local_train` already measures).
+        # A small tau means that movement is a noisy sample of fewer steps, not license to
+        # extrapolate it to a larger raw magnitude. Clipping down-only (never up) leaves a
+        # normal round (tau large enough that the un-clipped drift is already <=
+        # update_norm, the common case) completely unchanged -- this guard has zero effect
+        # whenever the instability it targets is not present.
+        raw_update_norm = float(metrics["update_norm"])
+        amplified = OrderedDict((name, t / (tau * lr)) for name, t in drift.items())
+        amplified_norm = float(
+            torch.sqrt(sum((t.float() ** 2).sum() for t in amplified.values()))
+        )
+        scale = min(1.0, raw_update_norm / (amplified_norm + 1e-12))
         new_local_c = OrderedDict(
-            (
-                name,
-                local_c[name]
-                - global_c[name]
-                + (params_before[name] - model.state_dict()[name]) / (tau * lr),
-            )
+            (name, local_c[name] - global_c[name] + amplified[name] * scale)
             for name in global_c
         )
+        metrics["scaffold_drift_clip_scale"] = scale
         context.state["scaffold_c_i"] = ArrayRecord(new_local_c)
         for name in global_c:
             delta = (new_local_c[name] - local_c[name]).numpy()
