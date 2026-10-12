@@ -1,5 +1,7 @@
 # FedSwarm
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23315368.svg)](https://doi.org/10.5281/zenodo.23315368)
+
 > ### 👋 New to this project? Read [`HANDOVER.md`](HANDOVER.md) first.
 > It covers current status, the three decisions already taken and how to reverse them,
 > exactly what to run in what order, and the landmines that have each already cost
