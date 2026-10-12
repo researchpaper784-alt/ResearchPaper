@@ -8,12 +8,14 @@ abstract: >-
   classification. See paper/00_ABSTRACT.md and HANDOVER.md in this repository for the
   full, current account of what was found.
 authors:
-  # TODO (human): fill in your real name and, optionally, ORCID before tagging v1.0.
-  # Zenodo requires at least one author with a name; this placeholder will not pass
-  # review as-is. See https://orcid.org/register if you do not have an ORCID iD.
-  - family-names: "TODO-FAMILY-NAME"
-    given-names: "TODO-GIVEN-NAME"
-    # orcid: "https://orcid.org/0000-0000-0000-0000"
+  - family-names: "Thakker"
+    given-names: "Krith"
+  - family-names: "Narayan"
+    given-names: "Anmol"
+  - family-names: "Baliyan"
+    given-names: "Prateek"
+  - family-names: "Soni"
+    given-names: "Mohit"
 license: MIT
 repository-code: "https://github.com/researchpaper784-alt/ResearchPaper"
 version: "1.0.1"
