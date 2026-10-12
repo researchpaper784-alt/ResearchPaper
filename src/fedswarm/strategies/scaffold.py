@@ -47,9 +47,35 @@ DELTA_PREFIX = "scaffold_dc/"
 
 
 class Scaffold(FedAvg):
-    def __init__(self, *args, server_lr: float = 1.0, **kwargs) -> None:
+    def __init__(
+        self,
+        *args,
+        server_lr: float = 1.0,
+        global_c_decay: float = 0.9,
+        global_c_max_norm: float = 10.0,
+        **kwargs,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.server_lr = server_lr
+        # `self._global_c` is this strategy's one piece of state that persists across every
+        # round (an integral/accumulator term, in control-theory language). Verified by
+        # direct reproduction (`scripts/debug_scaffold_divergence.py`,
+        # docs/OPEN_QUESTIONS.md, 2026-10-11): undamped, it grows geometrically and reaches
+        # NaN by round ~16 under main_reduced.yaml's real settings -- the textbook failure
+        # mode of an unguarded integral term ("integral windup"). Decay alone (an EMA
+        # instead of a raw running sum) slows this but does not bound it: the per-round
+        # contribution can itself grow, since a larger `global_c` changes the correction
+        # term fed back into every client's local gradient (`fl/app.py`), which changes
+        # that client's own update, closing a feedback loop decay alone does not break.
+        # `global_c_max_norm` does: a hard clip on the combined norm (same mechanism as
+        # standard gradient-norm clipping) guarantees `global_c` -- and so the correction
+        # term every client's loss sees -- never exceeds a fixed bound, independent of how
+        # the per-round dynamics behave. Neither constant was independently tuned beyond
+        # confirming `||w||` stays bounded (not merely "grows slower") over 100 rounds on
+        # `scripts/debug_scaffold_divergence.py` -- re-run it and check the trend is flat,
+        # not just smaller, before trusting either on a real sweep.
+        self.global_c_decay = global_c_decay
+        self.global_c_max_norm = global_c_max_norm
         self._global_c: "OrderedDict[str, torch.Tensor] | None" = None
         self._num_total_nodes = 1
 
@@ -69,7 +95,11 @@ class Scaffold(FedAvg):
         node_ids, all_nodes = sample_nodes(grid, self.min_available_nodes, sample_size)
         self._num_total_nodes = max(len(all_nodes), 1)
 
-        config["server-round"] = server_round
+        # Underscore. Spelled `server-round` this was a write nothing ever read --
+        # `train_handler` looks for `server_round`. Redundant now that the factory sets it
+        # for every strategy, and kept only so this class is correct when constructed
+        # directly (its own tests do).
+        config["server_round"] = server_round
         merged = ArrayRecord(arrays.to_torch_state_dict())
         for name, tensor in self._global_c.items():
             merged[f"{CONTROL_PREFIX}{name}"] = Array(tensor.numpy())
@@ -113,7 +143,18 @@ class Scaffold(FedAvg):
         scale = len(valid_replies) / self._num_total_nodes
         for name in param_names:
             stacked_dc = torch.stack([dc[name] for dc in client_dcs], dim=0)
-            self._global_c[name] = self._global_c[name] + self.server_lr * scale * stacked_dc.mean(dim=0)
+            self._global_c[name] = (
+                self.global_c_decay * self._global_c[name]
+                + self.server_lr * scale * stacked_dc.mean(dim=0)
+            )
+
+        total_norm = torch.sqrt(
+            sum((t.float() ** 2).sum() for t in self._global_c.values())
+        )
+        if total_norm > self.global_c_max_norm:
+            clip_scale = self.global_c_max_norm / (float(total_norm) + 1e-12)
+            for name in param_names:
+                self._global_c[name] = self._global_c[name] * clip_scale
 
         arrays_out = ArrayRecord(new_state)
         metrics_out = self.train_metrics_aggr_fn(reply_contents, self.weighted_by_key)

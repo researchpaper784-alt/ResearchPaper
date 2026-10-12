@@ -23,6 +23,8 @@ from check_fedaco_health import (  # noqa: E402
     wall_clock_note,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 CEILING = math.log(11)
 
 
@@ -286,3 +288,387 @@ def test_a_run_without_the_metric_is_no_data_not_a_pass() -> None:
     check = check_degenerate_optimum(_run("fedaco", [{"round": 1, "alpha_max": 0.9}]))
 
     assert check["verdict"] == "NO DATA"
+
+
+# ======================================================================================
+# The gate must name the fix, and --strict must gate A1 on it
+# ======================================================================================
+
+
+def test_the_degenerate_verdict_names_the_gamma_that_closes_it() -> None:
+    """The first real GPU run reported the corner winning 15/15 rounds and offered only
+    "raise `aco-gamma-entropy`" -- no value. Closing it therefore meant booking another GPU
+    session purely to measure a quantity that is a closed form over a Gram matrix the round
+    had already built. The number belongs in the verdict that diagnoses the problem."""
+    run = _margin_run([0.45, 0.80, 0.55], num_clients=10)
+    for i, entry in enumerate(run["rounds"]):
+        entry["required_gamma_entropy"] = [0.30, 0.45, 0.34][i]
+    run["config"]["run_config"]["aco-gamma-entropy"] = 0.1
+
+    check = check_degenerate_optimum(run)
+
+    assert check["verdict"] == "DEGENERATE"
+    # The MAX, not the mean: gamma_entropy is set once for the whole run, so a value that
+    # clears the average round leaves the worst rounds degenerate.
+    assert check["required_gamma_entropy"] == 0.45
+    assert "0.450" in check["detail"]
+
+
+def test_an_infinite_requirement_does_not_swallow_the_reported_value() -> None:
+    """`required_gamma_entropy` returns `inf` for a round whose base weights were a single
+    client -- the penalty then charges the corner and the reference identically and no value
+    separates them. Taking a naive max over the rounds would report `inf` and read as "this
+    is unfixable" when 14 of 15 rounds had a perfectly ordinary answer."""
+    run = _margin_run([0.45, 0.80], num_clients=10)
+    run["rounds"][0]["required_gamma_entropy"] = 0.30
+    run["rounds"][1]["required_gamma_entropy"] = float("inf")
+
+    check = check_degenerate_optimum(run)
+
+    assert check["required_gamma_entropy"] == 0.30
+
+
+def test_an_older_result_says_the_value_is_missing_rather_than_guessing() -> None:
+    """Results written before 2026-09-19 have no `required_gamma_entropy`. Saying so beats
+    inventing a number, and beats silently dropping the only actionable line in the check."""
+    check = check_degenerate_optimum(_margin_run([0.45, 0.80], num_clients=10))
+
+    assert check["required_gamma_entropy"] is None
+    assert "predates" in check["detail"]
+
+
+def test_strict_fails_on_a_degenerate_fitness_even_when_the_colony_searches(tmp_path: Path) -> None:
+    """What lets the notebook gate A1's 80 cells on this check instead of on someone reading
+    the text. A1's four controls optimize the SAME fitness the colony does, so on a
+    degenerate landscape a tie between them says nothing about ACO -- and the plan reframes
+    the paper on exactly that result. `--strict` previously passed whenever the colony was
+    searching, which is the one case where a degenerate optimum is most convincingly hidden:
+    the colony is working, and working toward the corner.
+    """
+    import json
+    import subprocess
+    import sys
+
+    rounds = [
+        {
+            "round": i + 1,
+            # A structured pheromone, so check 1 reports SEARCHING and cannot be the reason
+            # the exit code is nonzero.
+            "train_pheromone_entropy": 0.4,
+            "train_best_fitness": 0.5,
+            "train_corner_margin": 0.6,
+            "train_alpha_max": 0.35,
+            "train_required_gamma_entropy": 0.45,
+            "train_fallback_used": 0.0,
+        }
+        for i in range(15)
+    ]
+    payload = {
+        "status": "completed",
+        "rounds": rounds,
+        "config": {"strategy": "fedaco", "seed": 0, "run_config": {"num-clients": 10}},
+        "final": {"final_test_macro_f1": 0.2, "num_rounds_completed": 15, "wall_clock_s": 100.0},
+    }
+    (tmp_path / "r.json").write_text(json.dumps(payload))
+
+    completed = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_fedaco_health.py"),
+         "--results-dir", str(tmp_path), "--strict"],
+        capture_output=True, text=True,
+    )
+
+    assert "DEGENERATE" in completed.stdout
+    assert completed.returncode == 1, (
+        "a degenerate fitness must fail --strict, or the notebook cannot stop A1 from "
+        f"running on it. stdout:\n{completed.stdout}"
+    )
+
+
+def test_the_check_lists_which_strategies_it_actually_found(tmp_path: Path) -> None:
+    """Check 4's "NO BASELINE" cannot distinguish a FedAvg run that has not finished from one
+    whose result file the check failed to match -- and the first GPU gate printed it while a
+    FedAvg run was visibly starting in the same cell. Listing the directory settles it in the
+    output rather than in the next GPU session."""
+    import json
+    import subprocess
+    import sys
+
+    for strategy in ("fedaco", "fedavg"):
+        payload = {
+            "status": "completed",
+            "rounds": [{"round": 1, "train_corner_margin": -0.5, "train_pheromone_entropy": 0.4}],
+            "config": {"strategy": strategy, "seed": 0, "run_config": {"num-clients": 10}},
+            "final": {"final_test_macro_f1": 0.2, "num_rounds_completed": 1, "wall_clock_s": 10.0},
+        }
+        (tmp_path / f"{strategy}.json").write_text(json.dumps(payload))
+
+    completed = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_fedaco_health.py"),
+         "--results-dir", str(tmp_path)],
+        capture_output=True, text=True,
+    )
+
+    assert "strategies present" in completed.stdout
+    assert "fedaco, fedavg" in completed.stdout
+
+
+def _strict_exit(tmp_path: Path, colony_entropy: float, fitness: float, margin: float) -> int:
+    """Both knobs matter for check 1's verdict, which is why they are both parameters.
+
+    The verdict is not a function of tau's entropy alone -- it is tau's movement as a
+    FRACTION of what this run's own deposit budget makes reachable, and the deposit is
+    `rho * Q * max(F, 0)`. So a near-uniform tau reads INERT at a healthy fitness (the
+    budget was there and went unused) and UNDERPOWERED at a small one (the budget was never
+    there). Verified by probing the real function rather than assumed.
+    """
+    import json
+    import subprocess
+    import sys
+
+    rounds = [
+        {"round": i + 1, "train_pheromone_entropy": colony_entropy, "train_best_fitness": fitness,
+         "train_corner_margin": margin, "train_alpha_max": 0.3,
+         "train_required_gamma_entropy": 0.48, "train_fallback_used": 0.0}
+        for i in range(15)
+    ]
+    (tmp_path / "r.json").write_text(json.dumps({
+        "status": "completed", "rounds": rounds,
+        "config": {"strategy": "fedaco", "seed": 0,
+                   "run_config": {"num-clients": 10, "aco-gamma-entropy": 0.6}},
+        "final": {"final_test_macro_f1": 0.2, "num_rounds_completed": 15, "wall_clock_s": 100.0},
+    }))
+    return subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_fedaco_health.py"),
+         "--results-dir", str(tmp_path), "--strict"],
+        capture_output=True, text=True,
+    ).returncode
+
+
+def test_an_inconclusive_colony_check_does_not_block_a_fixed_corner(tmp_path: Path) -> None:
+    """UNDERPOWERED means "this run cannot tell", not "the colony failed" -- the gate is 15
+    rounds by design and tau has not had time to leave uniform by a margin the threshold can
+    see. Blocking on it would leave someone who has just fixed the corner still refused, with
+    the only remedy being to lengthen a gate whose whole purpose is to be short. A1 itself
+    runs at 100 rounds, where the question is answerable.
+
+    A gate that cannot distinguish inconclusive from failing is a gate nobody can pass.
+    """
+    # tau moving but the deposit too small to settle it -- the shape of the real gate run,
+    # whose best_fitness averaged ~0.19. Corner comfortably lost.
+    assert _strict_exit(tmp_path, colony_entropy=2.0, fitness=0.2, margin=-0.35) == 0
+
+
+def test_a_degenerate_corner_blocks_even_when_the_colony_is_searching(tmp_path: Path) -> None:
+    """The case the flag exists for, and the one a human reading the report most easily
+    talks themselves past: every mechanism signal looks healthy, and the colony is healthily
+    searching for the wrong thing."""
+    assert _strict_exit(tmp_path, colony_entropy=1.5, fitness=0.8, margin=0.6) == 1
+
+
+def test_a_genuinely_inert_colony_still_blocks(tmp_path: Path) -> None:
+    """The other side of not blocking on UNDERPOWERED. INERT is a real negative verdict --
+    the deposit budget was there and tau did not move -- so it must still stop A1 even with
+    the corner fixed, or making UNDERPOWERED non-blocking would have quietly disabled the
+    colony half of the gate."""
+    assert _strict_exit(tmp_path, colony_entropy=math.log(11) - 0.001, fitness=0.8, margin=-0.35) == 1
+
+
+def test_the_freshest_run_is_reported_not_the_first_one_found(tmp_path: Path) -> None:
+    """Changing `aco-gamma-entropy` changes the config hash, so a re-run at a new value
+    writes a NEW file beside the old one -- both completed, both 15 rounds. `max` returns the
+    first maximal element, so without a tiebreak the check could read the previous attempt
+    and report the old verdict against the new setting: you change the value, re-run, and the
+    report tells you nothing changed."""
+    import json
+    import os
+    import subprocess
+    import sys
+    import time
+
+    def write(name: str, gamma: float, margin: float, mtime: float) -> None:
+        rounds = [
+            {"round": i + 1, "train_corner_margin": margin, "train_alpha_max": 0.3,
+             "train_required_gamma_entropy": 0.48, "train_pheromone_entropy": 0.4,
+             "train_best_fitness": 0.2, "train_fallback_used": 0.0}
+            for i in range(15)
+        ]
+        path = tmp_path / name
+        path.write_text(json.dumps({
+            "status": "completed", "rounds": rounds,
+            "config": {"strategy": "fedaco", "seed": 0,
+                       "run_config": {"num-clients": 10, "aco-gamma-entropy": gamma}},
+            "final": {"final_test_macro_f1": 0.13, "num_rounds_completed": 15,
+                      "wall_clock_s": 113.0},
+        }))
+        os.utime(path, (mtime, mtime))
+
+    now = time.time()
+    write("a_old.json", 0.1, 0.62, now - 3600)   # sorts first by name; the stale attempt
+    write("z_new.json", 0.6, -0.35, now)         # the fresh one
+
+    out = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "check_fedaco_health.py"),
+         "--results-dir", str(tmp_path)],
+        capture_output=True, text=True,
+    ).stdout
+
+    assert "z_new.json" in out
+    assert "aco-gamma-entropy of the run above: 0.6" in out
+    assert "CLEAR" in out
+
+# ======================================================================================
+# `--strict` and `--require-sound` answer different questions
+# ======================================================================================
+
+
+def test_strict_and_require_sound_are_not_the_same_gate() -> None:
+    """Conflating them was a real fault, found 2026-09-24.
+
+    `--strict` asks "is anything here fatal?" and deliberately lets UNDERPOWERED through --
+    person B's gate is 15 rounds by design, and blocking on an inconclusive check would refuse
+    a caller who has just fixed the corner, with no remedy but lengthening a gate whose whole
+    purpose is to be short.
+
+    Person C's notebook asked a different question with the same flag: "is the mechanism sound
+    enough to ablate?" before spending 515 cells and 107-215 GPU-hours on A2/A4-A8. Reading
+    exit 0 as "sound" means a 6-round K=6 run on the synthetic fixture certifies the colony --
+    checks 2 and 3 come back CLEAR because a small K makes the concentration penalty relatively
+    stronger, check 1 is inconclusive and does not block, and the caller unlocks the sweeps.
+
+    "Not proven degenerate" is not "sound".
+    """
+    source = (REPO_ROOT / "scripts/check_fedaco_health.py").read_text()
+    assert "--require-sound" in source
+    # The two must not collapse into one condition.
+    assert "args.require_sound" in source
+    assert "args.strict" in source
+
+
+def test_c_notebook_gates_on_require_sound_not_strict() -> None:
+    """The notebook is where the exit code is read as MECHANISM_OK, so it is the place the
+    distinction has to land."""
+    import json
+
+    nb = json.loads((REPO_ROOT / "notebooks/kaggle_ablations_robustness.ipynb").read_text())
+    gate_cells = [
+        "".join(c["source"]) for c in nb["cells"]
+        if "check_fedaco_health" in "".join(c["source"]) and "MECHANISM_OK" in "".join(c["source"])
+    ]
+    assert gate_cells, "no cell in C's notebook computes MECHANISM_OK from the health check"
+    for src in gate_cells:
+        assert "--require-sound" in src
+        assert '"--strict"' not in src, (
+            "this cell reads the exit code as 'the mechanism is sound', which --strict does "
+            "not mean"
+        )
+
+
+def test_require_sound_thresholds_are_below_the_real_sweep_shape() -> None:
+    """The thresholds exist to exclude smoke and fixture runs, not to demand a rerun of the
+    thing being gated -- the sweeps run 100 rounds at K=20."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "health", REPO_ROOT / "scripts/check_fedaco_health.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert 0 < module.MIN_ROUNDS_TO_CERTIFY < 100
+    assert 0 < module.MIN_CLIENTS_TO_CERTIFY < 20
+
+
+def test_the_two_gates_diverge_on_a_run_too_small_to_certify(tmp_path: Path) -> None:
+    """End to end, on the case that motivated the split.
+
+    The run below is healthy on every check -- check 1 SEARCHING, check 3 CLEAR, nothing
+    negative anywhere -- and is still only 6 rounds at K=6. `--strict` must pass it, because
+    nothing here is a fatal verdict and blocking it is what leaves person B's 15-round gate
+    unpassable. `--require-sound` must refuse it, because nothing here certifies that a
+    100-round K=20 sweep will behave the same way, and person C's notebook spends 515 cells on
+    the answer.
+
+    The pheromone entropy declines steadily so tau has demonstrably left uniform: with it held
+    constant the verdict is INERT, which is a real negative and blocks both flags -- that tells
+    you nothing about whether the two gates differ.
+    """
+    import json
+    import subprocess
+
+    entropies = [2.398, 2.36, 2.32, 2.28, 2.24, 2.20]
+    rounds = [
+        {
+            "round": index,
+            "train_best_fitness": 0.98,
+            "train_fedavg_fitness": 0.98,
+            "train_alpha": [1 / 6] * 6,
+            "train_alpha_max": 0.18,
+            "train_alpha_entropy": 1.79,
+            "train_pheromone_entropy": entropy,
+            "train_corner_margin": -0.55,
+            "train_fallback_used": 0,
+            "train_delta_mean_sq_norm": 0.3,
+            "test_macro_f1": 0.1,
+            "val_macro_f1": 0.1,
+        }
+        for index, entropy in enumerate(entropies)
+    ]
+    (tmp_path / "toy_0.json").write_text(json.dumps({
+        "run_id": "toy_0",
+        "config": {"run_config": {"strategy-name": "fedaco", "num-clients": 6,
+                                  "aco-num-levels": 11, "local-epochs": 1},
+                   "strategy": "fedaco", "seed": 0},
+        "rounds": rounds,
+        "final": {"final_test_macro_f1": 0.1, "num_rounds_completed": 6},
+        "status": "completed",
+    }))
+
+    script = str(REPO_ROOT / "scripts" / "check_fedaco_health.py")
+    strict = subprocess.run(
+        [sys.executable, script, "--results-dir", str(tmp_path), "--strict"],
+        capture_output=True, text=True,
+    )
+    sound = subprocess.run(
+        [sys.executable, script, "--results-dir", str(tmp_path), "--require-sound"],
+        capture_output=True, text=True,
+    )
+
+    assert strict.returncode == 0, (
+        "--strict must not block a run with no negative verdict on it.\n" + strict.stdout
+    )
+    assert sound.returncode == 1, (
+        "--require-sound must refuse a 6-round K=6 run.\n" + sound.stdout
+    )
+    assert "REFUSING to certify" in sound.stdout
+    assert "6 rounds" in sound.stdout and "K=6" in sound.stdout
+
+
+def test_b_notebook_does_not_read_a_strict_pass_as_a_searching_colony() -> None:
+    """B's gate correctly uses `--strict` -- its question really is "is anything fatal?" before
+    spending 80 cells on A1. What it must not do is describe that pass as the colony working.
+
+    UNDERPOWERED stopped blocking `--strict` on 2026-09-24, which left the cell's own comment
+    claiming it "exits nonzero when the colony is not searching". A reader seeing
+    `GATE 1: PASSED` would then take the mechanism as demonstrated, and pass that on to person
+    C, whose ablations of colony internals need the stricter gate.
+    """
+    import json
+
+    nb = json.loads((REPO_ROOT / "notebooks/kaggle_main_sweep.ipynb").read_text())
+    gate = [
+        "".join(c["source"]) for c in nb["cells"]
+        if "GATE_1_PASSED = health.returncode" in "".join(c["source"])
+    ]
+    assert gate, "no cell in B's notebook derives GATE_1_PASSED from the health check"
+    src = gate[0]
+
+    assert "exits nonzero when the colony is not searching" not in src, (
+        "that is what --strict used to do; UNDERPOWERED no longer blocks it"
+    )
+    assert "--require-sound" in src, (
+        "the cell should point at the stricter gate, since a --strict pass does not certify "
+        "the mechanism"
+    )
+    # The distinction has to reach the reader at runtime, not only in a comment they may skim.
+    assert "UNDERPOWERED" in src and "nothing fatal" in src
+    compile(src, "kaggle_main_sweep_gate_cell", "exec")

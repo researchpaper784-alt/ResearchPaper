@@ -24,6 +24,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, TensorDataset
 
 from fedswarm.data.cache import build_and_save_cache
+from fedswarm.eval.evaluator import evaluate as evaluate_model
 from fedswarm.fl.app import (
     _repo_path,
     build_evaluate_fn,
@@ -37,6 +38,7 @@ from fedswarm.fl.app import (
     load_client_data,
     local_evaluate,
     local_train,
+    merge_evaluate_metrics,
     merge_train_metrics,
     partition_spec_from_run_config,
     per_class_confusion_counts,
@@ -682,8 +684,11 @@ class _FakeResult:
     """Stands in for flwr's `Result` (a dataclass whose `train_metrics_clientapp` is
     keyed by round -- verified against the installed flwr==1.36.0)."""
 
-    def __init__(self, train_metrics_clientapp: dict) -> None:
+    def __init__(
+        self, train_metrics_clientapp: dict, evaluate_metrics_clientapp: dict | None = None
+    ) -> None:
         self.train_metrics_clientapp = train_metrics_clientapp
+        self.evaluate_metrics_clientapp = evaluate_metrics_clientapp or {}
 
 
 def test_merge_train_metrics_folds_aggregate_train_output_into_the_round_log() -> None:
@@ -762,3 +767,160 @@ def test_client_app_decorators_are_bound_to_the_real_handlers() -> None:
             f"{name} has signature {parameters} -- a decorator is bound to the wrong "
             "function, or the handler's arguments changed"
         )
+
+
+# ======================================================================================
+# Device placement -- found by the project's first GPU run (Kaggle T4)
+# ======================================================================================
+
+
+def test_evaluate_moves_the_model_onto_the_device_it_was_handed() -> None:
+    """`eval/evaluator.evaluate` moved the BATCHES to `device` and left the WEIGHTS alone.
+
+    On CPU both halves are the same device, so this was invisible to all 457 tests and to
+    every CPU run this project has ever done. On Kaggle's T4 it ended every round with
+    10 of 10 clients failing:
+
+        RuntimeError: Input type (torch.cuda.FloatTensor) and weight type
+                      (torch.FloatTensor) should be the same
+
+    and -- the part that makes it worse than a crash -- the run did not die. Only the
+    client-side federated evaluation did, so the result file was written, marked
+    completed, with `Aggregated ClientApp-side Evaluate Metrics: {}`. A silently empty
+    metric block in 678 cells is not something the analysis would have flagged.
+
+    Asserted white-box (did the call happen) rather than end-to-end, because reproducing
+    the mismatch needs two devices and there is no GPU on the dev box or in CI. That
+    limitation is the reason this bug reached a GPU in the first place, so the test says
+    what it can check instead of pretending to check more.
+    """
+    model = SimpleCNN(num_classes=4, norm="groupnorm")
+    loader = _synthetic_loader()
+    requested: list = []
+    original_to = model.to
+
+    def spy(*args, **kwargs):
+        requested.append(args[0] if args else kwargs.get("device"))
+        return original_to(*args, **kwargs)
+
+    model.to = spy  # type: ignore[method-assign]
+    evaluate_model(model, loader, torch.device("cpu"))
+
+    assert requested == [torch.device("cpu")], (
+        "evaluate() never moved the model; on a GPU the weights stay on CPU while the "
+        "batches do not"
+    )
+
+
+def test_local_evaluate_moves_the_model_itself_not_only_via_its_inner_call() -> None:
+    """`local_evaluate` runs a second forward pass of its own, after the `evaluate_model`
+    call. It would inherit the move as a side effect (`nn.Module.to` is in-place), but a
+    reader auditing this function for device-correctness should not have to know that."""
+    model = SimpleCNN(num_classes=4, norm="groupnorm")
+    loader = _synthetic_loader()
+    requested: list = []
+    original_to = model.to
+
+    def spy(*args, **kwargs):
+        requested.append(args[0] if args else kwargs.get("device"))
+        return original_to(*args, **kwargs)
+
+    model.to = spy  # type: ignore[method-assign]
+    local_evaluate(model, loader, torch.device("cpu"))
+
+    assert requested[0] == torch.device("cpu")
+
+
+# ======================================================================================
+# The other half: client-side EVALUATION was computed every round and thrown away
+# ======================================================================================
+
+
+def test_client_side_evaluation_reaches_the_result_file() -> None:
+    """`Result` carries `evaluate_metrics_clientapp` beside `train_metrics_clientapp` and
+    nothing read it, so every client's `evaluate_handler` ran a forward pass over its
+    local-val split, every round, and the output went to Flower's console and nowhere else.
+
+    Wasted compute is the small cost. The real one is that it made a bug undetectable: on
+    Kaggle every client's evaluation failed (model on CPU, batches on GPU) and Flower printed
+    `Aggregated ClientApp-side Evaluate Metrics: {}` -- while the result file, which never
+    carried these fields, looked identical to a healthy run's. Three GPU sessions went past.
+    A field that is absent cannot be checked; one recorded and empty can.
+    """
+    rounds_log = [{"round": 1, "test_macro_f1": 0.10}, {"round": 2, "test_macro_f1": 0.20}]
+    result = _FakeResult(
+        {1: {"best_fitness": 0.44}, 2: {"best_fitness": 0.61}},
+        evaluate_metrics_clientapp={
+            1: {"accuracy": 0.25, "loss": 4.67, "glioma_tp": 0.0, "glioma_support": 0.75},
+            2: {"accuracy": 0.50, "loss": 3.10, "glioma_tp": 1.0, "glioma_support": 0.75},
+        },
+    )
+
+    merge_evaluate_metrics(rounds_log, result, round_offset=0)
+
+    assert rounds_log[0]["client_eval_accuracy"] == 0.25
+    assert rounds_log[1]["client_eval_loss"] == 3.10
+    # The per-class confusion counts specifically: `per_class_confusion_counts` is additive
+    # across clients so a correct pooled macro-F1 can be recomputed under label skew, which
+    # is exactly what R1/R2 measure. Dropping them made that reconstruction impossible.
+    assert rounds_log[1]["client_eval_glioma_tp"] == 1.0
+    assert rounds_log[1]["client_eval_glioma_support"] == 0.75
+
+
+def test_the_two_metric_families_do_not_collide() -> None:
+    """`client_eval_` rather than `eval_`: entries already carry server-side `test_*` and
+    `val_*`, and these are a different measurement -- each client's own held-out split, not
+    the server's pooled one. A reader has to be able to tell them apart."""
+    rounds_log = [{"round": 1, "test_macro_f1": 0.10, "val_accuracy": 0.5}]
+    result = _FakeResult(
+        {1: {"accuracy": 0.9}}, evaluate_metrics_clientapp={1: {"accuracy": 0.25}}
+    )
+
+    merge_train_metrics(rounds_log, result, round_offset=0)
+    merge_evaluate_metrics(rounds_log, result, round_offset=0)
+
+    assert rounds_log[0]["train_accuracy"] == 0.9
+    assert rounds_log[0]["client_eval_accuracy"] == 0.25
+    assert rounds_log[0]["val_accuracy"] == 0.5
+    assert rounds_log[0]["test_macro_f1"] == 0.10
+
+
+def test_both_merges_map_a_resumed_run_the_same_way() -> None:
+    """The offset arithmetic is the fiddly part of a resumed run, and having it written twice
+    is how one half ends up off by one. They share `_merge_clientapp_metrics`; this pins that
+    they agree."""
+    rounds_log = [{"round": 51}, {"round": 52}]
+    result = _FakeResult(
+        {1: {"best_fitness": 0.4}, 2: {"best_fitness": 0.6}},
+        evaluate_metrics_clientapp={1: {"accuracy": 0.3}, 2: {"accuracy": 0.7}},
+    )
+
+    merge_train_metrics(rounds_log, result, round_offset=50)
+    merge_evaluate_metrics(rounds_log, result, round_offset=50)
+
+    assert rounds_log[0]["train_best_fitness"] == 0.4
+    assert rounds_log[0]["client_eval_accuracy"] == 0.3
+    assert rounds_log[1]["train_best_fitness"] == 0.6
+    assert rounds_log[1]["client_eval_accuracy"] == 0.7
+
+
+def test_a_run_with_no_client_evaluation_does_not_crash() -> None:
+    """A strategy whose evaluate arm produced nothing -- or a Flower version that does not
+    populate the field -- must leave the result file poorer, not broken."""
+    rounds_log = [{"round": 1, "test_macro_f1": 0.1}]
+    merge_evaluate_metrics(rounds_log, _FakeResult({1: {"best_fitness": 0.4}}), round_offset=0)
+
+    assert rounds_log == [{"round": 1, "test_macro_f1": 0.1}]
+
+
+def test_the_server_app_calls_both_merges() -> None:
+    """`merge_train_metrics` existed and was called; its counterpart existed as a field on
+    `Result` that nothing read. A capability with no caller is this codebase's recurring
+    defect, so the call site is asserted rather than assumed."""
+    import inspect
+
+    from fedswarm.fl import app
+
+    source = inspect.getsource(app.main)
+    assert "merge_train_metrics(" in source
+    assert "merge_evaluate_metrics(" in source

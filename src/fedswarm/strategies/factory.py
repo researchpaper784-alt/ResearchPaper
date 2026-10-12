@@ -16,8 +16,14 @@ from flwr.serverapp.strategy import FedAdam, FedAvg, FedMedian, FedProx, FedTrim
 from torch.utils.data import DataLoader
 
 from fedswarm.aco.colony import ColonyConfig
-from fedswarm.aco.fitness import CONCENTRATION_PENALTIES, DataFreeFitnessConfig
-from fedswarm.aco.heuristics import HeuristicWeights
+from fedswarm.aco.fitness import (
+    CONCENTRATION_PENALTIES,
+    DISPERSION_REFERENCES,
+    DataFreeFitnessConfig,
+)
+from fedswarm.aco.heuristics import DESIRABILITY_SCALINGS, HeuristicWeights
+from fedswarm.fl.attacks import attack_from_run_config, malicious_ids
+from fedswarm.fl.cold_start import cold_start_from_run_config, with_cold_start
 from fedswarm.aco.pheromone import PheromoneConfig
 from fedswarm.strategies.fedaco import FedACO, FedACOConfig
 from fedswarm.strategies.fedlaw import FedLAW
@@ -28,6 +34,92 @@ from fedswarm.strategies.scaffold import Scaffold
 RunConfig = dict
 
 
+def _desirability_scaling(run_config: RunConfig) -> str:
+    """Validated at construction rather than at first use, like `dispersion_reference`.
+
+    A typo'd value here would otherwise surface as a `ValueError` from inside
+    `desirability_matrix` during round 1 of a GPU run, after the data has loaded and the
+    clients have trained -- which on Kaggle costs a session to learn a spelling.
+    """
+    value = str(run_config.get("aco-desirability-scaling", HeuristicWeights.scaling))
+    if value not in DESIRABILITY_SCALINGS:
+        raise ValueError(
+            f"aco-desirability-scaling={value!r} is not one of {DESIRABILITY_SCALINGS}"
+        )
+    return value
+
+
+def _krum_malicious_count(run_config: RunConfig) -> int:
+    """How many Byzantine clients Krum should assume -- derived from the attack, not fixed.
+
+    `robustness_r1_label_flip.yaml` and `robustness_r2_update_attack.yaml` both hardcoded
+    `num-malicious-nodes: 4` (20% of 20 clients) across attacker fractions of 10%, 20% and
+    30%, because a Cartesian-product grid has no way to say "this strategy-specific value
+    must track that partition-specific one". Krum was therefore correctly tuned in exactly
+    one of the three cells per sweep and mis-tuned in the other two -- and Krum is the
+    headline Byzantine baseline the paper's "resilience for free" claim is measured against,
+    so a mis-tuned Krum flatters FedACO in a way no reader could detect from the tables.
+
+    The coupling belongs here, where the whole resolved run_config is visible. `f` is taken
+    from `attacks.malicious_ids` -- the same function the ClientApp uses to decide which
+    partitions actually lie -- so the number Krum assumes and the number of real attackers
+    cannot drift apart. `ceil`, at least one attacker for any nonzero fraction, identical
+    rule on both sides.
+
+    An explicit `num-malicious-nodes` still wins, so a deliberate "what if Krum
+    misjudges f" cell stays expressible. `attack="none"` yields 0 regardless of
+    `attack-fraction`, which is what the clean arm of every robustness sweep needs.
+
+    Safe at every cell C runs: Flower's MultiKrum uses
+    `num_closest = max(1, n - f - 2)`, so K=20 with f=6 (the 30% cell) leaves 12 neighbours
+    and no constraint is violated.
+    """
+    explicit = run_config.get("num-malicious-nodes")
+    if explicit is not None and int(explicit) > 0:
+        return int(explicit)
+    attack, fraction, _ = attack_from_run_config(run_config)
+    if attack == "none":
+        return 0
+    return len(malicious_ids(int(run_config.get("num-clients", 20)), fraction))
+
+
+def _with_server_round(strategy: Strategy) -> Strategy:
+    """Make every strategy put the round number into the train config it sends clients.
+
+    Nothing did. `fl/app.py::train_handler` reads `config.get("server_round", ...)` and
+    the ServerApp builds `train_config` once, before round 1, with no round number in it
+    -- so the key was never present for any strategy. Scaffold wrote one, spelled
+    `server-round`, which no reader uses. Two consequences, found in the first real GPU
+    run's metrics:
+
+    1. Every train reply recorded `server_round = -1` (line 549's default), so the
+       per-client train metrics in every result file carry no usable round number.
+    2. Worse, and the reason this is a correctness fix rather than a cosmetic one: R4's
+       Gaussian mechanism seeds its noise with `seed*104729 + partition*1000003 +
+       server_round`. With the term pinned at 0, every round drew the **same** noise --
+       a fixed per-client perturbation the model trains around, not DP noise. R4 would
+       have reported FedACO as far more noise-robust than it is, and the result files
+       would carry nothing to reveal it.
+
+    Applied by wrapping rather than in each strategy: `fedavg`, `fedprox`, `fedadam`,
+    `fedyogi`, `fedmedian`, `fedtrimmedavg` and `krum` are Flower built-ins with no
+    subclass here to override, so a per-strategy fix would have covered only the five
+    custom ones -- and silently left the built-ins, which are every baseline the paper
+    compares against. `flwr==1.36.0` calls `configure_train(current_round, arrays,
+    train_config, grid)` positionally (verified in the installed
+    `serverapp/strategy/strategy.py`), and passes the same ConfigRecord object every
+    round, so assigning into it per round is both safe and sufficient.
+    """
+    original = strategy.configure_train
+
+    def configure_train(server_round, arrays, config, grid):  # type: ignore[no-untyped-def]
+        config["server_round"] = int(server_round)
+        return original(server_round, arrays, config, grid)
+
+    strategy.configure_train = configure_train  # type: ignore[method-assign]
+    return strategy
+
+
 def strategy_from_run_config(
     run_config: RunConfig,
     *,
@@ -35,12 +127,35 @@ def strategy_from_run_config(
     val_loader: DataLoader | None = None,
     device: torch.device | None = None,
 ) -> Strategy:
-    """`model`/`val_loader`/`device` are only required for `strategy-name="fedlaw"`
+    """Wraps `_build_strategy` so every strategy reports its round number to clients.
+
+    `model`/`val_loader`/`device` are only required for `strategy-name="fedlaw"`
     (needs a differentiable forward pass against a server val batch each round) and for
     `strategy-name="fedaco"` with `aco-fitness-mode="server_val"` (scores candidate
     alphas against the same server-held set). Every other strategy -- including FedACO
     in its default `data_free` mode, which is the whole point of the method -- ignores
     them, so callers not using those two can omit them."""
+    strategy = _with_server_round(
+        _build_strategy(run_config, model=model, val_loader=val_loader, device=device)
+    )
+    # Phase 8, R6. Off unless `cold-start-round` is set, so every other sweep is untouched.
+    # Applied outside `_with_server_round` so the round number still reaches clients on the
+    # rounds the late joiners are hidden -- they are absent from the aggregation, not from the
+    # protocol.
+    join_round, cold_fraction = cold_start_from_run_config(run_config)
+    return with_cold_start(
+        strategy, join_round, cold_fraction, int(run_config.get("num-clients", 20))
+    )
+
+
+def _build_strategy(
+    run_config: RunConfig,
+    *,
+    model: torch.nn.Module | None = None,
+    val_loader: DataLoader | None = None,
+    device: torch.device | None = None,
+) -> Strategy:
+    """Selection only. `strategy_from_run_config` is the entry point callers use."""
     common = dict(
         fraction_train=float(run_config.get("fraction-train", 1.0)),
         fraction_evaluate=float(run_config.get("fraction-evaluate", 1.0)),
@@ -77,7 +192,7 @@ def strategy_from_run_config(
         )
 
     if name in ("krum", "multikrum"):
-        return Krum(**common, num_malicious_nodes=int(run_config.get("num-malicious-nodes", 0)))
+        return Krum(**common, num_malicious_nodes=_krum_malicious_count(run_config))
 
     if name in ("trimmed-mean", "fedtrimmedavg"):
         return FedTrimmedAvg(**common, beta=float(run_config.get("trim-beta", 0.2)))
@@ -94,7 +209,12 @@ def strategy_from_run_config(
         )
 
     if name == "scaffold":
-        return Scaffold(**common, server_lr=float(run_config.get("scaffold-server-lr", 1.0)))
+        return Scaffold(
+            **common,
+            server_lr=float(run_config.get("scaffold-server-lr", 1.0)),
+            global_c_decay=float(run_config.get("scaffold-global-c-decay", 0.9)),
+            global_c_max_norm=float(run_config.get("scaffold-global-c-max-norm", 10.0)),
+        )
 
     if name == "fedlaw":
         if model is None or val_loader is None or device is None:
@@ -196,6 +316,14 @@ def _build_fedaco(
             f"Unknown aco-concentration-penalty {penalty_shape!r} "
             f"(expected one of {CONCENTRATION_PENALTIES})"
         )
+    dispersion_reference = str(
+        run_config.get("aco-dispersion-reference", DataFreeFitnessConfig.dispersion_reference)
+    )
+    if dispersion_reference not in DISPERSION_REFERENCES:
+        raise ValueError(
+            f"Unknown aco-dispersion-reference {dispersion_reference!r} "
+            f"(expected one of {DISPERSION_REFERENCES})"
+        )
     fitness = DataFreeFitnessConfig(
         gamma_alignment=float(
             run_config.get("aco-gamma-alignment", DataFreeFitnessConfig.gamma_alignment)
@@ -212,6 +340,10 @@ def _build_fedaco(
         ),
         # Phase 7's penalty-shape ablation: "entropy" (the method as proposed) | "gini".
         concentration_penalty=penalty_shape,
+        # "weighted_mean" (the method as proposed) | "base". Validated here for the same
+        # reason as the penalty shape: an unknown value would otherwise surface from inside a
+        # round, where `flwr run` reports "Exit Code: 700" and still exits 0.
+        dispersion_reference=dispersion_reference,
     )
     heuristics = HeuristicWeights(
         beta_alignment=float(run_config.get("aco-beta-alignment", HeuristicWeights.beta_alignment)),
@@ -220,11 +352,15 @@ def _build_fedaco(
             run_config.get("aco-beta-val-improvement", HeuristicWeights.beta_val_improvement)
         ),
         beta_data_size=float(run_config.get("aco-beta-data-size", HeuristicWeights.beta_data_size)),
+        scaling=_desirability_scaling(run_config),
     )
     aco_config = FedACOConfig(
         num_levels=int(run_config.get("aco-num-levels", FedACOConfig.num_levels)),
         level_low=float(run_config.get("aco-level-low", FedACOConfig.level_low)),
         level_high=float(run_config.get("aco-level-high", FedACOConfig.level_high)),
+        level_spacing=str(
+            run_config.get("aco-level-spacing", FedACOConfig.level_spacing)
+        ),
         # Phase 7 sweeps fixed values of the global shrinkage s; it is never searched.
         target_sum=float(run_config.get("aco-target-sum", FedACOConfig.target_sum)),
         num_rounds=int(run_config.get("num-rounds", 2)),

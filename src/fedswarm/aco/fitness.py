@@ -14,7 +14,14 @@ from typing import Protocol
 import torch
 from torch.utils.data import DataLoader
 
-from fedswarm.aco.gram import GramPrecompute, apply_delta, weighted_dispersion, weighted_norm_sq
+from fedswarm.aco.gram import (
+    GramPrecompute,
+    apply_delta,
+    aggregate_drift,
+    dispersion_about_reference,
+    weighted_dispersion,
+    weighted_norm_sq,
+)
 from fedswarm.eval.evaluator import evaluate as evaluate_model
 
 
@@ -110,6 +117,32 @@ class DataFreeFitnessConfig:
     # it is the method as proposed; "gini" exists so the Phase 7 ablation can measure the
     # choice on real data instead of the question being settled on synthetic deltas.
     concentration_penalty: str = "entropy"
+    # What the dispersion term measures spread ABOUT. "weighted_mean" is the method as
+    # proposed (plan §4.5): a weighted variance about `Delta(alpha)`, which moves with alpha.
+    # "base" measures it about `Delta(base_weights)` -- the FedAvg point -- which does not.
+    #
+    # This is not a tuning knob, it is the fix for a structural degeneracy. A weighted
+    # variance about its own mean is exactly zero at every vertex, so "discard every client
+    # but one" pays nothing for its dispersion and only `gamma_3 * P_max` stands against the
+    # alignment it gets for free. The first real GPU runs measured the consequence: at the
+    # default `gamma_entropy=0.1` the corner outscored the FedAvg point in 15/15 rounds, and
+    # the 0.6 needed to stop it pushed the whole landscape negative -- the MAX-MIN rule
+    # deposits `rho * Q * max(F, 0)`, so 7 of 15 rounds deposited nothing, the pheromone never
+    # moved, and FedACO finished 0.21 macro-F1 BEHIND plain FedAvg.
+    #
+    # Under "base" a vertex costs `||delta_j - Delta_base||^2`, which is large. The default
+    # stays "weighted_mean" because that is the method as proposed and every result so far
+    # used it; "base" is selectable so the choice is measured rather than asserted.
+    # "aggregate" is the third shape: ||Delta(alpha) - Delta_rob||^2, how far the AGGREGATE
+    # lands from the robust consensus. It is the only one of the three that can rule out a
+    # single-client answer. "weighted_mean" is zero at every vertex; "base" is exactly LINEAR
+    # in alpha (a weighted average of fixed per-client constants), so it has no interior
+    # optimum and a vertex on the nearest client is cheaper than any mix -- measured, and the
+    # reason it took the real corner margin only from +0.6184 to +0.3136.
+    dispersion_reference: str = "weighted_mean"
+
+
+DISPERSION_REFERENCES = ("weighted_mean", "base", "aggregate")
 
 
 class DataFreeFitness:
@@ -132,9 +165,28 @@ class DataFreeFitness:
     [0.763, 0.933] and tau develops real spread in all 9 configs.
     """
 
-    def __init__(self, gram: GramPrecompute, config: DataFreeFitnessConfig | None = None) -> None:
+    def __init__(
+        self,
+        gram: GramPrecompute,
+        config: DataFreeFitnessConfig | None = None,
+        reference: torch.Tensor | None = None,
+    ) -> None:
         self.gram = gram
         self.config = config or DataFreeFitnessConfig()
+        if self.config.dispersion_reference not in DISPERSION_REFERENCES:
+            raise ValueError(
+                f"Unknown dispersion_reference {self.config.dispersion_reference!r} "
+                f"(expected one of {DISPERSION_REFERENCES})"
+            )
+        if self.config.dispersion_reference == "base" and reference is None:  # noqa: SIM102
+            # Refused rather than defaulted to uniform. A silently-uniform reference would
+            # still remove the vertex degeneracy, so every diagnostic would look repaired
+            # while the term measured spread about a point the aggregation never uses.
+            raise ValueError(
+                "dispersion_reference='base' needs `reference` (the base_weights whose "
+                "Delta the spread is measured about); there is no safe default"
+            )
+        self.reference = reference
 
     def evaluate(self, alpha: torch.Tensor) -> float:
         eps = 1e-12
@@ -142,7 +194,15 @@ class DataFreeFitness:
         alignment = (alpha @ self.gram.g_rob) / (
             torch.sqrt(a_g_a) * math.sqrt(max(self.gram.rob_norm_sq, eps))
         )
-        dispersion = weighted_dispersion(alpha, self.gram.gram)
+        mode = self.config.dispersion_reference
+        if mode == "base":
+            dispersion = dispersion_about_reference(alpha, self.reference, self.gram.gram)
+        elif mode == "aggregate":
+            dispersion = aggregate_drift(
+                alpha, self.gram.g_rob, self.gram.rob_norm_sq, self.gram.gram
+            )
+        else:
+            dispersion = weighted_dispersion(alpha, self.gram.gram)
         if self.config.normalize_dispersion:
             dispersion = dispersion / max(self.gram.mean_sq_norm, eps)
         penalty = concentration_penalty(alpha, self.config.concentration_penalty)
@@ -192,18 +252,90 @@ def corner_margin(
     answer outscores the reference the method is judged against.
     """
     config = config or DataFreeFitnessConfig()
-    eps = 1e-12
-    norms = torch.diagonal(gram.gram).clamp_min(eps).sqrt()
-    cosines = gram.g_rob / (norms * math.sqrt(max(gram.rob_norm_sq, eps)))
-
     num_clients = int(base_weights.numel())
-    best_vertex = config.gamma_alignment * float(
-        cosines.max()
-    ) - config.gamma_entropy * _max_concentration_penalty(
-        num_clients, config.concentration_penalty
-    )
-    fedavg = DataFreeFitness(gram, config).evaluate(base_weights)
-    return best_vertex - fedavg
+    fitness = DataFreeFitness(gram, config, reference=base_weights)
+
+    if config.dispersion_reference in ("base", "aggregate"):
+        # The closed form above does not apply: dispersion no longer vanishes at a vertex,
+        # which is the entire point of that mode. Evaluating F at each of the K vertices is
+        # K * O(K) = O(K^2) -- the same order the closed form was written to achieve -- so
+        # nothing is lost by computing it directly, and a second copy of the algebra that
+        # could drift from `evaluate` is avoided.
+        identity = torch.eye(num_clients, dtype=base_weights.dtype)
+        best_vertex = max(fitness.evaluate(identity[j]) for j in range(num_clients))
+    else:
+        eps = 1e-12
+        norms = torch.diagonal(gram.gram).clamp_min(eps).sqrt()
+        cosines = gram.g_rob / (norms * math.sqrt(max(gram.rob_norm_sq, eps)))
+        best_vertex = config.gamma_alignment * float(
+            cosines.max()
+        ) - config.gamma_entropy * _max_concentration_penalty(
+            num_clients, config.concentration_penalty
+        )
+
+    return best_vertex - fitness.evaluate(base_weights)
+
+
+def required_gamma_entropy(
+    gram: GramPrecompute,
+    base_weights: torch.Tensor,
+    config: DataFreeFitnessConfig | None = None,
+    headroom: float = 0.0,
+) -> float:
+    """The smallest `gamma_entropy` at which the corner stops outscoring FedAvg. Exact.
+
+    This exists because "raise `aco-gamma-entropy` until the margin is negative" is advice,
+    and the first real GPU run showed advice is not enough: the margin came back at +0.6252
+    in 15 of 15 rounds and nothing in the report said what value would have fixed it. The
+    answer needs no search, because the margin is *linear* in gamma_entropy:
+
+        margin(g3) = [g1*max_cos - g3*P_max] - [g1*align(base) - g2*disp(base) - g3*P(base)]
+                   = A - g3 * (P_max - P(base))
+
+    where `A` collects every term that does not involve g3. So one evaluation at the current
+    value fixes the whole line, and the zero crossing is
+
+        g3* = g3 + margin(g3) / (P_max - P(base)).
+
+    `P_max - P(base) > 0` for any `base_weights` that is not itself a vertex, so the
+    crossing always exists and is unique -- there is no regime where the penalty cannot win,
+    only one where the value it needs is impractically large.
+
+    **This is a diagnostic, not a recommendation to apply blindly.** gamma_entropy is a
+    hyperparameter A7 owns, and raising it trades the degenerate corner for a fitness that
+    charges more for *any* concentration -- including the mild, genuine down-weighting of a
+    straggler or an adversary that R1/R2 need FedACO to perform. A value that just clears
+    the corner at K=10 may over-penalize at K=20, where `P_max` is larger. Read it as "the
+    current setting is short of the corner by this much", and confirm any change with a gate
+    re-run rather than by argument -- the log-spaced-grid episode is what happens otherwise.
+
+    `headroom` returns a value that clears the crossing by that fraction (0.1 = 10% past
+    it), because landing exactly on a zero margin leaves the corner tied rather than beaten.
+    """
+    config = config or DataFreeFitnessConfig()
+    num_clients = int(base_weights.numel())
+    p_max = _max_concentration_penalty(num_clients, config.concentration_penalty)
+    p_base = concentration_penalty(base_weights, config.concentration_penalty)
+    span = p_max - p_base
+    # Relative, and not 1e-12: at an exact vertex the span is algebraically zero but comes
+    # out at ~8e-11, because `_entropy` clamps its probabilities off zero before taking the
+    # log. An absolute tolerance tight enough to look rigorous therefore misses the very
+    # case it exists to catch and returns a crossing around 1e10 instead -- a number a
+    # reader could mistake for a setting. Any real partition's span is O(0.1) or larger.
+    if span <= 1e-9 * max(p_max, 1.0):
+        # `base_weights` is itself a vertex: one client holds every example. The penalty
+        # then charges the corner and the reference identically and cannot separate them at
+        # any gamma_entropy. Not reachable from a real partition (every regime in
+        # configs/partition/ gives every client data), so it is reported rather than
+        # papered over with a large finite number.
+        return float("inf")
+    margin = corner_margin(gram, base_weights, config)  # linear in gamma_entropy either way
+    crossing = config.gamma_entropy + margin / span
+    if crossing <= 0:
+        # Already negative by more than the penalty contributes: the corner loses on the
+        # alignment and dispersion terms alone and needs no penalty at all.
+        return 0.0
+    return crossing * (1.0 + headroom)
 
 
 class ServerValFitness:

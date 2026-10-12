@@ -97,7 +97,7 @@ from fedswarm.fl.privacy import (
 )
 from fedswarm.models.factory import build_model
 from fedswarm.strategies.factory import strategy_from_run_config
-from fedswarm.utils.results import make_run_id, write_result
+from fedswarm.utils.results import make_run_id, resolved_config, write_result
 from fedswarm.utils.seed import seed_everything
 
 RunConfig = dict  # Context.run_config's real type: dict[str, bool | float | int | str]
@@ -173,11 +173,21 @@ def build_model_from_run_config(run_config: RunConfig) -> nn.Module:
     )
 
 
-def load_client_data(partition_id: int, run_config: RunConfig) -> tuple[DataLoader, DataLoader]:
+def load_client_data(
+    partition_id: int, run_config: RunConfig, shuffle_seed: int | None = None
+) -> tuple[DataLoader, DataLoader]:
     """This client's local-train / local-val loaders, per the plan's Step 1.4 design:
     each client's data is a fixed subset of the cached, de-duplicated manifest, split
     90/10 into local-train and local-val (the fraction is itself part of the partition
-    spec, cached alongside the assignment)."""
+    spec, cached alongside the assignment).
+
+    `shuffle_seed` pins the train loader's batch order. Without it the loader shuffles from
+    the **global** torch RNG of whatever Ray actor happens to be running this ClientApp, and
+    `seed_everything` is called in `server_app.main()` only -- a different process. So the
+    `seed` recorded in every result file governed the server and nothing else, and two runs
+    of the same config produced different numbers. Caller-supplied rather than read from
+    `run_config` here, because it has to fold in the round: re-seeding to f(seed, partition)
+    alone would make every round of a run train on the identical batch order."""
     size = int(run_config.get("image-size", 112))
     cache_dir = _repo_path(str(run_config.get("cache-dir", "data/processed/cache")))
     manifest_path = str(_repo_path(str(run_config.get("manifest-path", str(MANIFEST_CSV)))))
@@ -203,7 +213,17 @@ def load_client_data(partition_id: int, run_config: RunConfig) -> tuple[DataLoad
     train_ds = ManifestDataset(manifest, images, np.array(partition.client_train[partition_id]), train_transform)
     val_ds = ManifestDataset(manifest, images, np.array(partition.client_val[partition_id]), eval_transform)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=0)
+    shuffle_generator = None
+    if shuffle_seed is not None:
+        shuffle_generator = torch.Generator()
+        shuffle_generator.manual_seed(int(shuffle_seed))
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        generator=shuffle_generator,
+    )
     val_loader = DataLoader(val_ds, batch_size=min(128, max(1, len(val_ds))), shuffle=False, num_workers=0)
     return train_loader, val_loader
 
@@ -314,6 +334,11 @@ def local_evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -
     (Section 3's `evaluate_handler`), which is separate from the server's own
     centralized test-set evaluation (Section 4's `build_evaluate_fn`, which evaluates
     the pooled test set directly and needs none of this client-side bookkeeping)."""
+    # `evaluate_model` moves it too, and in-place, so the second loop below would inherit
+    # that. Stated here rather than depended on: this function has its own forward pass,
+    # and a reader checking whether *it* is device-correct should not have to trace a side
+    # effect of the call above to find out.
+    model.to(device)
     metrics = evaluate_model(model, loader, device)
 
     all_labels, all_preds = [], []
@@ -438,6 +463,9 @@ def _partition_id(context: Context) -> int:
 # top-level RecordDict key.
 _SCAFFOLD_CONTROL_PREFIX = "scaffold_c/"
 _SCAFFOLD_DELTA_PREFIX = "scaffold_dc/"
+# See the comment where this is used, train_handler: caps the per-step gradient pull the
+# SCAFFOLD correction term can exert, independent of the server-side global_c clip.
+_SCAFFOLD_CORRECTION_MAX_NORM = 1.0
 
 
 class _LabelFlipDataset(torch.utils.data.Dataset):
@@ -481,15 +509,51 @@ def _poisoned_loader(loader: DataLoader, num_classes: int) -> DataLoader:
     )
 
 
+def _client_seed(context: Context, config, partition_id: int) -> int:
+    """A per-(run seed, client, round) seed for a ClientApp process.
+
+    `seed_everything` runs in `server_app.main()`, and in the Simulation Runtime a ClientApp
+    is a **separate Ray actor process** -- so it never reached the client, and every client's
+    torch RNG started from OS entropy. The visible consequence: two runs of the identical
+    config and seed produced different results (the first two Kaggle gate runs disagreed on
+    every metric, including 1 vs 4 rounds hitting the deposit floor). The `seed` in every
+    result file was honest about being recorded and wrong about what it controlled.
+
+    Folding in the round matters as much as folding in the client: re-seeding to
+    f(seed, partition) alone would hand every round the same batch order, which is not
+    determinism but a much subtler bug -- 100 rounds of training on one fixed permutation.
+
+    The multipliers are distinct large primes so (seed, partition, round) triples do not
+    collide; the same pattern `train_handler` already uses for its attack and DP generators.
+    """
+    return (
+        int(context.run_config.get("seed", 0)) * 2_654_435_761
+        + partition_id * 40_503
+        + int(config.get("server_round", 0)) * 97
+    ) % (2**31 - 1)
+
+
 @client_app.train()
 def train_handler(msg: Message, context: Context) -> Message:
+    config = msg.content["config"]
+    partition_id = _partition_id(context)
+    # Before anything that draws from an RNG: model init is overwritten by the server's
+    # arrays below, but dropout masks, augmentation and batch order are not.
+    seed_everything(
+        _client_seed(context, config, partition_id),
+        deterministic=bool(context.run_config.get("deterministic", True)),
+    )
+
     model = build_model_from_run_config(context.run_config)
     full_state = msg.content["arrays"].to_torch_state_dict()
     model_keys = list(model.state_dict().keys())
     model.load_state_dict(OrderedDict((k, full_state[k]) for k in model_keys))
 
-    train_loader, _ = load_client_data(_partition_id(context), context.run_config)
-    config = msg.content["config"]
+    train_loader, _ = load_client_data(
+        partition_id,
+        context.run_config,
+        shuffle_seed=_client_seed(context, config, partition_id),
+    )
 
     # Phase 8. `attack="none"` (the default) leaves every path below untouched, so a
     # non-robustness run behaves exactly as it did before this existed.
@@ -522,6 +586,24 @@ def train_handler(msg: Message, context: Context) -> Message:
             else OrderedDict((name, torch.zeros_like(t)) for name, t in global_c.items())
         )
         correction = OrderedDict((name, global_c[name] - local_c[name]) for name in global_c)
+        # `correction` is added as a *constant* per-step gradient term for all `tau` local
+        # steps (every step pulls every parameter by the same `-lr * correction`, before
+        # momentum). If it does not shrink round to round -- which a bounded-but-nonzero
+        # `global_c` does not guarantee, only that IT stays bounded -- that constant pull
+        # compounds under SGD momentum (0.9) into ballistic divergence of the MODEL itself
+        # even with global_c capped server-side (strategies/scaffold.py). Verified directly:
+        # with only the server-side clip, ||global_c|| plateaus near its bound by round ~40
+        # but ||w|| keeps growing past it, reaching 24M by round 90
+        # (scripts/debug_scaffold_divergence.py, docs/OPEN_QUESTIONS.md). Clipping the
+        # correction itself, at the point it is injected into local training, bounds that
+        # per-step pull directly -- a no-op whenever `correction` is already small, which
+        # is every round once the pathological small-tau clients stop dominating it.
+        correction_norm = float(
+            torch.sqrt(sum((t.float() ** 2).sum() for t in correction.values()))
+        )
+        if correction_norm > _SCAFFOLD_CORRECTION_MAX_NORM:
+            clip_scale = _SCAFFOLD_CORRECTION_MAX_NORM / (correction_norm + 1e-12)
+            correction = OrderedDict((name, t * clip_scale) for name, t in correction.items())
         params_before = OrderedDict((k, model.state_dict()[k].clone()) for k in global_c)
 
     metrics = local_train(
@@ -580,11 +662,15 @@ def train_handler(msg: Message, context: Context) -> Message:
             generator=torch.Generator().manual_seed(
                 int(context.run_config.get("seed", 0)) * 104_729
                 + _partition_id(context) * 1_000_003
-                # `server_round`, with an underscore -- the key the server actually sends
-                # (see `metrics["server_round"]` above). Spelled "server-round" this
-                # would silently default to 0 every round, so every round would draw the
-                # *same* noise: a fixed perturbation the model learns around, not DP
-                # noise, and R4 would report the method as far more noise-robust than it is.
+                # `server_round`, with an underscore. Getting this spelling right was
+                # necessary but not sufficient, and the comment that used to sit here
+                # claimed the server sent the key: it did not. `strategies/factory.py`'s
+                # `_with_server_round` is what actually puts it in the train config; until
+                # that existed this term was 0 in every round, so every round drew the
+                # *same* noise -- a fixed perturbation the model trains around, not DP
+                # noise, and R4 would have reported the method as far more noise-robust
+                # than it is. The first real GPU run exposed it: `server_round` came back
+                # as -1 in every train reply.
                 + int(config.get("server_round", 0))
             ),
         )
@@ -594,15 +680,41 @@ def train_handler(msg: Message, context: Context) -> Message:
     if global_c is not None and local_c is not None and params_before is not None:
         lr = float(config.get("lr", context.run_config.get("local-lr", 0.01)))
         tau = max(metrics["num_batches"], 1)
+        post_state = model.state_dict()
+        drift = OrderedDict(
+            (name, params_before[name] - post_state[name]) for name in global_c
+        )
+        # Option II's `(x - y_i) / (tau * lr)` is an average-local-gradient *estimate* --
+        # sound when tau*lr covers enough local SGD distance to average over, unsound when
+        # it does not. Under a skewed partition a client can legitimately see tau=1 (one
+        # batch is its whole local dataset, `min-client-size` smaller than
+        # `local-batch-size`): dividing a normal-sized step by `1 * 0.01` injects a 100x
+        # *amplified* vector into `self._global_c`, which the server accumulates as an
+        # undamped running sum (`strategies/scaffold.py::aggregate_train`) -- so the
+        # amplification compounds every round rather than averaging out. Verified by
+        # direct reproduction (`scripts/debug_scaffold_divergence.py`, 2026-10-11,
+        # docs/OPEN_QUESTIONS.md): ||w|| goes 67 -> 23.6M in 10 rounds -> NaN by round 16
+        # under exactly main_reduced.yaml's real settings, with this guard absent.
+        #
+        # Fix: a client's contribution to the *global* control variate can be no larger in
+        # magnitude than the client's own actual local movement that round
+        # (`update_norm`, the un-amplified `||x - y_i||` `local_train` already measures).
+        # A small tau means that movement is a noisy sample of fewer steps, not license to
+        # extrapolate it to a larger raw magnitude. Clipping down-only (never up) leaves a
+        # normal round (tau large enough that the un-clipped drift is already <=
+        # update_norm, the common case) completely unchanged -- this guard has zero effect
+        # whenever the instability it targets is not present.
+        raw_update_norm = float(metrics["update_norm"])
+        amplified = OrderedDict((name, t / (tau * lr)) for name, t in drift.items())
+        amplified_norm = float(
+            torch.sqrt(sum((t.float() ** 2).sum() for t in amplified.values()))
+        )
+        scale = min(1.0, raw_update_norm / (amplified_norm + 1e-12))
         new_local_c = OrderedDict(
-            (
-                name,
-                local_c[name]
-                - global_c[name]
-                + (params_before[name] - model.state_dict()[name]) / (tau * lr),
-            )
+            (name, local_c[name] - global_c[name] + amplified[name] * scale)
             for name in global_c
         )
+        metrics["scaffold_drift_clip_scale"] = scale
         context.state["scaffold_c_i"] = ArrayRecord(new_local_c)
         for name in global_c:
             delta = (new_local_c[name] - local_c[name]).numpy()
@@ -619,6 +731,22 @@ def train_handler(msg: Message, context: Context) -> Message:
 
 @client_app.evaluate()
 def evaluate_handler(msg: Message, context: Context) -> Message:
+    # Seeded for the same reason `train_handler` is -- the ClientApp actor's RNG is not the
+    # one `server_app.main()` seeded. Evaluation is `model.eval()` under `no_grad` with an
+    # unshuffled loader, so nothing here consumes RNG today; it is seeded anyway because
+    # "this path happens not to draw" is a property of the current transforms, not a
+    # guarantee, and the failure it would cause is silent non-reproducibility, not an error.
+    #
+    # The evaluate message carries no ConfigRecord at all -- Flower's own round summary
+    # prints "ConfigRecord (evaluate): (empty!)" -- so unlike the train path there is no
+    # `server_round` here and this seed is per (run seed, client), constant across rounds.
+    # Correct while the path draws nothing; if an RNG-consuming eval transform is ever
+    # added, the round has to be threaded in through `configure_evaluate` first.
+    eval_config = msg.content.config_records.get("config", ConfigRecord({}))
+    seed_everything(
+        _client_seed(context, eval_config, _partition_id(context)),
+        deterministic=bool(context.run_config.get("deterministic", True)),
+    )
     model = build_model_from_run_config(context.run_config)
     model.load_state_dict(msg.content["arrays"].to_torch_state_dict())
 
@@ -681,7 +809,55 @@ def merge_train_metrics(rounds_log: list[dict], strategy_result, round_offset: i
     from `rounds_log` is skipped rather than appended: `rounds_log` is the authoritative
     record of rounds that were actually evaluated and checkpointed.
     """
-    metrics = getattr(strategy_result, "train_metrics_clientapp", None)
+    _merge_clientapp_metrics(
+        rounds_log, strategy_result, "train_metrics_clientapp", "train_", round_offset
+    )
+
+
+def merge_evaluate_metrics(rounds_log: list[dict], strategy_result, round_offset: int = 0) -> None:
+    """Fold the per-round `aggregate_evaluate` MetricRecord into `rounds_log`, in place.
+
+    **This is the other half of `merge_train_metrics`, and it was missing.** `Result` carries
+    `evaluate_metrics_clientapp` alongside `train_metrics_clientapp` (verified against the
+    installed flwr==1.36.0 dataclass), and nothing read it -- so every client's
+    `evaluate_handler` ran a forward pass over its local-val split, every round, and the
+    result went to Flower's console and nowhere else.
+
+    Two costs, and the second is the one that mattered.
+
+    Wasted compute is the small one: a per-client forward pass per round across the ~1,700
+    cells this project plans.
+
+    The real cost is that it made a bug undetectable. On Kaggle every client's evaluation
+    failed -- the model was on CPU while the batches were on the GPU -- and Flower's summary
+    printed `Aggregated ClientApp-side Evaluate Metrics: {}`. The run still wrote a result
+    marked `completed`, and that result looked *identical* to a healthy one, because these
+    fields were never in it. Three GPU sessions went past before anyone read the console
+    line. A field that is absent cannot be checked; one that is recorded and empty can.
+
+    It also loses a capability the code went out of its way to build.
+    `per_class_confusion_counts` is additive across clients precisely so a correct pooled
+    macro-F1 can be recomputed under label skew -- the plan flags naive averaging of
+    per-client macro-F1 as wrong, and R1/R2's whole point is behaviour under skew. Those
+    counts were computed per client per round and thrown away.
+
+    Prefixed `client_eval_` rather than `eval_`: the entries already carry server-side
+    `test_*` and `val_*` from `build_evaluate_fn`, and these are a different measurement --
+    each client's own held-out split, not the server's pooled one. Naming them so the
+    difference is visible in the result file is the point.
+    """
+    _merge_clientapp_metrics(
+        rounds_log, strategy_result, "evaluate_metrics_clientapp", "client_eval_", round_offset
+    )
+
+
+def _merge_clientapp_metrics(
+    rounds_log: list[dict], strategy_result, attribute: str, prefix: str, round_offset: int
+) -> None:
+    """Shared body. One implementation so the train and evaluate halves cannot drift in how
+    they map rounds -- the offset arithmetic on a resumed run is the fiddly part, and having
+    it twice is how one of them ends up off by one."""
+    metrics = getattr(strategy_result, attribute, None)
     if not metrics:
         return
     by_round = {entry["round"]: entry for entry in rounds_log}
@@ -690,7 +866,7 @@ def merge_train_metrics(rounds_log: list[dict], strategy_result, round_offset: i
         if entry is None:
             continue
         for key, value in dict(record).items():
-            entry[f"train_{key}"] = value
+            entry[f"{prefix}{key}"] = value
 
 
 def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offset: int):
@@ -762,6 +938,40 @@ def build_evaluate_fn(run_config: RunConfig, rounds_log: list[dict], round_offse
     return evaluate_fn
 
 
+def partition_stats_for_result(run_config: RunConfig) -> dict | None:
+    """The measured heterogeneity of this run's partition, for the result JSON.
+
+    `write_result` has had a `partition_stats` parameter since the Phase 6 schema was
+    written and **nothing ever passed it**, so the field was `None` in every result file
+    ever produced. That silently removed plan §9.2's figure 9 -- gain against measured
+    Jensen-Shannon divergence, the scatter meant to show the gain growing with real
+    heterogeneity -- because the x-axis had no source. `alpha=0.3` in the config is the
+    dirichlet *parameter*, not the skew that particular draw actually produced.
+
+    Reading it here is cheap: the partition is content-addressed by `spec.key()` and the
+    clients have already built it, so this is a cache hit. `class_matrix` is deliberately
+    left out -- it is K x num_classes per run and the partition figures rebuild partitions
+    directly rather than reading results.
+    """
+    try:
+        manifest_path = str(_repo_path(str(run_config.get("manifest-path", str(MANIFEST_CSV)))))
+        num_clients = int(run_config.get("num-clients", 20))
+        spec = partition_spec_from_run_config(run_config, num_clients)
+        cache_dir = _repo_path(str(run_config.get("partition-cache-dir", "data/processed/partitions")))
+        partition = load_or_build(load_manifest(manifest_path), spec, cache_dir)
+    except Exception as exc:  # pragma: no cover - diagnostics must never fail a run
+        # A run that completed is worth writing even if its heterogeneity cannot be
+        # described. Losing the whole result to a diagnostics error would be a far worse
+        # trade than a null field, which is what this function exists to stop being the
+        # default.
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+    diagnostics = dict(partition.diagnostics or {})
+    diagnostics.pop("class_matrix", None)
+    diagnostics.pop("classes", None)
+    return diagnostics or None
+
+
 @server_app.main()
 def main(grid: Grid, context: Context) -> None:
     run_config = context.run_config
@@ -770,8 +980,8 @@ def main(grid: Grid, context: Context) -> None:
     seed_everything(seed, deterministic=deterministic)
 
     strategy_name = str(run_config.get("strategy-name", "fedavg")).lower()
-    resolved_config = {"run_config": dict(run_config), "strategy": strategy_name, "seed": seed}
-    run_id = make_run_id(resolved_config, seed)
+    resolved = resolved_config(run_config, strategy_name, seed)
+    run_id = make_run_id(resolved, seed)
     run_config = {**run_config, "_run_id": run_id}  # threaded through to build_evaluate_fn
 
     num_rounds = int(run_config.get("num-rounds", 2))
@@ -831,10 +1041,12 @@ def main(grid: Grid, context: Context) -> None:
     )
     wall_clock_s = time.time() - t_start
     merge_train_metrics(rounds_log, strategy_result, round_offset)
+    merge_evaluate_metrics(rounds_log, strategy_result, round_offset)
 
     write_result(
         output_dir / f"{run_id}.json",
-        config=resolved_config,
+        config=resolved,
+        partition_stats=partition_stats_for_result(run_config),
         rounds=rounds_log,
         final={
             "wall_clock_s": wall_clock_s,
@@ -872,6 +1084,7 @@ __all__ = [
     "train_handler",
     "evaluate_handler",
     "build_evaluate_fn",
+    "merge_evaluate_metrics",
     "merge_train_metrics",
     "global_test_loader",
     "global_val_loader",

@@ -1,0 +1,67 @@
+# Phase 7, A2 -- pheromone persistence, trimmed to the 9-day budget.
+#
+# `ablation_a2.yaml` is 60 cells (3 modes x 4 partitions x 5 seeds) at K=20 / 2 local
+# epochs. This is 30 cells / ~6 GPU-h.
+#
+# WHY THIS ONE SURVIVED THE CUT while A4-A8 did not. A2 asks whether cross-round
+# stigmergy helps at all: if `decayed` and `full` do not beat `none`, the "adaptive" in
+# FedSwarm is decorative and the paper has to say so. Under plan §12's reframe -- the
+# one three local A1 screens now point at -- cross-round pheromone memory is no longer
+# an ablation of a working method, it is the *contribution*, because it is the thing
+# equal-budget random search structurally cannot provide. A4-A8 tune a colony; A2 asks
+# whether the colony remembers. Only the second question survives losing claim C2.
+#
+# TWO CUTS:
+#
+# 1. Four partitions -> two: `dirichlet_0.3` and `dirichlet_0.1`. Cross-round memory
+#    should matter where client quality is both heterogeneous and stable across rounds,
+#    and these are the two regimes main_reduced also runs, so the comparison lines up.
+#    Dropped: `iid` (little to remember -- but it is also the cheapest control to add
+#    back, and the one that would show memory *hurting*) and `quantity_skew`.
+#
+# 2. K=20 -> 10 and 2 local epochs -> 1, matching main_reduced.yaml.
+#
+# ALL THREE MODES ARE KEPT. `decayed` is pyproject's default, so main_reduced's fedaco
+# cells already run it -- but they land in `results/fl/main` and this sweep's table reads
+# `results/fl/ablation`, so dropping the `decayed` arm here would leave the ablation with
+# two arms and no middle, and `make tables-ablation` would not see the third. 10 cells is
+# a cheap price for the table being readable on its own.
+#
+# Cost: 3 x 2 x 5 = 30 cells x 100 rounds = 3,000 rounds, ~6 GPU-h at 7.5s/round.
+#
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a2_reduced.yaml
+
+base_overrides:
+  output-dir: results/fl/ablation
+  num-clients: 10
+  local-epochs: 1
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  strategy-name: fedaco
+
+strategies:
+  - name: none
+    overrides: {aco-persistence: none}
+  - name: decayed
+    overrides: {aco-persistence: decayed}
+  - name: full
+    overrides: {aco-persistence: full}
+
+partitions:
+  - name: dirichlet_0.3
+    file: configs/data/dirichlet_0.3.yaml
+  - name: dirichlet_0.1
+    file: configs/data/dirichlet_0.1.yaml
+
+seeds: [0, 1, 2, 3, 4]

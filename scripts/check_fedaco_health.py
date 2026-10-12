@@ -73,6 +73,12 @@ from fedswarm.utils.runner import load_result_files
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+# A run smaller than this cannot certify a 100-round K=20 sweep. Deliberately well below the
+# real sweep shape -- the point is to exclude smoke and fixture runs, not to demand a rerun of
+# the thing being gated.
+MIN_ROUNDS_TO_CERTIFY = 15
+MIN_CLIENTS_TO_CERTIFY = 10
+
 # How close to log(L) counts as "uniform". Entropy is a log-scale quantity and the top of
 # its range is flat, so a small absolute gap is a large behavioural one: at L=11, 2% below
 # maximum still leaves tau nearly flat across levels. This threshold is a judgement call,
@@ -146,10 +152,39 @@ def check_colony_searching(result: dict, num_levels: int, flat_fraction: float) 
     best = _best_case(result, len(gaps), num_levels)
     best_mean = statistics.fmean(best) if best else 0.0
 
+    # A non-positive best case is not a colony verdict, it is the absence of one, and
+    # reporting it as INERT is worse than reporting nothing. `best_case_gaps` scales the
+    # deposit by the run's mean `best_fitness`, and raising `aco-gamma-entropy` to 0.6 to
+    # close the corner drove that mean negative -- so the "best case" came out at -0.000002
+    # and `mean_gap / best_mean` printed **-315130%** of the budget, which then fell below
+    # the INERT threshold and was announced as "pheromone is carrying essentially no
+    # signal". The colony had not been measured at all; the denominator had changed sign.
+    #
+    # The real content of a non-positive mean fitness belongs to check 2: the MAX-MIN rule
+    # deposits `rho * Q * max(F, 0)`, so a negative fitness deposits nothing by design. That
+    # is a fitness problem, and check 1 cannot see it.
+    if best_mean <= 0:
+        return {
+            "question": "Is the colony searching?",
+            "verdict": "NO DATA",
+            "detail": (
+                f"cannot be answered: this run's mean `best_fitness` is non-positive, so the "
+                f"best-case concentration the deposit rule permits is {best_mean:.2%} -- zero "
+                "or less. The MAX-MIN deposit is `rho * Q * max(F, 0)`, so a colony given a "
+                "negative fitness deposits nothing however well it searches, and tau cannot "
+                "move. Read check 2, not this one: the question is why the fitness is "
+                "negative, not whether the colony is trying."
+            ),
+            "entropy_ceiling": ceiling,
+            "entropy_per_round": entropies,
+            "mean_gap_fraction": mean_gap,
+            "best_case_gap_fraction": best_mean,
+        }
+
     # `realized` is what the colony did as a fraction of what the budget allowed;
     # `required` is what it would have had to do to clear the absolute threshold.
-    realized = mean_gap / best_mean if best_mean else 0.0
-    required = flat_fraction / best_mean if best_mean else float("inf")
+    realized = mean_gap / best_mean
+    required = flat_fraction / best_mean
     budget_note = (
         f" Best case at this budget averages {best_mean:.2%}, so the colony realized "
         f"{realized:.0%} of the concentration available to it and would have needed "
@@ -237,26 +272,58 @@ def check_deposit_floor(result: dict) -> dict:
     scale_note = (
         f" delta_mean_sq_norm ranged {min(scales):.4f}–{max(scales):.4f}." if scales else ""
     )
+
+    # F at the REFERENCE point, which decides whether the fitness is a usable objective at
+    # all -- and which was logged as `fedavg_fitness` from the start while nothing read it.
+    # The first gate run's numbers: mean -0.0005, negative in 7 of 15 rounds, at the DEFAULT
+    # gamma_entropy. The aggregation FedACO exists to improve on scores zero, so a colony
+    # beating it by +0.16 is beating noise -- and every attempt to fix the corner by raising
+    # the penalty pushes this further below zero until nothing deposits at all. Reported here
+    # because "the objective does not rank the reference point above zero" is a different and
+    # prior failure to "some rounds did not deposit"; the second is a symptom of the first.
+    reference = _round_metric(result, "fedavg_fitness")
+    reference_note = ""
+    if reference:
+        ref_mean = statistics.fmean(reference)
+        ref_negative = sum(1 for f in reference if f <= 0.0)
+        reference_note = (
+            f" F at the FedAvg point itself averaged {ref_mean:+.4f} and was <= 0 in "
+            f"{ref_negative}/{len(reference)} rounds."
+        )
+        if ref_negative > len(reference) / 3:
+            reference_note += (
+                " **This is the prior problem.** The objective does not rank the aggregation"
+                " this method exists to improve on above zero, so the colony's margin over it"
+                " is a margin over noise -- and raising `aco-gamma-entropy` to close the"
+                " corner pushes it further down until nothing deposits. Use"
+                " `aco-dispersion-reference=aggregate`, which measures"
+                " ||Delta(alpha) - Delta_rob||^2 -- how far the AGGREGATE lands from the"
+                " robust consensus. Averaging cancels per-client noise, so an interior point"
+                " is genuinely closer than any single client rather than merely less"
+                " penalized. Not `base`: that one is exactly LINEAR in alpha, so it has no"
+                " interior optimum and a vertex on the nearest client is cheaper than any"
+                " mix."
+            )
     if not negative:
         verdict = "CLEAR"
         detail = (
             f"best_fitness stayed positive every round "
             f"({min(fitness):.4f}–{max(fitness):.4f}), so every round deposited."
-            + scale_note
+            + scale_note + reference_note
         )
     elif len(negative) == len(fitness):
         verdict = "ENGAGED"
         detail = (
             f"best_fitness was <= 0 in all {len(fitness)} rounds "
             f"({min(fitness):.4f}–{max(fitness):.4f}): every deposit was zeroed by the "
-            "max(F, 0) floor, which fully explains an INERT verdict above." + scale_note
+            "max(F, 0) floor, which fully explains an INERT verdict above." + scale_note + reference_note
         )
     else:
         verdict = "PARTIAL"
         detail = (
             f"best_fitness was <= 0 in {len(negative)} of {len(fitness)} rounds "
             f"(rounds {negative[:8]}{'...' if len(negative) > 8 else ''}); those rounds "
-            "deposited nothing." + scale_note
+            "deposited nothing." + scale_note + reference_note
         )
     return {
         "question": "Has the deposit floor engaged?",
@@ -278,6 +345,30 @@ def check_degenerate_optimum(result: dict) -> dict:
     margins = _round_metric(result, "corner_margin")
     alpha_max = _round_metric(result, "alpha_max")
     num_clients = result.get("config", {}).get("run_config", {}).get("num-clients", "?")
+
+    # The value that would have fixed it, taken from the run itself. The max across rounds,
+    # not the mean: gamma_entropy is set once for the whole run, so a value that clears the
+    # average round still leaves the worst rounds degenerate. Finite values only -- `inf`
+    # means a round whose base weights were a single client, which no real partition
+    # produces and which would otherwise swallow the max.
+    required = [g for g in _round_metric(result, "required_gamma_entropy") if g != float("inf")]
+    current = result.get("config", {}).get("run_config", {}).get("aco-gamma-entropy")
+    if required:
+        worst = max(required)
+        fix = (
+            f" **Set `aco-gamma-entropy` to at least {worst:.3f}** (currently "
+            f"{current if current is not None else 'default 0.1'}); that is the largest "
+            f"zero-crossing over {len(required)} rounds, computed in closed form from each "
+            f"round's own Gram matrix. Add headroom -- landing on the crossing leaves the "
+            f"corner tied, not beaten -- and re-run this gate to confirm, because the value "
+            f"moves with K and the partition."
+        )
+    else:
+        fix = (
+            " This result has no `required_gamma_entropy` (it predates 2026-09-19), so the "
+            "value needed is not recorded. Re-run one round to get it; it is a closed form "
+            "over the Gram matrix already computed, and costs nothing."
+        )
 
     if not margins:
         return {
@@ -301,8 +392,7 @@ def check_degenerate_optimum(result: dict) -> dict:
             f"{len(margins)} rounds (mean margin {mean_margin:+.4f}) at K={num_clients}. "
             "The fitness is asking for 'use one client, discard the rest', so a colony "
             "that finds it is working correctly toward a useless answer -- and nothing "
-            "else in this report can tell the two apart. Raise `aco-gamma-entropy` until "
-            "the margin is negative, or run at a larger K." + concentration
+            "else in this report can tell the two apart." + fix + concentration
         )
     elif mean_margin > -0.02:
         verdict = "MARGINAL"
@@ -310,7 +400,7 @@ def check_degenerate_optimum(result: dict) -> dict:
             f"the corner lost, but only just (mean margin {mean_margin:+.4f} at "
             f"K={num_clients}, positive in {positive}/{len(margins)} rounds). A different "
             "partition or a noisier round could flip it, so this is not a comfortable "
-            "pass." + concentration
+            "pass." + fix + concentration
         )
     else:
         verdict = "CLEAR"
@@ -325,6 +415,7 @@ def check_degenerate_optimum(result: dict) -> dict:
         "detail": detail,
         "mean_corner_margin": mean_margin,
         "degenerate_round_fraction": rate,
+        "required_gamma_entropy": max(required) if required else None,
     }
 
 
@@ -334,7 +425,14 @@ def check_beats_fedavg(fedaco: dict, fedavg: dict | None) -> dict:
     aco_score = fedaco.get("final", {}).get("final_test_macro_f1")
 
     if fedavg is None:
-        detail = "no FedAvg run found to compare against -- run one with the same seed and partition."
+        detail = (
+            "no FedAvg run found to compare against -- run one with the same seed and "
+            "partition. If you believe you did run one, the listing under `strategies "
+            "present` above says what is actually on disk: the first GPU gate reported "
+            "this while a FedAvg run was visibly starting in the same cell, and the log "
+            "alone could not distinguish 'still running' from 'wrote a file this check "
+            "cannot match'."
+        )
         verdict = "NO BASELINE"
         margin = None
     else:
@@ -394,7 +492,24 @@ def main() -> int:
         help="fraction below max entropy that counts as uniform tau (default 0.02)",
     )
     parser.add_argument("--out", default=None, help="optional path to write the report JSON")
-    parser.add_argument("--strict", action="store_true", help="exit nonzero unless the colony is SEARCHING")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help=(
+            "exit nonzero unless the colony is SEARCHING and the fitness optimum is not "
+            "DEGENERATE -- for gating a later, expensive step on this check passing"
+        ),
+    )
+    parser.add_argument(
+        "--require-sound",
+        action="store_true",
+        help=(
+            "exit nonzero unless the mechanism is affirmatively SOUND: check 1 SEARCHING, "
+            "check 3 CLEAR, and the run long enough and large enough to stand in for a "
+            "100-round K=20 sweep. Stricter than --strict, which only blocks on a fatal "
+            "verdict. Use this before spending GPU hours on ablations of colony internals"
+        ),
+    )
     args = parser.parse_args()
 
     results_dir = Path(args.results_dir)
@@ -408,14 +523,46 @@ def main() -> int:
         print("Run one first -- see `make validate-fedaco` or notebooks/colab_fl_smoke.ipynb.")
         return 2
 
-    fedaco = max(fedaco_runs, key=lambda r: r.get("final", {}).get("num_rounds_completed", 0))
-    fedavg = (
-        max(fedavg_runs, key=lambda r: r.get("final", {}).get("num_rounds_completed", 0))
-        if fedavg_runs
-        else None
-    )
+    def _most_relevant(runs: list[dict]) -> dict:
+        """Longest run, then most recent. The tiebreak is not cosmetic.
+
+        Changing `aco-gamma-entropy` changes the config hash, so a re-run at a new value
+        writes a NEW file beside the old one -- both completed, both 15 rounds. `max` returns
+        the first maximal element, so without a tiebreak this check could read the previous
+        attempt and report the old verdict against the new setting. That is the exact shape
+        of mistake that costs a GPU session: you change the value, re-run, and the report
+        tells you nothing changed.
+        """
+        return max(
+            runs,
+            key=lambda r: (
+                r.get("final", {}).get("num_rounds_completed", 0),
+                Path(r["_path"]).stat().st_mtime,
+            ),
+        )
+
+    fedaco = _most_relevant(fedaco_runs)
+    fedavg = _most_relevant(fedavg_runs) if fedavg_runs else None
 
     print(f"FedACO health check\n  run: {fedaco['_path']}")
+    # Named explicitly because check 4's "NO BASELINE" is ambiguous on its own -- it cannot
+    # tell a FedAvg run that has not finished from one whose result file this check failed to
+    # match. Reading the directory once here settles it in the output instead of in the next
+    # GPU session.
+    everything = load_results(results_dir)
+    present = sorted({str(r["config"].get("strategy", "?")) for r in everything})
+    print(f"  strategies present in {results_dir}: {', '.join(present) or 'none'}"
+          f" ({len(everything)} result file(s) with per-round records)")
+    # Printed because this is the knob being tuned between attempts, and a report that does
+    # not name the value it was produced at cannot be told apart from a stale one.
+    reported_run_config = fedaco.get("config", {}).get("run_config", {})
+    reported_gamma = reported_run_config.get("aco-gamma-entropy")
+    # `aco-dispersion-reference` belongs here for the same reason gamma does, and its absence
+    # cost a round trip: a run was made to test it and the report named neither the setting
+    # nor anything that identified which of the three shapes had actually been used.
+    reported_ref = reported_run_config.get("aco-dispersion-reference")
+    print(f"  aco-gamma-entropy of the run above: {reported_gamma if reported_gamma is not None else 'unset (default 0.1)'}")
+    print(f"  aco-dispersion-reference: {reported_ref if reported_ref is not None else 'unset (default weighted_mean)'}")
     if fedavg:
         print(f"  baseline: {fedavg['_path']}")
     print(f"  timing: {wall_clock_note(fedaco)}\n")
@@ -438,7 +585,8 @@ def main() -> int:
             "that searches well will find 'use one client and discard the rest', and every\n"
             "other signal in this report -- fallback rate, best vs FedAvg fitness, a\n"
             "confident alpha -- will read as success while it does. Fix that first; the\n"
-            "other three questions are not meaningful until it is negative.\n"
+            "other three questions are not meaningful until it is negative. Check 3 above "
+            "names the gamma_entropy that closes it.\n"
         )
     if verdict == "UNDERPOWERED":
         print(
@@ -467,7 +615,86 @@ def main() -> int:
         out_path.write_text(json.dumps({"run": fedaco["_path"], "checks": checks}, indent=2))
         print(f"\nWrote {out_path}")
 
-    return 1 if (args.strict and not searching) else 0
+    # What --strict blocks on, and what it deliberately does not.
+    #
+    # DEGENERATE blocks. A1 costs 80 cells to ask "does the colony beat random search at
+    # equal budget", and its four controls optimize the SAME fitness -- so on a degenerate
+    # landscape they inherit the same useless optimum and a tie says nothing about ACO.
+    #
+    # UNDERPOWERED does NOT block, and getting this wrong would be worse than not having the
+    # flag. It does not mean the colony failed; it means THIS RUN CANNOT TELL, because the
+    # gate is 15 rounds by design and tau has not had time to leave uniform by a margin the
+    # threshold can see. Blocking on it would leave a caller who has just fixed the corner
+    # still refused, with the only remedy being to lengthen a gate whose whole purpose is to
+    # be short -- and A1 itself runs at 100 rounds, where the question is answerable.
+    # Inconclusive is not failure, and a gate that cannot say so is a gate nobody can pass.
+    #
+    # INERT and DEGRADING do block: those are real negative verdicts about the mechanism.
+    inconclusive = {"UNDERPOWERED", "NO DATA"}
+    colony_verdict = checks[0]["verdict"]
+    colony_blocks = not searching and colony_verdict not in inconclusive
+    degenerate = checks[2]["verdict"] == "DEGENERATE"
+    if args.strict and colony_verdict in inconclusive and not degenerate:
+        print(
+            f"\n--strict: check 1 is {colony_verdict}, which is inconclusive rather than a\n"
+            "failure -- this gate is too short to answer it, and A1 runs at 100 rounds where\n"
+            "it is answerable. Not treating it as a blocker. Check 3 is what --strict gates on."
+        )
+    if args.strict and (colony_blocks or degenerate):
+        return 1
+
+    # `--require-sound` answers a DIFFERENT question from `--strict`, and conflating them was a
+    # real fault. `--strict` asks "is anything here fatal?", which is what person B's 15-round
+    # gate needs: UNDERPOWERED must not block it, or a caller who has just fixed the corner is
+    # still refused with no remedy but to lengthen a gate whose whole purpose is to be short.
+    #
+    # `--require-sound` asks "is the mechanism sound enough to ablate?", which is what person
+    # C's notebook needs before spending 515 cells and 107-215 GPU-hours on A2/A4-A8: those
+    # sweeps measure colony internals, so on a colony that is not searching every arm collapses
+    # toward the same behaviour and the ablation measures noise rather than the term it names.
+    #
+    # Reading `--strict`'s exit 0 as "sound" is how a 6-round K=6 toy run on a synthetic fixture
+    # certifies the mechanism: checks 2 and 3 come back CLEAR because a small K makes the
+    # entropy penalty relatively stronger, check 1 is inconclusive and does not block, and the
+    # caller unlocks the sweeps. "Not proven degenerate" is not "sound".
+    if args.require_sound:
+        blockers = []
+        if colony_verdict != "SEARCHING":
+            blockers.append(
+                f"check 1 is {colony_verdict}, not SEARCHING -- ablating the colony's own "
+                "machinery needs evidence the colony searches at all"
+            )
+        if checks[2]["verdict"] != "CLEAR":
+            blockers.append(f"check 3 is {checks[2]['verdict']}, not CLEAR")
+
+        # A run far smaller than the sweeps it is certifying cannot stand in for them.
+        rounds = len([r for r in fedaco.get("rounds", []) if r.get("train_best_fitness") is not None])
+        clients = int((fedaco.get("config") or {}).get("run_config", {}).get("num-clients", 0))
+        if rounds < MIN_ROUNDS_TO_CERTIFY:
+            blockers.append(
+                f"the run judged is {rounds} rounds; at least {MIN_ROUNDS_TO_CERTIFY} are "
+                "needed before it stands in for a 100-round sweep"
+            )
+        if clients and clients < MIN_CLIENTS_TO_CERTIFY:
+            blockers.append(
+                f"the run judged is K={clients}; the sweeps being gated run K=20, and a small "
+                "K makes the concentration penalty relatively stronger, so check 3 passing "
+                "here says little about them"
+            )
+
+        if blockers:
+            print("\n--require-sound: REFUSING to certify the mechanism.")
+            for blocker in blockers:
+                print(f"  - {blocker}")
+            print(
+                "\nThis is not a verdict that the method is broken; it is a refusal to call it "
+                "sound\non this evidence. Run the gate at full length on the real dataset first."
+            )
+            return 1
+        print("\n--require-sound: mechanism certified -- check 1 SEARCHING, check 3 CLEAR, "
+              f"on a {rounds}-round K={clients} run.")
+
+    return 0
 
 
 if __name__ == "__main__":

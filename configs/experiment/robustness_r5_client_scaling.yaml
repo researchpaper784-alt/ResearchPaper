@@ -3,9 +3,14 @@
 # (a denser K sweep purpose-built for fitting/plotting the K^2 curve, plan §9.2's
 # figure 5); this file uses the plan's own R5 values for the robustness-suite table.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness_r5_client_scaling.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/robustness_r5_client_scaling.yaml
 
 base_overrides:
+  # Where results land. Without this the run falls through to pyproject's `output-dir`
+  # (`results/fl`), where `make tables-robustness` does not look -- so a finished sweep would
+  # produce an empty table, and every granular sweep would share one directory. Added
+  # 2026-09-24; the three aggregate configs (main/robustness/ablation_all) already did this.
+  output-dir: results/fl/robustness
   min-client-size: 5
   fraction-train: 1.0
   min-evaluate-nodes: 2

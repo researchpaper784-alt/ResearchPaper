@@ -1531,3 +1531,1587 @@ Down from 2,576 with both families at 8 seeds. Run both targets in each family -
 longer overlap.
 
 440 tests pass, ruff clean.
+
+## 2026-09-19 (later) -- the Kaggle sweep notebook, and 33 Makefile paths that never worked there
+
+Built `notebooks/kaggle_main_sweep.ipynb` for person B's workstream, and found while testing
+its commands that **every `make` target was unusable on Kaggle or Colab.** The Makefile
+hardcoded `.venv/bin/python` in 29 places and `.venv/bin/flwr` in 4; notebook runtimes install
+into the system Python and have no `.venv` at all, so `make validate-fedaco` would have failed
+instantly with "No such file or directory" -- on the exact machine the gate has to run on.
+
+Now `PY ?= .venv/bin/python` / `FLWR ?= .venv/bin/flwr`, overridable:
+`make validate-fedaco PY=python FLWR=flwr`. Default behaviour locally is unchanged (verified).
+
+### The notebook runs the plan's gates before the sweep, deliberately
+
+Plan §11 puts A1 at week 5 as a go/no-go on claim C2, before the main sweep in weeks 7-8, and
+the risk register rates "ACO ties equal-budget random search" Medium-High / fatal. The
+notebook therefore runs, in order: the 20-minute mechanism check (`validate-fedaco` + `health`),
+then A1's 80 cells, and only then the 576-cell sweep -- with both gates marked as stop points.
+Ordering them the other way would spend the larger budget on a question the paper might no
+longer be able to ask.
+
+It is also built for a multi-session run, because 57,600 rounds does not fit Kaggle's ~9h GPU
+cap: results are restored from the previous version's output at the top, the sweep skips
+completed cells, and the last section says what to save and how to resume. No Kaggle API
+credentials are needed -- the dataset mounts from the sidebar.
+
+Two build errors of my own worth recording, both caught by `ruff` rather than by reading:
+nbformat needs each `source` line to keep its trailing newline (splitting without them
+concatenated the whole notebook into one 3,000-character syntax error), and a multi-line
+`!python -c "..."` cell does not parse as either shell or Python -- it is now a plain Python
+cell.
+
+440 tests pass, ruff clean repo-wide.
+
+## 2026-09-19 (later) -- the plan is in the repository, and it immediately found a deviation
+
+`docs/IMPLEMENTATION_PLAN.md`. It existed from the start and was never committed, which
+had two concrete costs: Phase 7's A2 and A4-A8 were recorded as "not reconstructable from
+what the repo names" and left unbuilt for days, and the level set diverged from §14's
+explicit hyperparameter table with nothing to catch it.
+
+Reading §14 against `aco/schedules.level_set` took about a minute and found the second.
+The plan specifies `linspace(0, 2.5, 11)`; the code shipped log-spaced -- **1143x max ratio
+between positive levels against linear's 10x, and nine of eleven levels below the FedAvg
+point instead of four.**
+
+`level_spacing` is now selectable and defaults to "linear". "log" is kept, because every
+result before today used it and A6 owns L; A6 gains a `levels_log_spaced` cell so the
+switch is measured rather than assumed. All 440 tests passed unchanged under the new
+default, which says the suite never pinned the old grid -- the deviation was invisible to
+it as well.
+
+**This partially qualifies the 2026-09-18 degenerate-optimum entry.** The observed
+alpha = [0.990, 0.010] was the colony finding the fitness's single-client optimum, and
+`corner_margin` measures the fitness itself, so that part stands. But how *reachable* the
+corner was is a property of the level grid, and the grid was not the plan's. The synthetic
+sweeps and the K=10 rehearsal both ran on the log grid. Whether the margin stays positive
+under linear spacing on real deltas is now open, and recorded as such.
+
+Two amendments to the plan itself, recorded rather than silently followed: §9.1's Wilcoxon
++ Holm at the stated 5 seeds cannot return a significant result at any data (floor 0.0625),
+which is why main.yaml runs 8; and §0.3's naming collision was resolved by renaming to
+FedSwarm.
+
+440 tests pass, ruff clean.
+
+## 2026-09-19 (later still) -- the LaTeX tables are wired
+
+Plan §9.3's deliverable: `paper/tables/*.tex`, booktabs, best-in-bold, significance
+markers. The capability already existed in `src/fedswarm/tables.py` and was reachable from
+nothing -- the Makefile's three table targets all call `scripts/make_tables.py`, which
+emitted `.md` and `.csv` only.
+
+`make_tables.py` now emits `.tex` alongside them, from the *same* rows, rendering through
+`fedswarm.tables.main_results_table` rather than a second LaTeX emitter. The plan's
+instruction is "never hand-type a number into the paper"; two formatters drifting apart is
+the same failure one step later. All three targets (`tables`, `tables-ablation`,
+`tables-robustness`) pick it up with no Makefile change.
+
+Ablation tables are labelled by *variant* rather than strategy -- every row of an ablation
+sweep is FedACO, so labelling by strategy prints a column of identical "fedaco" rows and
+loses the thing being ablated.
+
+One adapter detail worth not "fixing" later: `main_results_table`'s `method=` parameter is
+"the row that gets no marker". Its own convention marks the baselines ("fedaco vs. this
+baseline"); ours marks the method ("this row differs significantly from fedavg"), which is
+what our caption states and what `rows` carries. So the row left unmarked is the
+baseline's, and passing `baseline` into `method=` looks inverted and is not. Commented at
+the call site.
+
+### §9.3's acceptance criterion is now a test
+
+> *"Deleting `paper/figures/` and `paper/tables/` and re-running restores them
+> byte-for-byte identical."*
+
+`test_regenerating_the_table_is_byte_for_byte_identical` checks exactly that. A timestamp,
+a dict iteration order or a set ordering anywhere in the path would break it, and the
+breakage would surface only as noise in the paper's diff. Verified by hand too: identical
+md5 across a delete-and-regenerate.
+
+Also pinned: markers appear at 8 seeds (p=0.008 earns `**`) and are absent at 5 (floor
+0.0625 earns nothing). A table that marked both would assert significance the test never
+found.
+
+One of my own test expectations was wrong and is worth recording: I asserted the escaped
+string `no\_safety\_fallback` would appear, but `_variant_of` names that variant
+`no-fallback` with a hyphen, so there was no underscore to escape. The output was correct
+and the test was not. It now asserts escaping on `dirichlet_0.3`, which does carry one.
+
+446 tests pass, ruff clean.
+
+## 2026-09-19 (later still) -- the num_supernodes bug, a third time, in B's scaling sweeps
+
+Found while rehearsing person B's remaining commands rather than by reading code.
+`scripts/run_sweep_granular.py` never set `num_supernodes` at all -- and unlike `main.yaml`,
+the configs it drives **vary `num-clients` across cells**: `overhead.yaml` sweeps K = 5, 10,
+20, 50, 100, 150, 200; `main_client_scale.yaml` 10 -> 50; `robustness_r5` likewise.
+
+`num_supernodes` is a *federation* setting. No `--run-config` key can carry it, and it
+defaults to 2. So every cell above K=2 would have either hung at round 0 forever
+(`min-train-nodes` above the supernode count) or silently trained 2 clients while recording
+100.
+
+**The second failure mode is the dangerous one here, and it is specific to which sweeps
+these are.** `overhead.yaml` and `main_client_scale.yaml` exist to produce the measured
+ACO-time-vs-K curve that plan §1.3's claim C3 rests on -- "a measured curve matching K^2 is
+far more convincing than a complexity assertion" (§8, R5). Measured at a fixed 2 supernodes
+while labelling cells K=5..200, that curve comes out **flat**. A flat curve reads as
+evidence *for* the overhead being negligible. The bug would have manufactured support for
+the claim it was meant to test.
+
+This is the third time this project has been bitten by `num_supernodes`: once in the
+strategy path (2026-09-17, retracting a CPU-oversubscription diagnosis), once in the Colab
+notebook (2026-09-18, still live after the first fix was called propagated), and now in the
+granular runner.
+
+### The fix, and the proof
+
+`fedswarm.sweep.run_sweep` now resolves each cell's `num-clients` against pyproject's
+defaults and reconfigures the federation when the value changes -- only when it changes, so
+`main.yaml`'s 576 constant-K cells cost one subprocess call, not 576. A failed
+reconfiguration refuses the cell (`status: failed_federation_config`) rather than running
+it, because both failure modes are worse than stopping.
+
+Verified live, not just by unit test: the federation was deliberately pre-set to 2
+supernodes, then a two-cell sweep at K=2 and K=6 was run against the synthetic dataset.
+
+    num-clients=2   completed   clients that actually trained: 2  ids=[1, 0]
+    num-clients=6   completed   clients that actually trained: 6  ids=[1, 2, 3, 0, 4, 5]
+
+`train_participating_client_ids` matches the recorded `num-clients` in both. Before the fix
+the K=6 cell hangs at round 0 indefinitely.
+
+453 tests pass, ruff clean.
+
+## 2026-09-19 (later still) -- the first GPU run: two bugs only a GPU could show, and the gate's verdict
+
+Person B ran GATE 1 on a Kaggle T4. FedACO, K=10, 15 rounds, dirichlet alpha=0.3, seed 0.
+It completed and wrote `results/fl/f89d6200b0_0.json`. Three things came out of it.
+
+### Bug 1: evaluation ran the model on CPU while the batches were on the GPU
+
+`eval/evaluator.evaluate` took a `device`, moved the batches onto it, and left the weights
+wherever they were. Every other call site compensated -- `local_train`, `build_evaluate_fn`,
+`ServerValFitness`, `run_experiment` all call `.to(device)` themselves -- and
+`fl/app.py::evaluate_handler` did not. On CPU both halves are the same device, so 457 tests
+and every CPU run this project has ever done passed. On the T4:
+
+    RuntimeError: Input type (torch.cuda.FloatTensor) and weight type
+                  (torch.FloatTensor) should be the same
+
+**The run did not fail.** Only the client-side federated evaluation did, once per client
+per round, and the ServerApp's own centralized evaluation is a different code path that was
+already correct. So the result file was written, marked `completed`, with
+
+    Aggregated ClientApp-side Evaluate Metrics: {}
+
+A silently empty metric block, in a file that otherwise looks finished, across 678 cells.
+Fixed in `evaluate` itself rather than at the call site, so the contract is whole: a
+function handed a device now moves both halves onto it.
+
+### Bug 2: the server never told clients which round it was, so R4's DP noise never changed
+
+The first run's train metrics carried `server_round = -1` in every round -- line 549's
+default, meaning the key was absent. The ServerApp builds `train_config` once, before round
+1, and nothing put a round number in it. Scaffold wrote one, spelled `server-round`, which
+no reader uses.
+
+The cost is R4's. The Gaussian mechanism seeds its noise with
+`seed*104729 + partition*1000003 + server_round`. With that term pinned at 0, **every round
+drew the same noise** -- a fixed per-client perturbation the model trains around, not DP
+noise. R4 would have reported FedACO as far more noise-robust than it is, and no field in
+the result file would have shown why. A comment at that line asserted the server sent the
+key; it did not, and the comment is corrected rather than deleted.
+
+Fixed by wrapping `configure_train` in the factory. Seven of the twelve strategies are
+Flower built-ins with no subclass here, so a per-strategy fix would have covered the five
+custom ones and left every baseline the paper compares against broken.
+
+### The gate's verdict: question 3 is DEGENERATE, and that is the finding
+
+| | |
+|---|---|
+| 1. Is the colony searching? | **UNDERPOWERED** -- tau at 36% of best case; SEARCHING would need 253% |
+| 2. Deposit floor engaged? | **PARTIAL** -- best_fitness <= 0 in 1 of 15 rounds |
+| 3. Fitness optimum degenerate? | **DEGENERATE** -- single-client vertex beat FedAvg 15/15, mean +0.6252 |
+| 4. Beats FedAvg? | **NO BASELINE** -- the FedAvg run had not landed when the check ran |
+
+Question 3 closes the open question from this morning's level-set entry, and closes it the
+wrong way: the corner wins on the **linear** grid, on **real** deltas. The grid was never
+what made it attractive. Recorded in full in docs/OPEN_QUESTIONS.md, including why this is
+also A1's problem -- the controls optimize the same fitness, so "ACO ties random search"
+could be reported for a reason that has nothing to do with ACO.
+
+### The first honest compute number, and the first evidence for claim C3
+
+**7.5s per round** at K=10, 1 local epoch, image-size 112, on a T4. The estimates in this
+file's compute table are superseded by it. Extrapolated to the real sweeps -- and it is an
+extrapolation, since main.yaml runs K=20:
+
+| | at 7.5s/round (K absorbed) | at 15s/round (linear in K) |
+|---|---|---|
+| main.yaml (576 x 100) | 120 GPU-h | 240 GPU-h |
+| A1 (80 x 100) | 17 GPU-h | 33 GPU-h |
+| everything B owns | **139 GPU-h** | **279 GPU-h** |
+
+At Kaggle's ~30 GPU-hours per week that is 5-9 weeks of wall-clock for one person, which is
+a scoping fact the plan's week-7-8 slot does not currently reflect.
+
+**C3 ("negligible aggregation overhead") has its first real measurement and it holds:**
+`aco_time_ms` + `gram_time_ms` averaged 198 ms against 7,500 ms per round -- **2.6% of
+wall-clock** at K=10. The O(K^2) curve still needs `overhead.yaml` to make the claim over
+K, but the constant is small where it has been measured.
+
+471 tests pass, ruff clean.
+
+## 2026-09-19 (later still) -- the gate now names the number instead of giving advice
+
+The first GPU gate's most useful output was also its least actionable: "raise
+`aco-gamma-entropy` until the margin is negative". Closing that would have cost another GPU
+session to measure a quantity the round had already built the inputs for.
+
+**It needs no search.** The margin is *linear* in gamma_entropy:
+
+    margin(g3) = [g1*max_cos - g3*P_max] - [g1*align(base) - g2*disp(base) - g3*P(base)]
+               = A - g3 * (P_max - P(base))
+
+with `A` free of g3. One evaluation at the current value fixes the whole line, so the zero
+crossing is `g3* = g3 + margin(g3) / (P_max - P(base))`. `aco/fitness.required_gamma_entropy`
+computes it in closed form over the same Gram matrix, `strategies/fedaco.py` logs it every
+round, and `check_fedaco_health.py` reports the **max across rounds** -- gamma_entropy is set
+once per run, so the value that clears the average round leaves the worst rounds degenerate.
+
+Against a replica of B's real per-round margins, the check now prints:
+
+    **Set `aco-gamma-entropy` to at least 0.450** (currently 0.1); that is the largest
+    zero-crossing over 15 rounds, computed in closed form from each round's own Gram matrix.
+
+0.450 is a **lower bound** for that run, because the replica assumes uniform base weights
+(`P(base) = 0`). FedACO's reference point is the num-examples-weighted average, which under
+dirichlet(0.3) is already concentrated, so the real `P(base) > 0`, the real denominator is
+smaller, and the real requirement is higher. The live run computes it exactly.
+
+Twelve round-trip tests (K in {2,4,10,20} x three noise levels) feed the returned value back
+into the real `corner_margin` and assert it lands on zero -- deliberately not a test of the
+algebra against itself, which would survive someone adding a term to the fitness.
+
+### --strict now fails on DEGENERATE, and the notebook gates A1 on it
+
+A1 costs 80 cells and 17-33 GPU-hours to ask "does the colony beat equal-budget random
+search". Its four controls optimize the *same* fitness, so on a degenerate landscape they
+inherit the same useless optimum and a tie says nothing about ACO -- while the plan reframes
+the paper on exactly that result. `--strict` previously passed whenever the colony was
+SEARCHING, which is the one case where a degenerate optimum hides best: the colony is
+working, and working toward the corner.
+
+The notebook's gate cell now runs the check through `subprocess.run` rather than `!`, because
+a failing `!` line prints its error and the notebook carries straight on -- which is how the
+first gate run left A1 one Run-All away from spending that budget.
+
+### A6 was sweeping seven hyperparameters and not the one that matters
+
+`aco-gamma-entropy` is the only term standing against the corner, and A6 did not touch it.
+Now three cells: 0.1 (default), 0.5 (brackets the K=10 requirement with headroom), 1.0
+(deliberately past where the penalty should start costing accuracy, so the sweep shows the
+cost and not only the fix). A6 goes 220 -> 250 cells.
+
+**The default stays 0.1.** Raising it repairs the corner but charges *any* concentration,
+including the genuine down-weighting of a straggler or an adversary that R1-R3 need FedACO to
+perform. That is a measured trade-off, not a bug fix, and changing the default silently would
+make every future result incomparable with the plan's stated configuration.
+
+### Check 4's ambiguity, closed in the output rather than in the next session
+
+"NO BASELINE" could not distinguish a FedAvg run that had not finished from one whose result
+file the check failed to match -- and the first gate printed it while a FedAvg run was
+visibly starting in the same cell. `config["strategy"]` is populated correctly, so the
+matching was never broken, but the log could not establish that. The check now lists every
+strategy present in the results directory before running its four questions.
+
+491 tests pass, ruff clean.
+
+## 2026-09-19 (last) -- three ways the gate would have wasted the next GPU session
+
+Found while making the second gate attempt easy to run, not by testing the mechanism.
+
+**1. `--strict` blocked on UNDERPOWERED, which is not a failure.** It means *this run cannot
+tell* -- the gate is 15 rounds by design and tau has not had time to leave uniform by a
+margin the threshold can see. Since the notebook now gates A1 on this exit code, someone who
+had just fixed the corner would still be refused, with the only remedy being to lengthen a
+gate whose whole purpose is to be short. A1 itself runs at 100 rounds, where the question is
+answerable. UNDERPOWERED and NO DATA are now non-blocking and say so in the output; INERT
+and DEGRADING still block, because those are real negative verdicts about the mechanism.
+
+A gate that cannot tell inconclusive from failing is a gate nobody can pass.
+
+**2. The check could report the previous attempt.** Changing `aco-gamma-entropy` changes the
+config hash, so a re-run at a new value writes a *new* file beside the old one -- both
+completed, both 15 rounds. `max()` returns the first maximal element, so the check could
+read the stale attempt and report the old verdict against the new setting: you change the
+value, re-run, and the report says nothing changed. Now tiebroken on mtime, and the header
+prints the `aco-gamma-entropy` of the run it actually read.
+
+**3. The gate's gamma was buried in a run-config string.** It is the one number that changes
+between attempts, so it is now a named `GAMMA_ENTROPY` constant at the top of the notebook's
+gate cell, defaulting to 0.6 -- the measured 0.481 requirement with ~25% headroom.
+
+### A note on fixtures
+
+The three `--strict` tests needed runs that genuinely produce UNDERPOWERED, SEARCHING and
+INERT. Check 1's verdict is not a function of tau's entropy alone: it is tau's movement as a
+*fraction* of what that run's own deposit budget makes reachable, and the deposit is
+`rho * Q * max(F, 0)`. So a near-uniform tau reads INERT at a healthy fitness (budget there,
+unused) and UNDERPOWERED at a small one (budget never there). The fixtures were found by
+probing the real function; the first attempt assumed entropy alone decided it and wrote a
+test that asserted the opposite of what it set up.
+
+499 tests pass, ruff clean.
+
+## 2026-09-24 -- person C's workstream, and two real defects found preflighting it
+
+Built `notebooks/kaggle_ablations_robustness.ipynb` for Phases 7-8. It reuses person B's
+setup cells (clone/pin, pip, dataset probe, restore, cache) by reading them out of the built
+notebook rather than copying the text -- those five absorbed a dozen fixes and a second
+hand-maintained copy would drift.
+
+**C's workstream is larger than B's: 990 cells, 99,000 rounds, ~212 GPU-hours** (or ~420 if
+per-round cost scales with K; the gate measured K=10 and these run K=20).
+
+| family | cells | rounds |
+|---|---|---|
+| Ablations A2-A9 | 585 | 58,500 |
+| `ablation_all` | 60 | 6,000 |
+| Robustness R1-R5 | 270 | 27,000 |
+| `robustness` | 75 | 7,500 |
+
+### Two defects, both found before anyone spent a GPU-hour
+
+**1. Krum was mis-tuned in two thirds of the cells it appears in.** `robustness_r1` and
+`robustness_r2` hardcoded `num-malicious-nodes: 4` (20% of 20 clients) across attacker
+fractions of 10%, 20% and 30%, because a Cartesian-product grid cannot express "this
+strategy-specific value must track that partition-specific one". Krum was therefore correctly
+tuned in one cell per sweep and mis-tuned in the other two -- and Krum is the Byzantine
+baseline the paper's "resilience for free" claim is measured against, so a mis-tuned Krum
+flatters FedACO in a way no reader could detect from the tables.
+
+The coupling now lives in `strategies/factory.py`, which sees the whole resolved run_config.
+`f` comes from `attacks.malicious_ids` -- the same function the ClientApp uses to decide which
+partitions actually lie -- so the number Krum assumes and the number that lie cannot drift.
+Verified: f = 0/2/4/6 at fractions 0/10/20/30% at K=20, `attack="none"` gives 0 whatever the
+fraction (the clean arm), an explicit value still wins (`robustness.yaml` sets 2 and 6 per
+variant and keeps working), and Flower's `num_closest = max(1, n - f - 2)` is satisfied at
+every cell. This had been recorded in OPEN_QUESTIONS as an accepted simplification; it was
+fixable, and the fix is smaller than the note explaining why it wasn't.
+
+**2. Seventeen configs documented a runner that cannot load them.** There are two config
+shapes and two runners: `base_overrides`/`strategies`/`partitions` loads only in
+`run_sweep_granular.py`, `common`/`strategies`/`regimes`/`variants` only in `run_sweep.py`.
+Every granular config's `# Run:` line named `run_sweep.py`, which fails immediately with
+`ValueError: ... is missing required key 'regimes'`. Copy-pasteable, wrong, and only
+discoverable by someone with a session running. Fixed in all 17 and pinned by a test that
+checks the documented command against the config's own shape.
+
+Preflight that came back clean: all 15 of C's configs dry-run; every run-config key across all
+22 configs is declared in pyproject (an undeclared key is rejected with a bare `[code: 15]`
+naming nothing); all 1,646 assembled `--run-config` strings parse under `tomllib`, which is
+what flwr uses; and only R5 varies K, on the granular runner that reconfigures per cell.
+
+### The notebook splits C's work by prerequisite, which is the point of it
+
+*Section 4, no prerequisites (385 cells).* R1-R5 and A9 compare FedACO against Krum /
+Trimmed-Mean / Median / FedAvg under attack, DP noise and straggling, or control for a
+BatchNorm confound. Those comparisons mean what they say whatever the colony is doing
+internally, and R1-R2 are the paper's second contribution.
+
+*Section 5, gated (605 cells, ~130 GPU-hours).* A2, A4-A8 and `ablation_all` measure the
+colony's own machinery. On a fitness with no usable optimum they describe the failure rather
+than the method. The cell runs `check_fedaco_health.py --strict` and refuses on a DEGENERATE
+optimum or an INERT colony; UNDERPOWERED is inconclusive and does not block.
+
+**A3 is exempt and should run first.** 20 cells, ~4 GPU-hours, and it is the cheapest
+experiment that can localise the blocking problem: the same colony against `data_free` (the
+proposed surrogate) and `server_val` (real macro-F1 on a server-held split). If `server_val`
+works and `data_free` does not, the fault is the surrogate rather than the search -- a
+different paper-level conclusion to "ACO does not help", reached for 4 GPU-hours instead of
+A1's 33.
+
+527 tests pass, ruff clean.
+
+## 2026-09-24 (later) -- the check that was missing when gamma_entropy=0.6 shipped
+
+`aggregate` was shipped on two numbers: the corner margin and F at the FedAvg point. Both
+looked right. Those are exactly the two numbers that looked right for `gamma_entropy=0.6`,
+which then collapsed alpha onto the FedAvg point and made FedACO a slower FedAvg. Neither can
+see whether the colony has anywhere left to go.
+
+A real `run_colony` under all three shapes, K=10, noise 3.0, dirichlet(0.3)-skewed base
+weights, gamma_entropy=0.1, 5 seeds:
+
+| mode | corner | F(base) | improvement over FedAvg | alpha_max | \|alpha-base\|_1 |
+|---|---|---|---|---|---|
+| weighted_mean | +0.2501 | +0.0096 | +0.0391 | 0.420 | 0.470 |
+| base | -0.1915 | +0.0096 | **+0.0084** | 0.458 | 0.156 |
+| **aggregate** | **-0.8924** | **+0.4157** | **+0.1554** | 0.317 | 0.355 |
+
+Under `aggregate` the colony gains **4x** what it finds under the method as proposed and
+**18x** what it finds under `base`, with an alpha that is neither collapsed onto the FedAvg
+point (uniform would be 0.100) nor sitting on a vertex. Entropy 1.635 against a 2.303 ceiling:
+genuinely non-uniform, not concentrated.
+
+**A second, independent reason `base` was the wrong fix**, and a consequence of the same
+linearity that made it unable to rule out the corner: a linear term added to an objective
+tilts it without curving it, so the corner gets charged and the interior gets levelled. It
+moved alpha the least of the three (0.156) and found almost nothing (+0.0084). It failed in
+both directions at once.
+
+Both properties are now tests rather than a probe I ran once, because "the landscape is sane"
+and "the landscape is useful" are different claims and this project has now twice shipped the
+first while believing it had checked the second.
+
+Still synthetic. But this is the skewed high-noise regime that reproduces the real runs'
+F(fedavg) < 0, so it is the closest proxy available -- and the gate run is what settles it.
+
+529 tests pass, ruff clean.
+
+## 2026-09-24 (later still) -- R6 exists: cold start, via a filtered Grid
+
+R6 (clients joining after round 20) was the one entry in the plan's robustness table with no
+config file at all, and `docs/OPEN_QUESTIONS.md` explained why: which SuperNodes exist is
+Flower's Simulation Runtime's business, and no `run_config` key says "partition 15 must not
+participate before round 20".
+
+Both true, and neither closes the door. **A strategy never asks the runtime for nodes -- it
+asks the `Grid` it is handed.** So every client starts at round 1 and a filtered Grid keeps a
+deterministic subset out of the strategy's view until the join round. The clients exist; the
+aggregation does not see them, which is precisely the condition R6 is about: does the pheromone
+initialise sensibly for a client id it meets at round 21 when every other id has twenty rounds
+of deposit behind it?
+
+`fl/cold_start.py`, `configs/experiment/robustness_r6_cold_start.yaml` (25 cells, 2,500
+rounds, ~5 GPU-h). Late joiners are the **highest** node ids, deliberately disjoint from
+`attacks.malicious_ids`' lowest, so a cell combining an attack with a cold start delays
+different clients than it compromises instead of quietly testing one thing twice.
+
+### The hazard was a hang, not an error
+
+Flower's own sampler:
+
+    while len(all_nodes := list(grid.get_node_ids())) < min_available_nodes:
+        sleep(1)
+
+No give-up. Hide one node too many and the run does not fail -- it logs a line a second
+forever, which on Kaggle consumes the whole nine-hour budget and writes nothing. Nothing
+downstream can catch it, because nothing is raised. So `with_cold_start` checks the visible
+count against the strategy's own `min_available_nodes` / `min_train_nodes` /
+`min_evaluate_nodes` / `ceil(visible * fraction_train)` and raises at construction, and a test
+builds every strategy the shipped config declares to prove that config passes its own guard.
+That is also why the config sets `min-train-nodes: 10` rather than 20, with the reason written
+above the key.
+
+Evaluation is filtered too. Leaving it unfiltered would report a late joiner's local-val
+metrics on a model its data never touched, for twenty rounds.
+
+### What R6 can and cannot settle
+
+It sits in the **gated** half of person C's notebook, not the free half, and that placement is
+the honest one: the plan says "cross-round pheromone should shine here", and that claim needs a
+pheromone that moves. The two FedAvg arms are not gated -- they establish what a late joiner
+costs a memoryless aggregator, which is a paper number whatever the colony is doing, and
+without them a FedACO gap cannot be told apart from "fifteen clients for twenty rounds is
+simply less data". The `fedaco_cold_no_persistence` arm is the third leg: if the gap survives
+with persistence off, it was never about stigmergy.
+
+Person C's workstream is now 1,015 cells / 101,500 rounds / ~217 GPU-hours.
+
+547 tests pass, ruff clean.
+
+## 2026-09-24 (last) -- verify_repro was checking a non-reproducible number against a band narrower than its variance
+
+Phase 10's acceptance criterion is "runs the smoke config and checks final metrics fall within
+a recorded tolerance band". The band, `docs/repro_reference.json`, was seeded from run
+`e35285b33a_0` at git_sha `9b01a462...` -- **before** client-side seeding existed. At that
+commit `seed_everything` ran only in `server_app.main()`, and a ClientApp is a separate Ray
+actor process, so every client's train loader shuffled from OS entropy.
+
+So the reference value was one draw from an unrecorded distribution. Its `tolerance_abs` was
+0.15, documented as "wide enough to absorb float-determinism drift". The drift was not
+float-sized: two Kaggle runs of an identical FedAvg config, same seed, returned **0.1363 and
+0.3286** -- a 0.19 swing, wider than the band itself. The check was comparing a
+non-reproducible quantity against a tolerance narrower than its own variance, and passing or
+failing at random.
+
+Post-fix it is worse rather than better. Runs reproduce now, and a deterministic value has no
+reason to land near an old random draw -- so the check would fail for correct runs. Either way
+`verify_repro: PASSED` never meant what the plan says it means, and a reproducibility claim in
+a paper resting on it is not recoverable once published.
+
+**`load_reference` now refuses a band that does not carry `seeded_after_commit` equal to the
+determinism-fix commit**, with the reason and the remedy in the error. `verify_repro.py` exits
+2 on that refusal rather than pretending to a verdict, and gains `--seed-reference` to write a
+fresh band from a completed run in one command instead of hand-edited JSON.
+
+Two deliberate choices in that:
+
+- **Seeding is its own mode, not a fallback.** Re-seeding whenever the check fails would turn
+  every regression into a new reference and the check into a no-op. B's notebook prints the
+  command and does not run it.
+- **The regenerated tolerance is 0.05, not 0.15.** The old value was sized to absorb variance
+  the code no longer has. With the clients seeded, the same config and seed reproduce, so the
+  band only needs to cover genuine cross-platform float drift -- and a band three times wider
+  than the effect it measures cannot catch a broken pipeline, which is its only job.
+
+The stale file is marked rather than deleted, so the numbers any pre-fix result was checked
+against stay on record. Its two existing tests now pass `allow_stale=True` and check the
+file's *shape*, which is what they were really for; verifying against it is what the refusal
+covers.
+
+**This is the third instance this session of the same defect class**: a check that runs, passes,
+and means nothing. The others were the client-side evaluation whose metrics came back silently
+empty, and the `seed` recorded in every result file that governed only the server. All three
+were invisible precisely because something was reported as working.
+
+552 tests pass, ruff clean.
+
+## 2026-09-24 (last, really) -- the LaTeX table dropped both of the markdown's warnings
+
+Following the pattern from the reproducibility band -- a check that runs, passes and means
+nothing -- into the one place it matters most: the artifact that goes in the paper.
+
+`make_tables.py` emits markdown, CSV and LaTeX from one `rows` list, deliberately, so two
+formatters cannot drift. They had drifted anyway, because `to_latex` built its DataFrame from
+`strategy, partition, mean, std, n` and dropped two things the markdown carried.
+
+**1. Incomplete cells were indistinguishable from complete ones.** Built from a sweep with 3 of
+8 fedaco seeds:
+
+    markdown:  | fedaco | default | 3 ⚠️ | 0.5100 ± 0.0100 | ...
+               ⚠️ **1 cell(s) have fewer seeds than expected** ... Do not quote anything
+
+    latex:     fedaco & 0.510 $\pm$ 0.010 \\
+
+Character-for-character identical to a complete cell. The markdown is read by whoever ran the
+sweep; **the LaTeX is what goes in the paper**, and the main sweep runs over many sessions, so
+a partially-filled table is its normal state for weeks. The plan's own rule is "never
+hand-type a number into the paper", which makes this emitter the number.
+
+**2. The caption advertised a significance threshold the test could not reach.** The same
+table's markdown says "these p-values cannot reach 0.05 at this seed count -- the smallest
+possible two-sided p at n=3 is 0.2500". Its LaTeX caption said
+`($^{*}p<0.05$, $^{**}p<0.01$, $^{***}p<0.001$)`. A reader of the paper had no way to know the
+legend promised something no data could deliver.
+
+Both now live in the caption, because a caption is the only thing that travels with a table
+someone pastes into a draft. After the fix, the same partial sweep:
+
+    \caption{... $^{\dagger}$~1 cell(s) are built from fewer seeds than planned and are not
+    comparable to the rest: fedaco/iid (3 of 8). Do not quote these numbers. No significance
+    markers are shown: at $n=3$ paired seeds the signed-rank test's smallest attainable
+    two-sided $p$ is 0.2500 ... so $p<0.05$ is unreachable at any data ...}
+
+    fedaco & 0.510 $\pm$ 0.010$^{\dagger}$ \\
+
+A complete, adequately-powered sweep gets its legend back and carries no dagger -- verified,
+because a warning that is always present is wallpaper.
+
+`power_note` (markdown) and `_latex_power_note` now share `_power_floor`. Two formatters
+computing "is this table underpowered" separately is precisely how one ended up warning about
+what the other advertised, and a test asserts they agree at n in {3, 5, 6, 8, 10}.
+
+**Fourth instance of the same defect class this session.** The others: client-side evaluation
+failing on GPU while the run reported `completed` with an empty metrics block; the `seed` in
+every result file that governed only the server; and the reproducibility band seeded from a
+non-reproducible run. Every one was invisible because something reported success.
+
+557 tests pass, ruff clean.
+
+## 2026-09-24 (the important one) -- the FL harness runs on THIS box, and it found another dropped half
+
+`ray` and `flwr.simulation` are installed in this container, on Linux x86_64. Every note in this
+repo saying the harness cannot run locally is about the *Intel-macOS* dev machine and has been
+quietly false here for the whole session. So a real `flwr run .` went end to end on the
+synthetic smoke dataset, and three things came out of it.
+
+### 1. The determinism fix is confirmed empirically, not structurally
+
+Two runs, identical config, `seed=0`, separate processes:
+
+| | run 1 | run 2 |
+|---|---|---|
+| final_test_macro_f1 | 0.3333333333 | 0.3333333333 |
+| train_best_fitness | 0.8654202819 | 0.8654202819 |
+| train_corner_margin | -0.0249431129 | -0.0249431129 |
+| train_alpha | [0.25714287, 0.25714287, 0.22857143, 0.25714287] | identical |
+
+**11 of 11 metrics bit-for-bit identical.** Until now the only evidence was a test asserting
+that `seed_everything` appears inside the handlers -- which proves the call exists, not that it
+works. The same run also shows `train_server_round: 3.0` (was -1) and
+`participating_client_ids: [0, 1, 2, 3]` (sorted), so both halves of the 2b7c479 fix are
+confirmed on real output.
+
+### 2. Client-side evaluation was computed every round and thrown away
+
+`Result` carries `evaluate_metrics_clientapp` beside `train_metrics_clientapp` (verified
+against the installed dataclass). `merge_train_metrics` folded in the first. **Nothing read the
+second.** So every client's `evaluate_handler` ran a forward pass over its local-val split,
+every round, and the output reached Flower's console and nowhere else.
+
+Wasted compute is the small cost -- a per-client forward pass per round across ~1,700 planned
+cells. The real cost is that **it is why the GPU bug survived three sessions.** The fields that
+vanished were never in the result file, so a `completed` result with every client's evaluation
+failing was byte-comparable to a healthy one. A field that is absent cannot be checked; one
+recorded and empty can.
+
+It also lost a capability the code went out of its way to build.
+`per_class_confusion_counts` is additive across clients *precisely* so a correct pooled
+macro-F1 can be recomputed under label skew -- the plan flags naive averaging of per-client
+macro-F1 as wrong, and label skew is what R1/R2 measure. Those counts were computed and
+discarded. `merge_evaluate_metrics` now folds them in under `client_eval_`; a real run confirms
+19 fields land in the result file, per-class counts included.
+
+### 3. CI asserted `status == "completed"` and nothing else
+
+Which is exactly the assertion the GPU bug satisfied. `scripts/check_smoke_result.py` now
+checks that a result is *complete* rather than merely finished -- client-side evaluation
+present, `train_server_round` counting from 1, per-round records existing, a populated `final`
+-- and CI runs the smoke a **second time** and requires the two to agree exactly.
+
+That second run is the part no unit test can replace. The unseeded-client bug needs two real
+processes to show, which CI has and a developer's `pytest` does not. Comparison is bit-for-bit,
+not a tolerance band: same machine, same build, same seed, so there is no drift to absorb and a
+tolerance would hide the one failure it exists for -- the shipped reproducibility band was 0.15
+wide while the variance it was meant to absorb was 0.19.
+
+Each check was verified against a mutated copy of the real result: the device bug, the -1 round
+number, a run that aggregated nothing, and two runs differing at the same seed are all caught,
+and a healthy result passes.
+
+**Fifth instance of the same defect class, and the one that explains the others**: a subsystem
+whose output goes nowhere cannot be checked, so every bug inside it is invisible by
+construction.
+
+572 tests pass, ruff clean.
+
+## 2026-09-24 (the one that mattered) -- the fitness question, reproduced and answered locally
+
+Three Kaggle sessions were spent establishing that the data-free fitness has no usable optimum
+on heterogeneous data. Each one cost a GPU session to obtain one row of numbers. That was
+avoidable, and the reason it was not avoided is worth stating plainly: the repo's notes say the
+FL harness cannot run locally, and that is true of the **Intel-macOS dev machine** and false of
+every Linux container this project has used. `ray` and `flwr.simulation` were installed here the
+whole time.
+
+The missing piece was never compute. It was a fixture heterogeneous enough to fail the same way.
+`ci_smoke_dataset.py` cannot: 40 images, labels alternating by parity, pixel content unrelated
+to the label -- nothing there produces client disagreement, and a FedACO run on it reports
+`fedavg_fitness = +0.86` and a negative corner margin, which is the opposite of the regime under
+investigation.
+
+`scripts/synthetic_heterogeneous_dataset.py` gives each class a distinct low-frequency pattern,
+so a client holding {0,1} has a genuinely different local optimum from one holding {2,3} and its
+update points elsewhere. Difficulty is tunable, and it had to be: the first attempt
+(amplitude 0.35 / noise 0.18) was trivially separable, reached final macro-F1 **1.0000**, and
+reproduced the corner problem but not the zero-centred-fitness problem -- a fixture easier than
+the task it stands in for reproduces only the failures that do not depend on difficulty, and
+there is no way to know in advance which those are.
+
+At amplitude 0.15 / noise 0.45, K=10, dirichlet(0.3), 15 rounds, gamma_3=0.1, **about a minute
+per arm**:
+
+| | weighted_mean (local) | real Kaggle | aggregate (local) |
+|---|---|---|---|
+| F at the FedAvg point, mean | **-0.0033** | -0.0005 / -0.0212 | **+0.8141** |
+| negative in | 5/15 rounds | 7/15 rounds | **0/15** |
+| corner_margin, mean | **+0.6185** | +0.3136 / **+0.6184** | **-0.5283** |
+| corner wins in | **15/15** | **15/15** | **0/15** |
+| rounds that deposited nothing | 3/15 | 1-7/15 | **0/15** |
+| final test macro-F1 | 0.1000 | 0.1185 - 0.1381 | 0.1168 |
+
+The left column reproduces the real failure on every axis, including a corner margin that agrees
+with the Kaggle run to three decimals -- coincidence in the last digit, but the signature matches
+throughout. The right column shows `aggregate` removing both halves: the corner never wins, and
+F at the reference stops being zero-centred noise, so every round deposits. `alpha_max` is 0.207
+against uniform's 0.100, so the colony still has room -- this is not the gamma_3=0.6 failure
+where the landscape was repaired by flattening it.
+
+`make fitness-repro` runs all three modes and the health check on each.
+
+**What this does and does not establish.** A synthetic *signature* match is much weaker than a
+data match: it says the fixture fails the same way, not that the fix transfers. 15 rounds is far
+too short to read the macro-F1 column. The real gate is still the test that counts -- but it is
+now a confirmation rather than a discovery, and every further fitness change can be screened
+here for a minute instead of a GPU session.
+
+**The cost of the wrong belief.** Five GPU sessions, three of them spent obtaining numbers this
+box produces in three minutes. The belief was written down, inherited, and never retested after
+the platform changed.
+
+572 tests pass, ruff clean.
+
+## 2026-09-24 -- and the incomplete-cell warning would have fired on every correct sweep
+
+One commit after adding the LaTeX dagger for cells built from too few seeds, none of the three
+`make_tables.py` Makefile targets passed `--expected-seeds` at all -- so all three used the
+script's default of 8.
+
+`main.yaml` runs 8 seeds, so `make tables` was right by accident. The ablation and robustness
+families run **5 by design** -- a degradation curve carries its meaning through effect sizes,
+and the 8-seed floor exists only where a p-value is claimed (main.yaml's headline comparison
+and ablation_a1's control). So `make tables-ablation` and `make tables-robustness` would have
+daggered every cell of a correctly completed sweep and printed "Do not quote these numbers"
+beneath it.
+
+That is 855 of C's ~1,015 cells. A warning that fires on almost everything is wallpaper, which
+is the failure I wrote a test against in the same commit that created the condition for it.
+
+Fixed per target, and pinned by a test that reads the seed counts **out of the configs** rather
+than from a remembered number -- these counts have already changed twice (5 -> 8 for the two
+families a p-value comes from, then back to 5 for the rest), and a hardcoded assertion would
+have been the third thing to drift.
+
+The test also checks something the fix cannot: that every config writing to one results
+directory agrees on its seed count. `results/fl/ablation` is the exception -- A2-A9 write 5
+seeds there and ablation_a1 writes 8 -- so one `--expected-seeds` cannot be right for both, and
+the target takes 5 with the asymmetry written down rather than silently flagging 585 cells to
+avoid mis-marking 80.
+
+573 tests pass, ruff clean.
+
+## 2026-09-24 -- lost ten minutes to the hazard I had just written a guard for
+
+While screening A1 locally, a run sat at round 1 for three and a half minutes with the machine
+**idle** -- load average 0.29, ClientApp actors at 2% CPU -- when identical runs finish 15
+rounds in 39 seconds. Four ClientApp actors existed; the run asked for `min-available-nodes=10`.
+
+That is Flower's `while len(grid.get_node_ids()) < min_available_nodes: sleep(1)`, the
+unbounded wait I documented in `fl/cold_start.py` two commits earlier and guarded against for
+R6 specifically. It is not specific to R6 at all: **any** run whose node requirements exceed
+the configured supernode count hangs forever, and `flwr run` never errors.
+
+The script I wrote for the A1 screen did not re-issue `simulation-config`, inheriting whatever
+the previous experiment had left. That is exactly the shape of B's gate cell, which relies on
+section 3 having run earlier in the session -- and a stale kernel, a restarted SuperLink or a
+Run-All from the middle all leave it wrong. On Kaggle it costs nine hours and produces nothing.
+
+`flwr federation simulation-config` can only SET the count, never read it, so no preflight can
+check it after the fact. The only protection is setting it immediately before each run that
+depends on it, which B's gate cell now does. The sweeps were already covered --
+`run_sweep.py` and `run_sweep_granular.py` both call `configure_federation` and refuse if it
+fails. C's notebook uses only those runners, so it has no bare `flwr run` to fix.
+
+Worth recording as a pattern, not just an incident: I documented this failure mode, wrote a
+guard for one narrow case of it, and then walked into the general case within the hour. The
+guard was scoped to where I was looking rather than to where the hazard was.
+
+## 2026-09-24 -- A1 screened locally: ACO loses to every control, and we know why
+
+The plan's make-or-break experiment for claim C2, run on the local fixture instead of 17-33
+Kaggle GPU-hours. 5 search methods x 3 seeds, equal budget, `aggregate` fitness.
+
+**ACO gains +0.0013 over the FedAvg point. coordinate_grid gains +0.0501, pso +0.0484, ga
++0.0312, random +0.0304. ACO beats every control on 0 of 3 seeds.** The plan's feared outcome
+was "ACO ties random search"; this is a loss to random by 23x.
+
+### The mechanism, which makes it fixable rather than fatal
+
+`eta_{k,l} = (1 + |lambda_l - d_hat_k|)^-1` with `d_hat_k` spreading the per-client score `d_k`
+over the level range. Across K in {10,20} x noise in {1.5,3,6}, **`d_k` spans ~0.04** against a
+level spacing of **0.25** -- so every client's argmax lands on the same level (identical in 3 of
+6 configurations, adjacent in the rest).
+
+And a uniform level assignment normalises back to `base_weights` exactly. So the greedy branch
+of the ACS rule constructs **the FedAvg point**, 70% of the time at `q0=0.7`. The colony is
+anchored to the reference it is supposed to improve on: best candidate +0.9559 against
+F(FedAvg) +0.9558.
+
+The controls have no such anchor and explore freely. That is the entire result -- not a
+statement about ant colony optimisation, but about a heuristic with 16% of a level's worth of
+dynamic range driving a rule that is greedy 70% of the time.
+
+### A fix I implemented and reverted
+
+The colony visits 82 distinct alphas per 210 evaluations; random search visits 210 of 210. So
+61% of the colony's budget buys answers it already has, and A1 was partly measuring which
+method repeats itself least. Memoizing within a round is exact -- fixed Gram matrix, so a
+repeated alpha has the same fitness by construction.
+
+It changes nothing. `run_colony` stops on its own ant/iteration schedule rather than on
+`remaining()`, so the freed budget is never spent: best fitness was **identical** across all 8
+configurations tested. It also broke four tests encoding "no method outspends the shared
+budget" and silently changed what the logged `evaluations_used` means. Reverted.
+
+Recording it because the temptation was to keep it -- it was written, it was correct, and it
+looked like progress. A change that breaks a real invariant's tests and improves nothing is
+churn regardless of who wrote it.
+
+### What the team has to decide
+
+Candidate heuristic fixes -- standardising `d_k` across clients before rescaling, widening the
+sigmoid, lowering `q0`, or letting the colony spend its freed budget -- are changes to the
+method §4.5 specifies, not bug fixes. Any of them can now be screened locally in minutes rather
+than a GPU session. That choice is not mine to make.
+
+573 tests pass, ruff clean.
+
+## 2026-09-24 -- the isolated colony probe cannot screen A1's fixes, and saying so is the finding
+
+Having diagnosed why ACO loses A1 (the greedy branch constructs the FedAvg point), the obvious
+next step was to screen candidate fixes cheaply with an isolated colony probe -- synthetic Gram
+matrix, one round, no FL -- rather than 12 more real runs.
+
+**It does not work, and the reason is worth recording.** In the probe, over 6 (K, noise) cases
+x 3 seeds at budget 300:
+
+    control: coordinate_grid    +0.0000 gain over F(base)
+    control: random             -0.0243
+    aco q0=0.9                  +0.0002   (beats grid on 15/18)
+
+Nothing finds anything better than the FedAvg point. But the real A1 run has
+coordinate_grid at **+0.0501** and pso at **+0.0484** -- the probe does not reproduce the
+phenomenon it was built to screen. Three differences, and any of them is enough: uniform base
+weights where the real runs use num-examples weights under dirichlet(0.3) skew; synthetic
+consensus deltas where the real ones come from actual training; and one isolated round where the
+real runs carry pheromone across fifteen.
+
+On that landscape the FedAvg point is already near-optimal, so every method's gain is ~0 by
+construction and the probe ranks noise. It also reported "standardizing d_k makes things worse"
+(-0.05) -- a conclusion with no support, on a fixture that cannot express the effect.
+
+**The general lesson, third time this session:** a cheap proxy has to be validated against the
+phenomenon before its rankings mean anything. The heterogeneous *dataset* fixture earned trust
+by reproducing the real failure signature on every axis first. This probe skipped that step, and
+its numbers looked precise enough to act on.
+
+Screening the candidate fixes therefore needs real runs. `aco-q0` is already a config key so it
+needs no code change; standardizing `d_k` would need a flag, and is only worth adding if q0
+alone does not account for the anchoring.
+
+## 2026-09-24 (later) -- A1 re-screened at the plan's real defaults: the ranking does not move
+
+The defaults reconciliation (see `OPEN_QUESTIONS.md`, "four sources of truth") meant every local
+screen so far had run at `q0=0.9`, `gamma_2=1.0`, `rho_round=0.1` instead of plan §14's
+0.70 / 0.50 / 0.30 -- verified from the embedded `config.run_config`, not inferred. Since `q0`
+was the axis the anchoring diagnosis rests on, A1 had to be re-screened before any of it could be
+believed. 15 runs, same fixture, same equal-budget harness, only the three corrected defaults:
+
+| method | mean gain over the FedAvg point | per-seed | macro-F1 |
+|---|---|---|---|
+| **aco** | **+0.0066** | `[+0.0088, +0.0025, +0.0085]` | 0.2700 |
+| random | +0.0231 | `[+0.0256, +0.0189, +0.0249]` | 0.1000 |
+| ga | +0.0295 | `[+0.0341, +0.0233, +0.0311]` | 0.1670 |
+| pso | +0.0355 | `[+0.0402, +0.0286, +0.0377]` | 0.2248 |
+| **coordinate_grid** | **+0.0390** | `[+0.0410, +0.0350, +0.0412]` | 0.1000 |
+
+**ACO beats every control on 0 of 3 seeds, and loses to the best by 5.9x.** The ordering is
+identical to the drifted screen -- coordinate_grid > pso > ga > random > aco -- and ACO's
+per-seed spread (0.0025-0.0088) does not overlap any control's.
+
+Every method's absolute gain fell (e.g. coordinate_grid +0.0501 -> +0.0390), which is expected
+and not a result: `gamma_2` halved, so F is on a different scale. **Only the within-screen
+ranking transfers between the two screens**, and it is unchanged.
+
+So the config bug was real, worth fixing, and **not the cause of A1's failure**. ACO went from
++0.0013 to +0.0066 -- a 5x improvement on its own terms, still 5.9x short of the weakest thing
+it needs to beat. Combined with the `q0` sweep, which reached +0.0287 at `q0=0.0` and still lost
+to every control: greedy anchoring is a real contributing mechanism and fixing it does not
+rescue the claim.
+
+**What this means for plan §11's week-5 gate.** The plan's stated failure condition was "ACO
+ties random search at equal budget -- stop and reframe". Three independent local screens now say
+it does not tie random search, it loses to it, at both the drifted and the documented defaults.
+The gate's instruction was to reframe before spending weeks 6-12, and roughly 80% of the
+project's remaining 351-701 GPU-hours sits behind it.
+
+Confirming this on the real gate costs A1's 80 cells (17-33 GPU-h). The local fixture has
+reproduced the real runs' fitness signature on every axis checked so far, but it is a fixture,
+and a claim this consequential should not rest on it alone.
+
+606 tests pass, ruff clean.
+
+## 2026-09-24 (later still) -- claim C3 holds, but not for the reason it claims
+
+`overhead.yaml` goes to K=200, which needs 200 Ray actors and the real dataset, so it cannot
+run here. But C3 is about *server-side* work, and that is directly measurable:
+`scripts/bench_aggregation_overhead.py` times `precompute_gram` plus `run_colony` on K x d
+delta tensors at d=390,404 (simple_cnn's state dict, image-size independent).
+
+**Why this proxy is trustworthy where the isolated colony probe was not.** The colony probe
+tried to *rank search methods by fitness* and failed because its synthetic landscape did not
+reproduce the real one. This measures the wall-clock of a deterministic computation on arrays
+of a given shape, and `deltas @ deltas.T` does identical arithmetic whether the deltas came
+from training or a generator. It also runs on the right device: `precompute_gram` builds its
+output with `device=deltas.device`, the deltas arrive as Flower message arrays, and FedACO's
+`device` argument is used only by `fitness_mode="server_val"` -- so aggregation is on CPU in
+real runs too. And it is anchored: the project's one real measurement is 198 ms at K=10 on a
+T4 box; this benchmark gives 121-131 ms, a ratio of 0.61-0.66x on a different host CPU.
+
+### The claim's substance holds, and improves with K
+
+| K | overhead (gram + colony) | share of a round |
+|---|---|---|
+| 5 | 117 ms | 3.13% |
+| 10 | 131 ms | 1.74% |
+| 20 | 204 ms | 1.36% |
+| 50 | 434 ms | 1.16% |
+| 100 | 757 ms | 1.01% |
+| 200 | 1467 ms | 0.98% |
+
+(Round cost extrapolated as 7500 ms x K/10 from the measured K=10 point -- an assumption, so
+the percentages are softer than the overhead numbers, which are measured.)
+
+### The O(K^2) shape does not appear
+
+| K | gram ms | ms/K | ms/K^2 | implied GFLOP/s |
+|---|---|---|---|---|
+| 5 | 15.8 | 3.155 | 0.6310 | 1.2 |
+| 20 | 86.7 | 4.333 | 0.2167 | 3.6 |
+| 100 | 593.4 | 5.934 | 0.0593 | 13.2 |
+| 200 | 1355.8 | 6.779 | 0.0339 | 23.0 |
+| 400 | 3624.3 | 9.061 | 0.0227 | 34.5 |
+| 800 | 9442.0 | 11.803 | 0.0148 | 52.9 |
+
+`ms/K^2` falls **43x** across the range while `ms/K` rises only 3.7x, and the implied GFLOP/s
+climbs monotonically from 1.2 to 52.9 -- the arithmetic is never the limit. Least squares:
+**linear R^2 = 0.9722, quadratic R^2 = 0.9689.** Effectively tied, because both approximate a
+curve that sits between them and closer to linear.
+
+The reason is memory traffic. `deltas @ deltas.T` is O(K^2 d) arithmetic but only O(Kd) bytes
+read, and at K=200 that matrix is 312 MB. The build is bandwidth-bound long before it is
+compute-bound, and it has still not crossed over at K=800 (1.25 GB).
+
+The colony is separately flat: 90-188 ms across K=5-200, a 1.3x rise for a 40x rise in K. The
+Gram trick makes each fitness evaluation O(K), so the fixed 30x10 budget should give O(A*I*K) --
+but at these sizes the per-evaluation Python loop dominates the vector work entirely.
+
+### What this means for the paper
+
+O(K^2) is still the right *asymptotic* statement, and C3's honest claim -- negligible overhead
+-- holds more strongly than the plan expected. But plan §9.2's figure 5 asks for a fitted c*K^2
+curve overlaid on the measurements, which `figures.plot_overhead_vs_k` implements, and that
+overlay would assert a shape the data does not show: a reader who plots `ms/K^2` sees it fall
+43x. The function's docstring now records the measurement and the options; which fit the figure
+shows is a presentation decision, so it is documented rather than changed unilaterally.
+
+Confirming the constant on the real hardware is still worth `overhead.yaml`'s 7 cells (~0.1
+GPU-h) -- the cheapest sweep in the project.
+
+637 tests pass, ruff clean.
+
+## 2026-09-24 (end of day) -- running the Phase 9 chain for the first time found four faults
+
+Plan §9.3's acceptance criterion is "`make figures tables` regenerates every artifact from
+`results/` with no manual steps. Deleting `paper/figures/` and `paper/tables/` and re-running
+restores them byte-for-byte identical." Nothing had ever run it. An 8-cell local sweep
+(fedavg/fedaco x dirichlet(0.3)/iid x 2 seeds, 6 rounds on the synthetic fixture) put real
+result files through `run_sweep_granular.py -> aggregate_results -> make_tables -> make_figures`
+and every one of the following needed the whole chain to be visible. None is catchable by a
+unit test on a fixture.
+
+### 1. `_variant_of` compared each knob against a hardcoded default
+
+The worst of the four, and self-inflicted: reconciling `aco-gamma-dispersion` to plan §14's
+0.50 made **every** run read as a `g2=0.5` variant -- FedAvg included, because pyproject
+supplies the key to every resolved config. `figure_convergence` and `figure_comparison`, the
+paper's two headline figures, filter to `variant == "default"`, so **both silently skipped
+with a complete set of valid results present**, and `add_deltas` (which also keys on
+"default") left every comparison column empty. A correct change to a value, made in the right
+place, broke the two figures that matter most, and the only symptom was a "skipped (no data)"
+line that looks exactly like a sweep that has not run yet.
+
+`_variant_of` now reads `pyproject.toml` instead of literals, and covers the keys added since
+it was written (`aco-q0`, `aco-gamma-entropy`, `aco-desirability-scaling`,
+`aco-dispersion-reference`). Five tests, including one that moves a default and asserts the
+label follows.
+
+### 2. `aggregate_results.py` accepted names that matched nothing
+
+`--partitions totally_bogus --baselines nonexistent` printed "(no overlapping-seed comparisons
+found)", wrote both CSVs and exited **0**. This one is not cosmetic: **Holm-Bonferroni corrects
+each p-value by the size of the comparison family**, so a name that matches nothing shrinks the
+family and every surviving p-value is corrected *less* aggressively -- results come out looking
+**more** significant. Plan §9.1's warning ("with 5 seeds and a dozen comparisons, uncorrected
+p-values manufacture significance; a reviewer who checks will find it") arriving through a typo.
+
+The label spelling invites it: the config says `regime: dirichlet`, the analysis frame says
+`dirichlet_0.3`, so `--partitions dirichlet` matches nothing. Now fatal, listing what is
+present.
+
+### 3. The granular runner checked a directory it never told the run about
+
+`run_sweep` tested `is_completed(run_id, output_dir)` against its `--output-dir` argument while
+`execute_run` never put `output-dir` in the run_config. With both at the default `results/fl`
+they coincided; pass anything else -- and `run_sweep.py`'s own docstring says "`output-dir` is
+routinely outside: a Colab run writes to Drive, a Kaggle run to ..." -- and every cell records
+`status: "unknown"` (the status this module reserves for `flwr run` exiting 0 while the round
+died), **and resume stops working**: a sweep restarted after a session timeout silently re-runs
+every cell it had already finished. All 8 cells here recorded "unknown" with the results sitting
+in `results/fl`. `resolve_output_dir` now returns one directory used for both sides.
+
+### 4. `partition_stats` proved itself
+
+Not a fault -- the fix from earlier today, confirmed on real runs: js_divergence 0.4238 for
+dirichlet(0.3) against 0.0238 for iid, the right ordering and the right magnitudes, and
+`gain_vs_heterogeneity.png` rendered for the first time.
+
+### The criterion now holds, and is a command
+
+    make verify-phase9
+
+10 artifacts (3 tables, 5 figures, 2 CSVs) generated twice and compared byte-for-byte: all
+identical. Byte-for-byte is the right bar, not a tolerance -- both passes read the same JSON
+with the same code on one machine, so any difference is non-determinism in the artifact
+pipeline itself (an unsorted glob, dict iteration order, an embedded timestamp), and each of
+those makes "did this number change?" unanswerable across a re-run.
+
+### 5. The robustness tables had no delta column at all
+
+Found while checking that `_variant_of` labels every declared sweep cell correctly. It does --
+but that surfaced a pre-existing consequence: `robustness_r1/r2/r3` set an attack in
+`base_overrides` and `main_client_scale.yaml` sets `fraction-train: 0.3`, so **every** row in
+those sweeps carries that mark and none is "default". `add_deltas` keyed its baseline on
+`variant == "default"`, found nothing, and left `delta = None` on every row -- so four sweeps
+printed an empty comparison column, which renders as the same "—" as a cell with no paired
+seeds. Nothing distinguishes "no baseline existed" from "no seeds overlapped".
+
+`add_deltas` now matches the baseline within the same variant first and falls back to the
+default variant. Within-variant is also the comparison those sweeps intend: FedACO against
+FedAvg **at the same attack level**. Matched against an unattacked control instead, a FedACO
+row at 30% sign-flip would read -0.35 rather than +0.05 -- reporting the attack's damage as
+the method's deficit. Four tests, including that one.
+
+662 tests pass, ruff clean.
+
+## 2026-09-24 (end) -- every arm of every sweep C owns executes; 96/96, nothing failed
+
+`strategy_from_run_config` accepting a config is necessary and not sufficient: it builds the
+strategy, not the round. `scripts/preflight_sweep_configs.py` runs one cell of every declared
+arm at 2 rounds, K=6, image-size 32 against the synthetic fixture, so the strategy, attack,
+cold-start and aggregation paths all execute with real Flower messages. Judged by whether a
+result JSON appeared, not by the exit code, since `flwr run` exits 0 when the simulation dies.
+
+    96 arms, 0 failed
+
+    robustness_r1_label_flip         4    ablation_a1    5    ablation_a6      27
+    robustness_r2_update_attack      4    ablation_a2    3    ablation_a7       4
+    robustness_r3_stragglers         2    ablation_a3    2    ablation_a8       2
+    robustness_r4_dp_noise           2    ablation_a4    4    ablation_a9       4
+    robustness_r5_client_scaling     4    ablation_a5    5    ablation_all      4
+    robustness_r6_cold_start         5    robustness    15
+
+**R6's five arms matter most**: it is the newest config, written today, and its failure mode is
+a silent infinite hang rather than an error -- Flower's `sample_nodes` waits in a
+`while ...: sleep(1)` loop that never gives up, so a cold start hiding one node too many
+consumes a whole Kaggle session and writes nothing. That path now has a real run behind it.
+
+A6's 27 arms all executing is the second most useful result: at 200 distinct cells and 42-83
+GPU-h it is the largest single sweep in the project, and a config error in arm 27 would have
+been found three-quarters of the way through a session.
+
+This says the code paths run. It says **nothing** about whether the numbers mean anything --
+rounds, K and image size are all cut, and the fixture is synthetic. It is 70 minutes of CPU
+standing between C and 214-427 GPU-hours.
+
+### Two bugs in the preflight itself, both found by running it
+
+* It globbed only patterns containing `*`, so `configs/experiment/ablation_a[0-9].yaml` -- the
+  natural way to name A1-A9, and the pattern in the Makefile target -- was treated as a literal
+  filename and died on FileNotFoundError after 36 arms had passed. Now globs on any
+  metacharacter, refuses a pattern matching nothing, and checks `flwr` is on PATH before
+  reconfiguring the federation.
+* No resume. This container reaped the detached process three times; each restart redid every
+  arm already checked, so the walk never reached the ablations. An arm that wrote a result is
+  an arm that ran -- the same test `sweep.is_completed` applies per cell.
+
+670 tests pass, ruff clean.
+
+## 2026-09-25 -- the project resized to 9 days, and two bugs in yesterday's preflight
+
+The stated deadline moved to 7-9 days. The recorded remaining cost was **351-701 GPU-hours**
+(B 139-279, C 214-427), which at Kaggle's ~30 GPU-h per week per account is 12-23 weeks on one
+account and 4-8 across three. No ordering of that fits nine days.
+
+**The binding constraint was never the compute.** 351-701 hours was the price of proving claim
+C2, and three independent local screens say C2 is false: ACO gains +0.0013, then +0.0066 after
+a config-scoping fix, against random search's +0.0304, coordinate grid's +0.0501, PSO's +0.0484
+and a GA's +0.0312 -- beating every control on **0 of 3 seeds**. Roughly 80% of the remaining
+hours exist only to support the framing that is failing. Sized to the claim the evidence can
+actually carry, the experimental core is ~90 GPU-h.
+
+### The resized set: 254 cells for C, 80 + 8 for B
+
+| config | cells | GPU-h | replaces | was |
+|---|---|---|---|---|
+| `main_reduced` | 144 | 30.0 | `main.yaml` (576) | 120-240 |
+| `robustness_r1_reduced` | 40 | 8.3 | `robustness_r1_label_flip` (60) | 25-50 |
+| `robustness_r2_reduced` | 40 | 8.3 | `robustness_r2_update_attack` (120) | 50-100 |
+| `ablation_a2_reduced` | 30 | 6.2 | `ablation_a2` (60) | 25-50 |
+| **C total** | **254** | **52.9** | | 214-427 |
+| `gate_fitness` | 8 | 0.25 | new | -- |
+| `ablation_a1_reduced` | 80 | 16.7 | `ablation_a1` (80) | 17-33 |
+
+Every cut is named in the config header it belongs to, so the paper states them rather than a
+reviewer finding them. The cuts: K=20 -> 10 (the one size this project can *quote* rather than
+extrapolate, since 7.5s/round was measured at K=10), 2 local epochs -> 1, six regimes -> three
+(a monotone heterogeneity ladder, which is what figure 9 and claim C1 need), twelve strategies
+-> six, R1/R2's middle attacker fractions, and A6/A4/A5/A7/A8/R3-R6 entirely.
+
+**A1's cell count is unchanged at 80, deliberately.** Its five search methods, two partitions
+and eight seeds *are* the experiment; the saving comes from K and local epochs alone. 8 seeds
+is load-bearing here more than anywhere: at 5 the signed-rank floor of 0.0625 makes
+"inconclusive, sample too small" arithmetically certain, and that is the one outcome this
+comparison cannot afford to report.
+
+**What the trim gained rather than cost.** `main.yaml` ran 1 local epoch; R1/R2/A2/A1 ran 2.
+So no pairing of the full configs was a controlled comparison -- "FedACO under attack" and
+"FedACO clean" differed in local training as well as in the attack, and A1's rows were not
+comparable to the main table's at all. All six reduced configs now agree with `main_reduced` on
+K, local epochs, rounds, image size, lr, batch size and model, pinned by a test.
+
+**One coupling the trim introduced.** `robustness_r2_reduced` ships with no clean arm and uses
+the one `robustness_r1_reduced` writes to the same `results/fl/robustness`. This works because
+`attack: none` and `fraction-train: 1.0` are already pyproject defaults, so that arm resolves
+to the default variant -- which is what `add_deltas` falls back to. Run r1 before r2 and do not
+trim r1's clean arm, or every R2 delta is None, which renders as the same "—" as a cell with no
+paired seeds. Pinned by four tests.
+
+### Bug 1: the preflight ran one partition per config and called the rest ok
+
+`arms()` paired every strategy with `partitions[0]` and no other partition. Any partition axis
+carrying a *code path* was therefore executed for its first value only, while the report printed
+"ok" for the whole config. **Yesterday's "96 of 96 arms execute" was 96 of a possible 137.**
+
+Never executed, across a month of this script's existence: `robustness_r2_update_attack`'s
+`sign_flip` arms -- and `gaussian` inflates the update norm where `sign_flip` preserves it and
+reverses the direction, two different paths through `aco/heuristics.py`, so the norm-ratio
+heuristic was preflighted against half of what it claims to detect. Also R4's higher DP sigmas,
+R3's straggler fractions, and every regime but the first in `robustness.yaml` and `ablation_all`.
+
+Found while writing `robustness_r1_reduced.yaml`, whose natural partition order puts `clean`
+first: label-flipping would not have executed once, and the report would have read 4/4 ok for a
+config whose entire purpose is the attack.
+
+Now every strategy still runs against `partitions[0]`, and each remaining partition runs once
+against one strategy -- **linear in partitions, not multiplicative**, so A6 goes 27 arms to 28
+rather than 27xP and the walk stays CPU-minutes. The probe is FedACO where the config has it,
+because pairing an attacked partition with `fedavg` would execute the attack and skip the code
+that reads it. `robustness_r1_reduced` declares the attacked partition first so all four
+strategies meet it -- Krum derives its `f` from the cell's own `attack-fraction`, and a
+mis-derivation is invisible with no attackers present.
+
+### Bug 2: the resume key ignored the config, so changed arms reported "already ran"
+
+The resume added *yesterday* keyed on `config_stem + arm_label`. Neither carries what the arm
+resolves to. So reordering `robustness_r1_reduced.yaml`'s partitions -- which keeps every
+strategy label identical -- produced, within the hour:
+
+    skip    fedavg             (already ran)
+    skip    krum               (already ran)
+    skip    trimmed_mean       (already ran)
+    skip    fedaco             (already ran)
+
+from results computed with `attack: none`. Label-flipping had not run once and the report read
+4/4 ok. This is the September sweep bug -- a control handed a sibling's result file -- reproduced
+inside the mechanism added to prevent lost work, one day later.
+
+The key now includes an 8-character hash of the resolved config via the same `make_run_id` the
+real runners use; the two orderings fingerprint `389b6bb4` and `e9db62e6`. Two tests: that the
+same label under two partitions gets different keys, and that no two arms of a config ever
+collide (checked on A6, whose axes deliberately share a centre value).
+
+**Both bugs are the same shape, and it is the shape this repository keeps producing: a check
+that runs, passes, and means nothing.** The count is now eleven instances. What is new here is
+that one of them was introduced by me yesterday and caught today only because an unrelated
+config edit happened to expose it -- a resume that silently accepts stale work fails in exactly
+the direction that looks like success.
+
+### The 137-arm result: every arm of every sweep in the project executes
+
+    137 arms ran, 0 failed
+
+    robustness_r1_reduced      5    ablation_a1        6    ablation_a6      28
+    robustness_r2_reduced      5    ablation_a2        6    ablation_a7       5
+    ablation_a2_reduced        4    ablation_a3        3    ablation_a8       3
+    robustness_r1_label_flip   6    ablation_a4        6    ablation_a9       5
+    robustness_r2_update       9    ablation_a5        7    ablation_all      6
+    robustness_r3_stragglers   4    robustness        15
+    robustness_r4_dp_noise     5
+    robustness_r5_scaling      4
+    robustness_r6_cold_start   5
+
+41 of those 137 had never run before today, because they are the partitions the old
+`parts[0]` rule skipped. The newly covered ones that matter: `robustness_r2_update`'s
+`sign_flip_10/20/30pct` (the norm-ratio heuristic's second failure mode), R4's higher DP
+sigmas, R3's larger straggler fractions, and the non-first regimes of `robustness.yaml`,
+`ablation_all` and every A-config.
+
+**A third reporting bug, found in this run's own output.** The summary printed "147 arms ran"
+against 137 distinct arms. `robustness_r1_reduced` and `robustness_r2_reduced` were named
+explicitly *and* matched again by the `robustness_r*.yaml` glob later in the same argument
+list -- the natural way to say "these two first, then the rest". The second walk was
+correctly skipped by resume, but skips count toward `passed`, so the headline overstated
+coverage by ten. Path resolution is now an order-preserving dedupe in its own tested
+function. A pass count that overstates coverage is this script's own failure mode, which
+makes it the third instance today of the same shape.
+
+**What this does and does not establish**, restated because the number is easy to misread:
+2 rounds, K=6, image-size 32, synthetic fixture. It says every declared arm's strategy,
+attack, cold-start, persistence and aggregation path executes with real Flower messages. It
+says nothing about whether any number means anything. It is ~100 minutes of CPU standing in
+front of ~70 GPU-hours.
+
+### The 9-day set itself: 18 arms, 0 failed
+
+The 137-arm walk covered the full-size configs. The six the 9-day plan actually runs had
+verified *cell counts* and nothing else -- `main_reduced`, `gate_fitness` and
+`ablation_a1_reduced` had never executed at all.
+
+    18 arms ran, 0 failed
+
+    gate_fitness           4    default, gamma_entropy_0.45, dispersion_aggregate, fedavg
+    ablation_a1_reduced    6    aco, random, coordinate_grid, pso, ga, + dirichlet_0.3
+    main_reduced           8    fedavg, fedprox, krum, trimmed-mean, fedlaw, fedaco, + 2 regimes
+
+**Both candidate fitness fixes execute**, which is the result worth having here: `gamma_3 =
+0.45` and `aco-dispersion-reference: aggregate` are the two things `gate_fitness.yaml` exists
+to compare, and a config error in either would have been found on a Kaggle GPU with the gate's
+whole purpose being to be cheap. `main_reduced`'s `fedlaw` arm also runs -- it is the closest
+prior work and the one baseline whose absence would leave the contribution uncontested.
+
+155 arms across every sweep config in the project, 0 failed. Still 2 rounds, K=6,
+image-size 32, synthetic fixture: the code paths run, the numbers mean nothing.
+
+### Where this leaves the project
+
+Everything that can be built without a GPU or the real images is built. What remains:
+
+| | work | GPU-h | owner |
+|---|---|---|---|
+| 1 | **The framing decision** -- diagnostic paper or reframe | 0 | the team |
+| 2 | **The dataset-variant decision** (§"DECISION NEEDED", open since 2026-09-14) | 0 | the team |
+| 3 | `gate-fitness`, then `a1-reduced` | 17 | B |
+| 4 | `main-reduced`, `r1-reduced`, `r2-reduced`, `a2-reduced` | 53 | C |
+| 5 | Phase 9 on the first real results | 0 | A |
+| 6 | **The paper** -- `paper/` holds only ALGORITHM.md; 4 of §13's 8 sections have no file | 0 | unassigned |
+
+Items 1, 2 and 6 need no compute and none of them is assigned. Item 6 is the one to worry
+about: 70 GPU-hours is a config change, and eight pages with two related-work sections is
+nine days of somebody's attention.
+
+## 2026-09-25 (later) -- the paper, and the dataset question closed by its own diagnostic
+
+`paper/` held `ALGORITHM.md` and nothing else; four of plan §13's eight sections had no file and
+no owner. The paper, not the 70 GPU-hours, is the binding constraint on a 9-day deadline -- a
+config change buys the compute, and eight pages with two related-work sections does not.
+
+Written: `01_INTRODUCTION`, `02_RELATED_WORK`, `04_EXPERIMENTAL_SETUP`, `06_LIMITATIONS`,
+`07_REPRODUCIBILITY`, plus `00_ABSTRACT` and `05_RESULTS` as scaffolds that name the command
+filling each slot, and a `README` mapping every section and figure to its producer. §4, §6 and
+§7 are framing-independent by construction, so they stand whichever way A1 goes.
+
+**Citations are the one thing that could not be finished.** The plan names FedAAW, FedLAW,
+FedNolowe and DaWa with no bibliographic detail and this container has no literature access.
+Eighteen `[CITE: ...]` markers say exactly what each one needs. A test asserts they still exist,
+because silently deleting one ships an unsourced claim about prior work -- and inventing an
+author or venue is the fastest possible desk reject.
+
+### The dataset-variant question, open since 2026-09-14, closed by the diagnostic it asked for
+
+That entry asked for "per-class redundancy rate (images per pseudo-patient, broken down by
+class)" as the test of whether the archive's perfect balance was manufactured. Computed:
+
+| class | images | pseudo-patients | images/pp | redundancy | de-dup share |
+|---|---|---|---|---|---|
+| glioma | 1,800 | 1,476 | 1.220 | 18.0% | 30.87% |
+| meningioma | 1,800 | 1,403 | 1.283 | 22.1% | 29.34% |
+| pituitary | 1,800 | 1,326 | 1.357 | 26.3% | 27.73% |
+| **notumor** | 1,800 | **577** | **3.120** | **67.9%** | **12.07%** |
+
+Imbalance ratio **1.00 raw, 2.56 de-duplicated**. `notumor` carries 2.3-2.6x the redundancy of
+every tumour class -- not a gradient but one class holding nearly all of it.
+
+**This closes the question in the useful direction.** The concern was that plan §6.3 justifies
+macro-F1 because "the dataset is class-imbalanced", which is false of the archive. It is **true
+of the data actually trained on**: 2.56:1 with `notumor` at 12.07%. The metric was never the
+problem; the stated reason was attached to the archive instead of to the de-duplicated split.
+Decision recorded as option (a) -- keep this variant, document it precisely, restate the reason.
+Options (b) and (c) need Kaggle credentials this environment lacks against a blocked host, and
+would cost the entire compute budget a second time.
+
+`docs/IMPLEMENTATION_PLAN.md:559` now carries the correction inline, because a spec sentence
+known to be false about the data in use is exactly the stale source-of-truth this project keeps
+getting caught by.
+
+### A prose section cannot be generated, so it gets a test instead
+
+Plan §9.3 forbids hand-typing a number into the paper, and generated tables obey it. §4.1-4.3
+are prose quoting measured counts from `manifest.csv` and `leakage_report.json`, and nothing
+connected the two -- re-running the audit at a different pHash threshold would leave the paper
+asserting the old figures with no test failing.
+
+`tests/test_paper_numbers.py` re-derives every quoted dataset number from its source and asserts
+the paper still states it, including the derived 28.2% leakage figure and the *comparative*
+claims (notumor duplicated at >2x every tumour class; the de-duplicated data still materially
+imbalanced) rather than only the values -- a value check passes while the argument built on it
+stops holding. It also asserts `05_RESULTS.md` contains no four-decimal metric value, which is
+the rule the whole file exists to protect.
+
+### The framing decision, taken rather than left open
+
+Recorded in full in `docs/OPEN_QUESTIONS.md`. The paper is written under framing A (the
+degenerate optimum and the equal-budget loss as the findings) because three screens say C2 fails
+and the work could not proceed without a choice. The alternative framing is written out at the
+end of `paper/01_INTRODUCTION.md`, so if A1 reverses the result the switch is deleting one
+section and pasting another. **It is a methodological call the team can overturn**; it was taken
+because the writing was blocked on it, not because it belongs to the agent.
+
+724 tests pass, ruff clean.
+
+## 2026-09-25 (end) -- the novelty claim is refuted by the literature, and it corroborates our result
+
+Resolving the paper's `[CITE]` markers against a live literature index turned up three papers that
+change what this project can claim. Recorded in full with metadata in `paper/REFERENCES.md`.
+
+**1. Swarm optimization of the aggregation weight vector is already published.** Plan §1.2 states
+that swarm intelligence in FL sits at the systems layer and that "applying an ACO metaheuristic
+directly to the aggregation weight vector ... is the open slot". False:
+
+* **Adp-FL-PSO** (Srinivas et al., NMITCON 2025) -- "an enhanced Particle Swarm Optimization (PSO)
+  algorithm is applied to **the server to compute the optimal aggregation weights**".
+* **FedPSO** (Park et al., Sensors 2021, 119 citations) -- replaces FedAvg's weight aggregation
+  with PSO, targeting communication cost.
+
+**2. Gradient-based adaptive weights without proxy data is CVPR 2025 work.** **FedAWA** (Shi et
+al., CVPR 2025, 49 citations) adapts aggregation weights from client update vectors, needs no
+proxy dataset, and up-weights clients whose updates align with the global direction -- the same
+signal as our alignment term. Our four stated differentiators (no server data, no convexity bound,
+multi-dimensional signal, no policy training) are satisfied by FedAWA on the first two and
+arguably the third.
+
+**3. The refutation corroborates our own negative result.** The published swarm work on
+aggregation weights uses **PSO**. A benchmark of nine swarm algorithms for FL client selection
+(Khan et al., 2024) found Grey Wolf ahead of both ACO and PSO. Our A1 screens measure
+**PSO +0.0484 against ACO +0.0013-0.0066** on identical fitness and budget. Three independent
+signals, same direction: ACO is not the strong choice here.
+
+This is the most useful thing that happened today. The project's framing was "we are first to
+search alpha with a swarm method"; that was never true, and holding it would have been found by
+any reviewer who reads CVPR. What survives is defensible and is what the paper now claims:
+
+1. the first **equal-budget, equal-fitness** comparison across ACO, PSO, GA, coordinate grid and
+   random search for aggregation-weight search -- which tells you *which* search matters, where
+   the existing papers each validate one method against FedAvg;
+2. `corner_margin` and its closed-form penalty threshold, which apply to **any** of these methods
+   including the published PSO ones -- the degenerate single-client optimum is a property of the
+   objective, not of ACO;
+3. cross-round stigmergy. FedAWA, Adp-FL-PSO and FedPSO are all **stateless between rounds**.
+   This is the one structural novelty left, and it rests entirely on ablation A2.
+
+**A2 is therefore promoted from secondary ablation to the experiment carrying the contribution**,
+and it is in C's 9-day set at 30 cells / ~6 GPU-h. `ablation_a2_reduced.yaml` was written this
+morning for a different reason and turns out to be the most important cell block C runs.
+
+Two actions recorded for the team, neither doable here: **Adp-FL-PSO should become a baseline**,
+being the direct competitor rather than FedLAW; and one further finding worth using rather than
+just citing -- FedLAW (Li et al., 2023, 146 citations) reports that aggregation weights need not
+sum to 1 and that client *coherence* governs which clients matter, which is prior work on the same
+signal as our alignment term and should be discussed in §2.1 rather than listed.
+
+Also resolved: **Krum** (Blanchard et al., 2017, 3,028 citations), whose $O(n^2(d+\log n))$
+complexity is worth stating beside our own $O(K^2 d)$ precompute -- the robust baseline has the
+same quadratic client dependence we are asked to justify. And **Xie et al., 2019** ("Fall of
+Empires"), which breaks Krum and coordinate-wise median with inner-product manipulation attacks:
+our R2 `sign_flip` arm preserves the update norm and reverses direction, so it *is* an
+inner-product manipulation, and §5.3 should cite it rather than present the difficulty as new.
+
+Eleven markers remain open (FedNolowe, DaWa, FedProx, SCAFFOLD, the "FedACo" collision paper, the
+dataset's originating publication, and the client-drift analysis). The search rate-limited. None
+may be filled from memory.
+
+724 tests pass, ruff clean.
+
+## 2026-09-25 (handover) -- the three decisions confirmed, and A2 moved to the front
+
+The project owner confirmed all three provisional decisions: **framing A**, **dataset option
+(a)**, and the **342-cell / ~70 GPU-h scope**. They are no longer agent calls pending review;
+`docs/OPEN_QUESTIONS.md` records both as CONFIRMED and the paper should be written as though they
+hold rather than hedged. What can still move is the evidence -- A1 and A2 -- not the decisions.
+
+**`make c-all` reordered so `a2-reduced` runs first.** This follows from the citation work rather
+than from preference. FedAWA (CVPR 2025), Adp-FL-PSO and FedPSO all optimise aggregation weights,
+and all three are stateless between rounds, so cross-round pheromone persistence is the only
+structural novelty left in the project. A2 -- persistence none / decayed / full -- is the only
+experiment that tests it, at 30 cells and ~6 GPU-h.
+
+Spending 30 GPU-h on `main_reduced`'s headline table before knowing whether the one remaining
+novelty exists is the wrong order. If A2 says persistence buys nothing, the paper's contribution
+reduces to the equal-budget comparison and the `corner_margin` diagnostic, and the main table
+becomes supporting evidence for a methods note rather than the centrepiece -- which changes what
+is worth running next.
+
+New order: `gate_fitness` (0.25 GPU-h, which fix) -> `a2_reduced` (6, is there a contribution)
+-> `a1_reduced` (17, is the framing right) -> `main_reduced` (30) -> `r1` (8) -> `r2` (8).
+The first three are 23 GPU-h and settle every open question the paper's structure depends on.
+
+724 tests pass, ruff clean.
+
+## 2026-09-27 -- SCAFFOLD added back to `main_reduced`, at the project owner's request
+
+The 2026-09-25 trim cut `main_reduced.yaml` from twelve strategies to six, dropping fedadam,
+fedyogi, median, fednova, loss-based and scaffold together as one line item. Of those six,
+SCAFFOLD is the one with a real cost: it is the standard client-drift correction for non-IID
+FL, it is fully implemented with genuine per-client state (a control variate carried in
+Flower's node context, not a stub), and it is the baseline most likely to be asked for by name
+by anyone who knows the FL literature. The other five drops (adaptive server optimizers,
+a redundant robust-aggregator, and an unverified in-house heuristic with no citable source)
+stay dropped -- none of them bears on the paper's three actual claims.
+
+`main_reduced.yaml`'s strategies list is now `fedavg, fedprox, krum, trimmed-mean, fedlaw,
+scaffold, fedaco` -- seven, not six. Cost scales linearly with strategy count: 168 cells (was
+144), ~35 GPU-h (was ~30). Every downstream number that quoted the old count is updated in the
+same commit: `README.md`, `HANDOVER.md`, `paper/04_EXPERIMENTAL_SETUP.md`,
+`paper/07_REPRODUCIBILITY.md`, the Kaggle Day 3 notebook (regenerated via
+`scripts/build_kaggle_notebooks.py`, not hand-edited), and the Makefile comment. Project
+totals: 342 cells / ~70 GPU-h -> 366 cells / ~75 GPU-h.
+
+No test hardcoded the old strategy count or cell count -- `tests/test_config_defaults.py`
+checks ratios and set membership (`fedavg`/`fedaco` present, reduced-vs-full cost ratio),
+which is why this change did not need any test rewritten, only the comments and docs that
+quote the number in prose.
+
+830 tests pass, ruff clean.
+
+## 2026-09-27 (later) -- Day 2 split into 2a/2b, at the project owner's request
+
+Day 2 (A1: 80 cells, ~17 GPU-h) has never fit one 12-hour Kaggle session, and until now its
+own instructions said "run this one file twice, attaching your own previous output the second
+time." The project owner asked for it as two separate files instead, matching the shape every
+other day-boundary in this project already uses (Day 1 -> Day 2, Day 2 -> Day 3: a distinct
+notebook per stage, output handed forward).
+
+`kaggle_day2_a1.ipynb` is retired; `kaggle_day2a_a1.ipynb` starts the A1 sweep and commits
+however far it gets, `kaggle_day2b_a1.ipynb` is a second, independent notebook (full setup of
+its own, same as any other day boundary) that attaches Day 2a's output, continues the *same*
+`ablation_a1_reduced.yaml` sweep (finished cells skip automatically -- nothing is duplicated
+or re-run), then does the analysis and hands off to Day 3. Neither file changes what the sweep
+tests or its cost; the split is purely about which notebook object each half of the work lives
+in, matching the pattern the project owner is already used to from Day 1/Day 2/Day 3.
+
+Day 1's own "NEXT" pointer at the end of its notebook is updated to name Day 2a instead of the
+retired file. Day 3 is untouched -- it never referenced Day 2 by filename.
+
+840 tests pass (up from 830: two more notebooks for the parametrized static, dynamic and
+builder-parity checks to run against), ruff clean.
+
+## 2026-09-28 -- Day 3's main table split into sequential parts, same reason as Day 2
+
+`main_reduced` is 168 cells / ~35 GPU-h -- roughly 3 Kaggle sessions back to back, since none
+of them fit 35 hours alone. Its own combined file used to just say "keep re-running this until
+it's done," same as Day 2 did before yesterday's split. The project owner asked for the same
+treatment: separate files, one per part, rather than one file re-opened repeatedly. Unlike
+Day 2's A1 (which needed exactly two parts), main_reduced's real GPU throughput isn't known
+precisely enough to commit to an exact part count, so the design leans on `run_sweep.py`'s own
+`"{done} already complete, {todo} to run"` line -- printed fresh every invocation against the
+full 168 -- as the actual signal, not the file's number. `kaggle_day3c_main_finish.ipynb` is
+explicitly documented as repeatable: if its own sweep line doesn't read `0 to run`, re-attach
+its own output and run it again before trusting the IID-band check and table beneath it.
+
+`kaggle_day3_main_and_robustness.ipynb` is retired, replaced by four files:
+`kaggle_day3a_main.ipynb` and `kaggle_day3b_main.ipynb` (start and continue the sweep, commit
+whatever they get through), `kaggle_day3c_main_finish.ipynb` (finishes the sweep, then the IID
+band check and `make_tables`), and `kaggle_day3_robustness.ipynb` (R1 then R2, unchanged in
+substance -- it only ever needed the gate's fix, not the main table, so pulling main_reduced
+out into its own sequence doesn't touch it). Day 2b's own "NEXT" pointer is updated to name
+Day 3a instead of the retired file.
+
+870 tests pass (up from 840: three net new notebooks -- one retired, four added -- for the
+parametrized static, dynamic and builder-parity checks to run against), ruff clean.
+
+## 2026-10-04 -- Day 3's main table parts capped at 6 hours each, at the project owner's request
+
+The 3-part design above (2026-09-28) let each part run as long as a Kaggle session allowed,
+leaning entirely on `run_sweep.py`'s own "N already complete, M to run" line as the real
+signal rather than committing to a fixed part count or duration -- reasonable when per-round
+GPU cost was still an estimate, but the project owner now wants an actual cap: no part longer
+than 6 hours, not "however long the session has left."
+
+`run_sweep.py` gained `--time-limit-hours`: checked once per cell, before `run_cell` is
+called, never during one -- a cell already running always finishes, so the real wall clock
+can run over the limit by at most one cell's duration but a `flwr run` is never killed
+mid-simulation. `i > 1` guards the check so one invocation always attempts at least one cell,
+even if a single cell alone exceeds the limit; without that guard a tight limit against a slow
+cell would re-run forever, printing "time limit reached" on cell 1 every time and never making
+progress. The end-of-run summary now tracks `attempted` separately from `len(todo)`, since a
+time-limit stop means not every queued cell was tried -- counting them all as "completed" was
+the same class of bug the manifest's completed-vs-indexed distinction already guards against
+elsewhere in this file. Covered by two new tests in `test_sweep.py` asserting the check's
+position (before `run_cell`, inside the loop) and the `attempted` fix, via the same
+`inspect.getsource` pattern the existing federation-required test already used -- this file's
+established way of testing `main()`'s shape without mocking the subprocess layer.
+
+`main_reduced.yaml` is still 168 cells / ~35 GPU-h, and that estimate is still explicitly "an
+order of magnitude, not a quote" (`project_cost`'s own docstring) -- actual per-round cost at
+K=10 on a real GPU has never been measured. So, same reasoning as the 2026-09-28 split: a fixed
+part count is not load-bearing. At ~35h / 6h-per-part that is ceil(35/6) = 6 parts if the
+estimate holds; `kaggle_day3a_main.ipynb` through `kaggle_day3e_main.ipynb` each independently
+cap themselves at 6h and hand off to the next, and `kaggle_day3f_main_finish.ipynb` -- the
+"finish" part, carrying the IID band check and `make_tables` same as the old day3c did -- is
+explicitly documented as repeatable for whatever the estimate gets wrong, same pattern as
+before. `kaggle_day3c_main_finish.ipynb` is retired; `kaggle_day3a_main.ipynb` and
+`kaggle_day3b_main.ipynb` keep their names (still parts 1 and 2), the sweep command itself
+gains `--time-limit-hours 6`. Day 2b's own "NEXT" pointer is untouched -- it already named
+`kaggle_day3a_main.ipynb` by filename, which still exists.
+
+902 tests pass, ruff clean.
+
+## 2026-10-08 -- robustness (R1/R2) split the same way, capped at 10 hours each
+
+Same request extended to the other half of Day 3: R1+R2 (40+40 cells, ~16 GPU-h combined) used
+to run back to back in one notebook, close to the 12-hour Kaggle ceiling with no self-imposed
+cap. The project owner asked for 10-hour parts here too.
+
+R1 and R2 run through `run_sweep_granular.py` (`fedswarm.sweep.run_sweep`), a different,
+independently-developed runner from `run_sweep.py` (the main table's), reading a different YAML
+shape -- so the 2026-10-04 `--time-limit-hours` fix to `run_sweep.py` did not cover this path at
+all. `fedswarm.sweep.run_sweep` gained the equivalent: `time_limit_hours` and an injectable
+`now` callable (defaulting to `time.time`, mirroring the already-injectable `runner` callable
+this module uses for testability), checked only before a run that would actually execute -- a
+free `skipped_completed` or `planned` (dry-run) entry never counts against it, and a `>= 1`
+real-attempt guard means one invocation always makes progress even if its first real cell alone
+exceeds the limit. `run_sweep_granular.py` gained the matching `--time-limit-hours` CLI flag and
+now reports `len(entries) < len(runs)` as the time-limit signal (every other path -- dry-run,
+skip, lock, failure -- still appends one entry per run, so a short `entries` list is unambiguous
+without a dedicated status flag).
+
+Unlike `run_sweep.py`, this runner has a genuinely injectable clock as well as an injectable
+`runner`, so the two new tests (`test_time_limit_stops_the_granular_runner_before_a_run_not_mid_one`,
+`test_time_limit_never_blocks_free_skip_or_dry_run_entries`) exercise the real loop end to end
+with a fake clock standing in for elapsed hours, rather than `run_sweep.py`'s
+`inspect.getsource`-based shape assertions -- a real behavioural test was possible here, so it
+was used instead of weaker test.
+
+`DAY3_ROBUSTNESS` (one file, R1 then R2) is retired in favour of `DAY3_ROBUSTNESS_R1` and
+`DAY3_ROBUSTNESS_R2`: `kaggle_day3_robustness_r1.ipynb` runs R1 alone, capped at 10h, with its
+own clean-arm summary so it's visible whether R1 actually reached 40/40 (not just "time limit
+reached") before R2 is worth starting; `kaggle_day3_robustness_r2.ipynb` attaches R1's output,
+runs R2 alone (also capped at 10h), then the final `make_tables` pass. `kaggle_day3_robustness.ipynb`
+is deleted. At ~8h estimated per sweep against a 10h cap, one part each should suffice, but
+same reasoning as the main table's split: the ~8h figure is `run_sweep_granular.py`'s own cost
+projection, not a measurement, so each file is independently repeatable (attach its own latest
+output, run again) if a part's estimate undershoots in practice.
+
+914 tests pass, ruff clean.
+
+## 2026-10-08 (later) -- robustness cap lowered to 8 hours, at the project owner's request
+
+Immediately revised: the 10h cap above is now 8h, same mechanism (`--time-limit-hours 8` on
+both `robustness_r1_reduced` and `robustness_r2_reduced`), no code change -- only the value
+passed and the two notebooks' own text. Worth noting since the ~8 GPU-h cost estimate for each
+sweep sits right at this cap with no margin: in practice each of R1 and R2 is now likely to need
+a second, repeatable part rather than finishing in one sitting, which is an accepted tradeoff of
+the tighter cap, not a bug -- both files already carry the "re-run this same notebook, attach
+its own latest output" guidance for exactly this case.
+
+914 tests pass (no test asserts a specific hour value, only the time-limit mechanism's
+presence and shape), ruff clean.

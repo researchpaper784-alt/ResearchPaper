@@ -1,0 +1,68 @@
+# Phase 8, R2 -- Gaussian and sign-flip update attackers, trimmed to the 9-day budget.
+#
+# `robustness_r2_update_attack.yaml` is 120 cells (2 attack types x 3 fractions x 4
+# strategies x 5 seeds) at K=20 / 2 local epochs -- 50-100 GPU-h, the most expensive
+# robustness sweep in the project. This is 40 cells / ~8 GPU-h.
+#
+# WHAT IS KEPT, and why this trim is along a different axis than R1's. R2 exists to test
+# the norm-ratio heuristic r_k (aco/heuristics.py) -- a corrupted update should be an
+# outlier in magnitude or direction relative to the median client. `gaussian` and
+# `sign_flip` fail that heuristic in *different* ways: gaussian inflates the norm,
+# sign_flip preserves it and reverses the direction. So both attack TYPES are kept and
+# the fractions are cut to one (30%), where R1's trim kept one type and one fraction.
+# Dropping a type here would leave the heuristic tested against only half of what it
+# claims to detect.
+#
+# NO CLEAN ARM, deliberately. `robustness_r1_reduced.yaml` writes its `clean` arm to
+# this same `results/fl/robustness` with the same K, local epochs, rounds, regime and
+# strategies, so the unattacked baseline these rows are compared against already exists
+# and `add_deltas` finds it as the default variant. Adding a second identical clean arm
+# would cost 20 cells and, worse, produce two result files for the same resolved config
+# in one directory -- the shape of the resume bug this project hit in September.
+# ⚠️ This coupling is why R1_reduced must be run, and must not be trimmed further, if
+# R2_reduced is run. The two are one experiment split across two files.
+#
+# Cost: 4 x 2 x 5 = 40 cells x 100 rounds = 4,000 rounds, ~8 GPU-h at 7.5s/round.
+#
+# ⚠️ 5 seeds. Same caveat as R1_reduced: a headline Byzantine claim needs 8 (~13 GPU-h).
+#
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_reduced.yaml
+
+base_overrides:
+  output-dir: results/fl/robustness
+  num-clients: 10
+  local-epochs: 1
+  min-client-size: 5
+  fraction-train: 1.0
+  min-train-nodes: 2
+  min-evaluate-nodes: 2
+  min-available-nodes: 2
+  model-name: simple_cnn
+  model-pretrained: false
+  model-norm: groupnorm
+  image-size: 112
+  local-lr: 0.01
+  local-batch-size: 32
+  num-rounds: 100
+  deterministic: true
+  attack-scale: 0.5
+  regime: dirichlet
+  alpha: 0.3
+
+strategies:
+  - name: fedavg
+    file: configs/strategy/fedavg.yaml
+  - name: krum
+    overrides: {strategy-name: krum}
+  - name: trimmed_mean
+    file: configs/strategy/trimmed_mean.yaml
+  - name: fedaco
+    file: configs/strategy/fedaco.yaml
+
+partitions:
+  - name: gaussian_30pct
+    overrides: {attack: gaussian, attack-fraction: 0.30}
+  - name: sign_flip_30pct
+    overrides: {attack: sign_flip, attack-fraction: 0.30}
+
+seeds: [0, 1, 2, 3, 4]

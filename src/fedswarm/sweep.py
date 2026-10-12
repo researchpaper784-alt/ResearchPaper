@@ -22,7 +22,7 @@ from typing import Any, Callable
 
 import yaml
 
-from fedswarm.utils.results import make_run_id
+from fedswarm.utils.results import make_run_id, resolved_config
 
 DEFAULT_LOCK_TIMEOUT_S = 3600.0
 
@@ -92,6 +92,42 @@ def expand_grid(
     return runs
 
 
+def granular_runs(config_path: str | Path, base_dir: str | Path) -> list[RunSpec]:
+    """Expand a granular experiment config (strategies x partitions x seeds) into runs.
+
+    The one expansion `scripts/run_sweep_granular.py` and the Kaggle notebooks share, so a
+    notebook asking "which cells belong to this sweep?" gets the same answer the runner acts
+    on. Before this existed each notebook re-derived it by hand, and the first attempt called
+    a helper that lived only inside the script and omitted a required argument.
+    """
+    path = Path(config_path)
+    spec = yaml.safe_load(path.read_text())
+    return order_seed_first(
+        expand_grid(
+            strategies=spec["strategies"],
+            partitions=spec["partitions"],
+            seeds=spec["seeds"],
+            base_overrides=spec.get("base_overrides", {}),
+            group=path.stem,
+            base_dir=Path(base_dir),
+        )
+    )
+
+
+def planned_run_ids(runs: list[RunSpec], pyproject_path: str | Path) -> dict[str, str]:
+    """{run_id: label} for every run, predicted exactly as `run_sweep` would name them.
+
+    Side-effect free: `run_sweep(dry_run=True)` writes no manifest entry and takes no lock.
+
+    The ids hash the resolved config INCLUDING pyproject's defaults, so they change when a
+    default does -- which is the point when filtering results, and the trap when the gate's
+    fitness fix has been applied in one session and not the next. Call this after
+    `scripts/apply_gate_fix.py`, never before.
+    """
+    entries = run_sweep(runs, pyproject_path=str(pyproject_path), dry_run=True)
+    return {e["run_id"]: e["label"] for e in entries}
+
+
 def order_seed_first(runs: list[RunSpec]) -> list[RunSpec]:
     """Plan §6.2: "Order runs so that one complete seed of every configuration
     finishes first -- that way a partial sweep still yields a full (if noisy)
@@ -132,8 +168,48 @@ def predict_run_id(defaults: dict[str, Any], overrides: dict[str, Any]) -> str:
     merged = {**defaults, **overrides}
     seed = int(merged.get("seed", 0))
     strategy_name = str(merged.get("strategy-name", "fedavg")).lower()
-    resolved_config = {"run_config": merged, "strategy": strategy_name, "seed": seed}
-    return make_run_id(resolved_config, seed)
+    # The same function fl/app.py uses to build the block it hashes, so a predicted run_id
+    # and the real one cannot drift apart through two hand-written copies of the layout.
+    return make_run_id(resolved_config(merged, strategy_name, seed), seed)
+
+
+DEFAULT_OUTPUT_DIR = "results/fl"
+
+
+def resolve_output_dir(
+    run: RunSpec, defaults: dict[str, Any], requested: str | Path
+) -> tuple[str, dict[str, Any]]:
+    """Where this run will *actually* write, and the overrides that make it do so.
+
+    `run_sweep` checked `is_completed(run_id, output_dir)` against its `--output-dir`
+    argument while `execute_run` never put `output-dir` in the run_config -- so the run wrote
+    to pyproject's `output-dir` and the runner looked somewhere else. With the default
+    (`results/fl` both sides) they coincided and nothing showed. Pass anything else -- and
+    `run_sweep.py`'s own docstring says "`output-dir` is routinely outside: a Colab run
+    writes to Drive, a Kaggle run to ..." -- and two things break at once:
+
+    * every cell is recorded `status: "unknown"`, which this module reserves for the
+      genuinely alarming case of `flwr run` exiting 0 while the round died;
+    * **resume stops working.** `is_completed` never finds anything, so a sweep restarted
+      after a Kaggle session timeout silently re-runs every cell it had already finished.
+      For 576 cells that is the whole point of the manifest, lost without a symptom.
+
+    The fix is to make the two agree by construction: whatever directory is returned here is
+    both injected into the run_config and used for the completion check. A value already in
+    the run's own overrides wins, since the experiment YAML is the more specific statement.
+
+    Note the run_id legitimately depends on this: `make_run_id` hashes the whole resolved
+    config, `output-dir` included. That is pre-existing and consistent -- `predict_run_id`
+    merges the same overrides the app receives -- but it does mean a cell's id changes if its
+    output directory does, which is why `run_sweep.py` matches results by config while
+    ignoring path keys rather than by predicted id.
+    """
+    if "output-dir" in run.overrides:
+        return str(run.overrides["output-dir"]), dict(run.overrides)
+    requested = str(requested)
+    if requested == str(defaults.get("output-dir", DEFAULT_OUTPUT_DIR)):
+        return requested, dict(run.overrides)
+    return requested, {**run.overrides, "output-dir": requested}
 
 
 def is_completed(run_id: str, output_dir: str | Path) -> bool:
@@ -221,6 +297,88 @@ def execute_run(
     return result if isinstance(result, int) else result.returncode
 
 
+def required_supernodes(defaults: dict[str, Any], overrides: dict[str, Any]) -> int:
+    """This run's `num-clients`, resolved against pyproject's defaults.
+
+    `num-clients` is this project's own key for how the *data* is partitioned. How many
+    ClientApps the Simulation Runtime actually creates is Flower's `num_supernodes`, which
+    defaults to 2 and is a property of the *federation*, not of a run config -- so it has
+    to be set out-of-band, per cell, before `flwr run`.
+    """
+    return int({**defaults, **overrides}.get("num-clients", 2))
+
+
+def gpu_fraction_problem(gpus_per_client: float | None, num_clients: int) -> str | None:
+    """Refuse to start a sweep that would train on CPU on a GPU box. None means clear.
+
+    Ray hides accelerators from an actor requested with `num_gpus=0`. That is not a guess:
+    `ray/_private/worker.py` (2.55.1) computes
+    `override_on_zero = env_bool(RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO_ENV_VAR, True)` and warns
+    that *future* versions "will no longer override accelerator visible devices env var if
+    num_gpus=0 or num_gpus=None (default)" -- so the current version does. A ClientApp actor
+    given no GPU fraction therefore sees `torch.cuda.is_available() == False` and trains on
+    CPU.
+
+    **Why this has to refuse rather than warn.** The ServerApp runs in the driver process, not
+    a Ray actor, so it keeps the GPU: server-side evaluation, `test_macro_f1` and every logged
+    metric look completely normal. The only symptom is wall-clock, and the plan's own cost
+    projection is the thing you would check it against -- so the failure reads as "the estimate
+    was optimistic", which is exactly what a 4-core box legitimately causes too. For
+    `main.yaml` that is 576 cells x 100 rounds of client training at CPU speed: it does not
+    finish inside any Kaggle quota, and nothing in the result files says why.
+
+    An explicit `--gpus-per-client 0` is honoured -- someone who says they want CPU gets CPU.
+    It is the *unset* case on a GPU box that is refused.
+    """
+    if gpus_per_client is not None:
+        return None
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+    except Exception:  # pragma: no cover - no torch means no GPU training either
+        return None
+
+    suggested = round(1.0 / max(num_clients, 1), 4)
+    return (
+        "A GPU is present but --gpus-per-client was not set. Ray hides GPUs from ClientApp "
+        "actors requested with num_gpus=0, so every client would train on CPU while the "
+        "server kept the GPU -- the results would look correct and the sweep would simply "
+        "never finish.\n"
+        f"  Pass --gpus-per-client {suggested} to let all {num_clients} ClientApps share the "
+        "card, or a larger fraction to run fewer concurrently.\n"
+        "  Pass --gpus-per-client 0 if you really do want CPU training."
+    )
+
+
+def configure_federation(
+    num_supernodes: int,
+    cpus_per_client: int = 1,
+    gpus_per_client: float = 0.0,
+    runner: Runner = _default_runner,
+) -> int:
+    """Set the Simulation Runtime's supernode count and per-ClientApp resources.
+
+    `gpus_per_client` is a *fraction* of a GPU's VRAM per ClientApp, so 0.2 lets five share
+    one card. It has to be passed here rather than left to a separate manual call, because
+    this function re-issues `simulation-config` whenever a cell's K changes and it is not
+    established that unspecified options survive that. Left at 0 on a GPU box, Ray may
+    allocate no GPU to the ClientApp actors and the whole sweep runs on CPU -- which for
+    576 cells x 100 rounds does not finish, and shows up only as "this is slower than the
+    projection" rather than as an error.
+    """
+    cmd = [
+        "flwr", "federation", "simulation-config",
+        "--num-supernodes", str(num_supernodes),
+        "--client-resources-num-cpus", str(cpus_per_client),
+    ]
+    if gpus_per_client > 0:
+        cmd += ["--client-resources-num-gpus", str(gpus_per_client)]
+    result = runner(cmd)
+    return result if isinstance(result, int) else result.returncode
+
+
 def append_manifest(manifest_path: str | Path, entry: dict[str, Any]) -> None:
     path = Path(manifest_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,25 +394,53 @@ def append_manifest(manifest_path: str | Path, entry: dict[str, Any]) -> None:
 def run_sweep(
     runs: list[RunSpec],
     pyproject_path: str | Path,
-    output_dir: str | Path = "results/fl",
+    output_dir: str | Path = DEFAULT_OUTPUT_DIR,
     manifest_path: str | Path = "results/manifest.jsonl",
     lock_dir: str | Path = "results/fl/_locks",
     lock_timeout_s: float = DEFAULT_LOCK_TIMEOUT_S,
     dry_run: bool = False,
     runner: Runner = _default_runner,
+    cpus_per_client: int = 1,
+    gpus_per_client: float = 0.0,
+    time_limit_hours: float | None = None,
+    now: Callable[[], float] = time.time,
 ) -> list[dict[str, Any]]:
     """Runs `runs` in the given order (call `order_seed_first` beforehand if that
     ordering is wanted), skipping any whose predicted run_id already has a completed
     result, and skipping any currently locked by another in-flight process. Returns
     the list of manifest entries this call itself wrote (dry-run: what it *would*
-    write, without touching locks, `flwr run`, or the manifest file)."""
+    write, without touching locks, `flwr run`, or the manifest file).
+
+    `time_limit_hours`, if set, stops starting new runs once this many hours have
+    elapsed since this call began -- checked only before a run that would actually
+    execute (a free `skipped_completed`/`planned` entry never counts against it), and
+    only once at least one run has actually been attempted this call, so a single
+    invocation always makes progress even if its first real cell alone exceeds the
+    limit. A run already executing is never interrupted. Entries simply stop short of
+    `len(runs)` when the limit stops the loop -- the caller (the Kaggle notebooks'
+    `--time-limit-hours`) reads `len(entries) < len(runs)` as "time limit, re-run to
+    continue", the same way `run_sweep.py`'s own `--time-limit-hours` does for
+    `main.yaml`/`ablation_all.yaml`/`robustness.yaml`."""
     defaults = pyproject_flat_defaults(pyproject_path)
     entries: list[dict[str, Any]] = []
+    # Reconfigured per cell, but only when the value actually changes -- these configs
+    # VARY num-clients across cells (overhead.yaml sweeps 5 -> 150, main_client_scale
+    # 10 -> 50, robustness_r5 likewise), and `num_supernodes` is a federation-level
+    # setting that no --run-config key can carry. Left unset it defaults to 2: a cell
+    # labelled K=100 would train on 2 clients while recording 100, and an overhead curve
+    # measured that way comes out FLAT -- which reads as evidence for the O(K^2) cost
+    # being negligible, the very claim (C3) these sweeps exist to test.
+    configured_supernodes: int | None = None
+    started = now()
+    real_attempts = 0
 
     for run in runs:
+        # Resolved before the id, because the id hashes the config this returns.
+        cell_output_dir, overrides = resolve_output_dir(run, defaults, output_dir)
+        run = RunSpec(label=run.label, group=run.group, overrides=overrides)
         run_id = predict_run_id(defaults, run.overrides)
 
-        if is_completed(run_id, output_dir):
+        if is_completed(run_id, cell_output_dir):
             entry = {"run_id": run_id, "label": run.label, "group": run.group, "status": "skipped_completed"}
             entries.append(entry)
             if not dry_run:
@@ -265,15 +451,42 @@ def run_sweep(
             entries.append({"run_id": run_id, "label": run.label, "group": run.group, "status": "planned"})
             continue
 
+        if (
+            time_limit_hours is not None
+            and real_attempts >= 1
+            and (now() - started) >= time_limit_hours * 3600
+        ):
+            break
+        real_attempts += 1
+
         if not try_acquire_lock(run_id, lock_dir, lock_timeout_s):
             entry = {"run_id": run_id, "label": run.label, "group": run.group, "status": "skipped_locked"}
             entries.append(entry)
             append_manifest(manifest_path, entry)
             continue
 
+        wanted = required_supernodes(defaults, run.overrides)
+        if wanted != configured_supernodes:
+            code = configure_federation(
+                wanted, cpus_per_client, gpus_per_client, runner=runner
+            )
+            if code != 0:
+                # Refuse rather than run: a cell at the wrong supernode count either hangs
+                # at round 0 (min-train-nodes above the count) or silently mislabels its
+                # client count. Both are worse than stopping.
+                entry = {
+                    "run_id": run_id, "label": run.label, "group": run.group,
+                    "status": "failed_federation_config", "return_code": code,
+                }
+                entries.append(entry)
+                append_manifest(manifest_path, entry)
+                release_lock(run_id, lock_dir)
+                continue
+            configured_supernodes = wanted
+
         try:
             return_code = execute_run(run, runner=runner)
-            completed = is_completed(run_id, output_dir)
+            completed = is_completed(run_id, cell_output_dir)
             if completed:
                 status = "completed"
             elif return_code != 0:

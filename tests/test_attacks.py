@@ -232,3 +232,52 @@ def test_label_flip_does_not_mutate_the_shared_source_dataset() -> None:
 
     assert torch.equal(poisoned_labels.sort().values, torch.tensor([0, 1, 2, 3]))
     assert torch.equal(base.tensors[1], torch.tensor([0, 1, 2, 3])), "source was mutated"
+
+
+# ======================================================================================
+# Krum's assumed attacker count must match the real one
+# ======================================================================================
+
+
+@pytest.mark.parametrize(
+    ("fraction", "expected"), [(0.0, 0), (0.05, 1), (0.1, 2), (0.2, 4), (0.3, 6), (0.5, 10)]
+)
+def test_krum_assumes_exactly_as_many_attackers_as_there_are(fraction: float, expected: int) -> None:
+    """R1 and R2 hardcoded `num-malicious-nodes: 4` (20% of 20 clients) across attacker
+    fractions of 10%, 20% and 30%, because a Cartesian-product grid cannot say "this
+    strategy-specific value must track that partition-specific one". Krum was therefore
+    correctly tuned in one of three cells per sweep and mis-tuned in the other two -- and
+    Krum is the Byzantine baseline the paper's "resilience for free" claim is measured
+    against, so a mis-tuned Krum flatters FedACO in a way no table reveals.
+
+    `f` now comes from the same `malicious_ids` the ClientApp uses to decide which
+    partitions actually lie, so the two cannot drift apart.
+    """
+    from fedswarm.strategies.factory import _krum_malicious_count
+
+    run_config = {"attack": "label_flip", "attack-fraction": fraction, "num-clients": 20}
+
+    assert _krum_malicious_count(run_config) == expected
+    assert _krum_malicious_count(run_config) == len(malicious_ids(20, fraction))
+
+
+def test_the_clean_arm_gives_krum_zero_attackers_whatever_the_fraction_says() -> None:
+    """Every robustness sweep has a `clean` control that keeps the fraction and sets
+    `attack=none`. Deriving `f` from the fraction alone would hand Krum a nonzero assumption
+    on a run where nobody lies, which is not the control the table claims to report."""
+    from fedswarm.strategies.factory import _krum_malicious_count
+
+    assert _krum_malicious_count(
+        {"attack": "none", "attack-fraction": 0.3, "num-clients": 20}
+    ) == 0
+
+
+def test_an_explicit_count_still_wins() -> None:
+    """So "what if Krum misjudges f" stays expressible as a deliberate cell --
+    `robustness.yaml` sets 2 and 6 per variant and must keep working."""
+    from fedswarm.strategies.factory import _krum_malicious_count
+
+    assert _krum_malicious_count(
+        {"attack": "label_flip", "attack-fraction": 0.1, "num-clients": 20,
+         "num-malicious-nodes": 4}
+    ) == 4

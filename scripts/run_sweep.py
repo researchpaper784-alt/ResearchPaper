@@ -46,6 +46,7 @@ from pathlib import Path
 
 import yaml
 
+from fedswarm.sweep import gpu_fraction_problem  # noqa: E402
 from fedswarm.utils.runner import (
     diagnose,
     format_run_config,
@@ -247,7 +248,9 @@ def _foreign_variant_values(
 # ======================================================================================
 
 
-def configure_federation(num_clients: int, cpus_per_client: int = 1) -> tuple[bool, str]:
+def configure_federation(
+    num_clients: int, cpus_per_client: int = 1, gpus_per_client: float = 0.0
+) -> tuple[bool, str]:
     """Set the Simulation Runtime's supernode count and per-client CPUs for this sweep.
 
     **This is not optional setup, it is a correctness requirement.** `num-clients` is this
@@ -273,18 +276,33 @@ def configure_federation(num_clients: int, cpus_per_client: int = 1) -> tuple[bo
         "--num-supernodes", str(num_clients),
         "--client-resources-num-cpus", str(cpus_per_client),
     ]
+    # A *fraction* of a GPU per ClientApp: 0.2 lets five share one card. Omitted rather
+    # than passed as 0, so a CPU-only box is unaffected. On a GPU box leaving it unset can
+    # mean the ClientApp actors get no GPU allocation and the sweep runs on CPU -- which
+    # for 576 cells x 100 rounds never finishes, and presents as "slower than projected"
+    # rather than as an error.
+    if gpus_per_client > 0:
+        cmd += ["--client-resources-num-gpus", str(gpus_per_client)]
     completed = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True)
     if completed.returncode != 0:
         return False, (completed.stderr or completed.stdout or "").strip()[:400]
     return True, f"{num_clients} supernodes, {cpus_per_client} CPU each"
 
 
-def preflight(num_clients: int, skip: bool) -> list[str]:
+def preflight(num_clients: int, skip: bool, gpus_per_client: float | None = 0.0) -> list[str]:
     """Problems worth refusing to start 360 runs over. Returns a list of warnings; an
     empty list means clear."""
     warnings = []
     if shutil.which("flwr") is None:
         warnings.append("`flwr` is not on PATH -- activate the venv (.venv/bin) first.")
+
+    # The most expensive way this sweep can fail is by succeeding slowly: see
+    # `sweep.gpu_fraction_problem`. Shared with run_sweep_granular.py rather than
+    # reimplemented, because this script already carries a second copy of
+    # `configure_federation` and one divergent guard is enough.
+    gpu_problem = gpu_fraction_problem(gpus_per_client, num_clients)
+    if gpu_problem:
+        warnings.append(gpu_problem)
 
     cores = os.cpu_count() or 1
     if num_clients > cores:
@@ -338,6 +356,19 @@ def main() -> int:
     parser.add_argument("--seeds", default=None, help="comma-separated seeds to run")
     parser.add_argument("--limit", type=int, default=None, help="stop after N cells (a pilot)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan and cost, run nothing")
+    parser.add_argument(
+        "--gpus-per-client",
+        type=float,
+        # Deliberately None, not 0.0: argparse cannot otherwise distinguish "the user left
+        # it alone" from "the user asked for CPU", and `gpu_fraction_problem` refuses only
+        # the first of those on a GPU box.
+        default=None,
+        help=(
+            "fraction of a GPU per ClientApp (0.2 = five share one card). Required on a GPU "
+            "box -- unset, Ray hides the GPU from every ClientApp and the sweep trains on "
+            "CPU while looking healthy. Pass 0 to ask for CPU deliberately"
+        ),
+    )
     parser.add_argument("--stream", action="store_true", help="echo each run's output live")
     parser.add_argument("--skip-preflight", action="store_true")
     parser.add_argument(
@@ -349,6 +380,20 @@ def main() -> int:
         type=float,
         default=MEASURED_SECONDS_PER_ROUND,
         help="for the --dry-run cost projection",
+    )
+    parser.add_argument(
+        "--time-limit-hours",
+        type=float,
+        default=None,
+        help=(
+            "stop starting new cells once this many hours have elapsed since this "
+            "invocation began (a cell already in flight always finishes -- this never "
+            "kills a running simulation). Checked before each cell, not during one, so "
+            "the actual wall clock can run somewhat over the limit by up to one cell's "
+            "duration. Exits 0 -- stopping on the time limit is expected, not a failure. "
+            "Re-run the same command to continue; completed cells are skipped as usual. "
+            "Unset means no limit (run until todo is empty, same as before this existed)."
+        ),
     )
     args = parser.parse_args()
 
@@ -386,7 +431,7 @@ def main() -> int:
     print(f"sweep: {spec.get('name', config_path.stem)}  ({len(cells)} cells)")
     print(project_cost(len(cells), rounds, args.seconds_per_round, num_clients))
 
-    warnings = preflight(num_clients, args.skip_preflight)
+    warnings = preflight(num_clients, args.skip_preflight, args.gpus_per_client)
     for warning in warnings:
         print(f"\n  ⚠️  {warning}")
 
@@ -443,7 +488,9 @@ def main() -> int:
 
     # Correctness, not convenience: without this the Simulation Runtime creates 2
     # ClientApps regardless of `num-clients`, and every result file is mislabelled.
-    ok, detail = configure_federation(num_clients, args.cpus_per_client)
+    ok, detail = configure_federation(
+        num_clients, args.cpus_per_client, args.gpus_per_client or 0.0
+    )
     if not ok:
         print(f"\nCould not configure the federation ({detail}).")
         print("Every cell would silently run 2 clients regardless of num-clients. Refusing.")
@@ -452,8 +499,22 @@ def main() -> int:
 
     failures = []
     started = time.time()
+    time_limit_hit = False
     for i, cell in enumerate(todo, 1):
         elapsed = time.time() - started
+        # Checked before starting a cell, never during one: a cell already running is let
+        # finish, so this can run over the limit by at most one cell's duration but never
+        # kills a `flwr run` mid-simulation. `i > 1` so one invocation always makes
+        # progress even if a single cell alone exceeds the limit -- otherwise a tight
+        # limit against a slow cell would spin forever re-running and stopping on cell 1.
+        if args.time_limit_hours is not None and i > 1 and elapsed >= args.time_limit_hours * 3600:
+            print(
+                f"\n  time limit reached ({elapsed / 3600:.1f}h >= {args.time_limit_hours}h) -- "
+                f"{len(todo) - i + 1} cells left. Re-run the same command to continue; "
+                "completed cells are skipped."
+            )
+            time_limit_hit = True
+            break
         eta = (elapsed / max(i - 1, 1)) * (len(todo) - i + 1) if i > 1 else 0
         print(f"\n[{i}/{len(todo)}] {cell.label}" + (f"   (eta {eta / 3600:.1f}h)" if i > 1 else ""))
         try:
@@ -504,7 +565,12 @@ def main() -> int:
             },
         )
 
-    print(f"\n{len(todo) - len(failures)}/{len(todo)} cells completed in {(time.time() - started) / 3600:.1f}h")
+    # Cells actually attempted this invocation -- `len(todo)` only if the loop ran to
+    # completion. A time-limit stop breaks before attempting cell `i`, so `i - 1` of them
+    # were tried; using `len(todo)` here instead would overcount "completed" by every cell
+    # still left, since nothing in `failures` would have caught them either.
+    attempted = (i - 1) if time_limit_hit else len(todo)
+    print(f"\n{attempted - len(failures)}/{attempted} cells completed in {(time.time() - started) / 3600:.1f}h")
     if failures:
         print(f"{len(failures)} failed:")
         for label, reason in failures[:10]:

@@ -1,5 +1,10 @@
 # FedSwarm
 
+> ### 👋 New to this project? Read [`HANDOVER.md`](HANDOVER.md) first.
+> It covers current status, the three decisions already taken and how to reverse them,
+> exactly what to run in what order, and the landmines that have each already cost
+> someone a day.
+
 **FedSwarm: Adaptive Aggregation Optimization in Federated Learning using Swarm Intelligence for Brain Tumor Diagnosis**
 
 > Renamed from the original working title "FedACO" to avoid a naming collision with a
@@ -66,10 +71,99 @@ what is missing.
 | `paper/tables/ablation.{md,csv}` | `make tables-ablation` | 9 |
 | `convergence.png`, `comparison.png`, `colony_health.png` | `make figures` | 9 |
 | `ablations.png` | `make figures-ablation` | 9 |
+| `alpha_heatmap.png` (plan §9.2 fig 3) | `make figures` | 9 |
+| `overhead_vs_k.png` (fig 5) | `make overhead` then `make figures` | 8 |
+| `robustness.png` (fig 6) | `make robustness-granular` then `make figures` | 8 |
+| `sensitivity.png` (fig 7) | needs a factorial sweep — see note below | 7 |
+| `gain_vs_heterogeneity.png` (fig 9) | `make main` then `make figures` | 9 |
 | Robustness sweep (attacks, dropout) | `make robustness` (`make robustness-plan` first) | 8 |
 | `paper/tables/robustness.{md,csv}` | `make tables-robustness` | 8 |
 
+`make figures` writes whichever of the nine it has data for and names the rest on a
+`skipped (no data)` line, so a missing figure says which sweep it is waiting on rather than
+disappearing.
+
+**`sensitivity.png` has no sweep yet.** Plan §9.2 asks for a heatmap over two ACO
+hyperparameters, but `ablation_a6.yaml` is a *one-at-a-time* sweep: each arm moves one knob
+off a shared centre, so its cells form a cross, not a grid, and `figure_sensitivity` refuses
+to image it (a KxK cross fills only 2K-1 cells, and the colour scale would be read across
+the holes). Producing that figure needs a small factorial sweep over the two knobs A6 shows
+to matter most — worth declaring only after A6 has run and identified them.
+
+### Check a sweep config runs before spending GPU hours on it
+
+```bash
+python scripts/synthetic_heterogeneous_dataset.py --out-dir /tmp/fx --num-images 600 --image-size 32
+make preflight-configs FIXTURE=/tmp/fx
+```
+
+Runs one cell of every declared arm at 2 rounds and K=6. `strategy_from_run_config` rejecting a
+bad config is necessary and not sufficient — it builds the strategy, not the round, and a config
+can construct cleanly then die at round 1. The worst case does not raise at all: a
+`min-train-nodes` above the supernode count makes Flower's `sample_nodes` wait in a
+`while ...: sleep(1)` loop that never gives up, so the run consumes the whole session and writes
+nothing. A minute per arm on CPU against several hundred GPU-hours.
+
+### Which sweeps are worth running right now
+
+Two answers, depending on the deadline.
+
+**If you have 7–9 days**, the full set does not fit and no ordering of it does: it is
+351–701 GPU-hours, which at Kaggle's ~30 GPU-h per week per account is 12–23 weeks on one
+account and 4–8 across three. Run the reduced set — **366 cells, ~75 GPU-h**, in this order:
+
+| order | make target | cells | GPU-h | who |
+|---|---|---|---|---|
+| 1 | `gate-fitness` | 8 | 0.25 | B — which fitness fix closes the corner, ~15 min |
+| 2 | `a1-reduced` | 80 | 16.7 | B — the go/no-go on claim C2 |
+| 3 | `main-reduced` | 168 | 35.0 | C — the headline table (7 strategies, incl. `scaffold`) |
+| 4 | `r1-reduced` | 40 | 8.3 | C — **before** `r2-reduced`, see below |
+| 5 | `r2-reduced` | 40 | 8.3 | C |
+| 6 | `a2-reduced` | 30 | 6.2 | C |
+| | `b-all`, `c-all` | **366** | **~75** | |
+
+Every cut is named in the config header it belongs to, so the paper states them rather than
+a reviewer finding them. `r1-reduced` must run before `r2-reduced`: R2 ships with no
+unattacked arm and uses the `clean` arm R1 writes to the same `results/fl/robustness`, so
+trimming R1 leaves every R2 delta `None` — which renders as the same "—" as a cell with no
+paired seeds. A1 keeps all 80 cells deliberately; its five search methods, two partitions
+and eight seeds are the experiment, and only its per-cell cost was cut.
+
+**If the deadline moves**, the full sweeps are still the right thing to run, and they do not
+all have the same prerequisites:
+
+| tier | sweeps | cells | GPU-h | condition |
+|---|---|---|---|---|
+| 1 | R1–R6, `robustness.yaml`, A9, A3 | 430 | 90–179 | none — run these first |
+| 2 | A4, A5, A7 | 175 | 36–73 | survive a reframe, but only interpretable once the colony's mechanism is sound |
+| 3 | A2, A6, A8, `ablation_all` | 340 | 88–175 | ACO-specific; dropped entirely if claim C2 is reframed |
+
+Tier 2 is the distinction worth being careful about: those three ablate the *fitness* and
+*desirability* terms, which a reframe keeps — but if the colony is not searching (the safety
+fallback currently fires in 44% of rounds, where a coordinate sweep improves in every one) then
+every arm collapses toward the same behaviour and the ablation measures noise rather than the
+term it names. `scripts/check_fedaco_health.py --strict` is the gate on that.
+
+### On a GPU box, set `GPUS` before any sweep
+
+```bash
+make main GPUS=0.05        # 1/num-clients lets every ClientApp share one card
+```
+
+Ray hides the GPU from any actor requested with `num_gpus=0`, so with no fraction set every
+ClientApp trains on **CPU** while the ServerApp keeps the GPU. Server-side evaluation and
+every logged metric look completely normal — the only symptom is wall-clock, against a cost
+projection that a small-core box makes optimistic anyway. For `main.yaml` that is 576 cells ×
+100 rounds of CPU training: it does not finish inside any Kaggle quota and no result file says
+why. Both runners now refuse to start in that situation and name the fraction to pass; leave
+`GPUS` empty on CPU, or pass `--gpus-per-client 0` to ask for CPU deliberately.
+
 ### Before the sweep
+
+**On Colab or Kaggle**, pass `PY=python FLWR=flwr` to any `make` target — those runtimes
+install into the system Python and have no `.venv`. `notebooks/kaggle_main_sweep.ipynb` is
+the ready-to-run Kaggle notebook for the main sweep; it does this for you, restores results
+from a previous session, and runs the plan's two gates before the 576-cell sweep.
 
 ```bash
 make pheromone-budget       # can a run of this length answer question 1 at all?

@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software or its results, please cite it as below."
+title: "FedSwarm: An Ant-Colony Metaheuristic for Federated Aggregation Weights"
+abstract: >-
+  Code, experiments, and paper materials for FedSwarm, which studies whether an
+  ant-colony metaheuristic over the federated-learning aggregation weight vector
+  improves on fixed and learned weighting for non-IID, multi-site brain-tumour MRI
+  classification. See paper/00_ABSTRACT.md and HANDOVER.md in this repository for the
+  full, current account of what was found.
+authors:
+  - family-names: "Thakker"
+    given-names: "Krith"
+  - family-names: "Narayan"
+    given-names: "Anmol"
+  - family-names: "Baliyan"
+    given-names: "Prateek"
+  - family-names: "Soni"
+    given-names: "Mohit"
+license: MIT
+repository-code: "https://github.com/researchpaper784-alt/ResearchPaper"
+version: "1.0.1"
+date-released: "2026-10-12"

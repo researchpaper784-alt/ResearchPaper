@@ -91,7 +91,7 @@ Kaggle API before downloading):
 [Br35H](https://www.kaggle.com/datasets/ahmedhamada0/brain-tumor-detection),
 [Figshare](https://figshare.com/articles/dataset/brain_tumor_dataset/1512427).
 
-## ⚠️ Dataset variant is class-balanced, not the canonical release — DECISION NEEDED
+## Dataset variant is class-balanced, not the canonical release — RESOLVED 2026-09-25 (option a)
 
 The archive obtained on 2026-09-14 is **perfectly class-balanced**: exactly 1400 images per
 class in `Training/` and 400 per class in `Testing/` (7,200 total). The widely-cited
@@ -123,6 +123,51 @@ before the main sweep (Phase 6) commits GPU-weeks to one variant.
 **Next diagnostic to run:** per-class redundancy rate (images per pseudo-patient, broken
 down by class). If one class is markedly more redundant, that is evidence of
 augmentation-based balancing and pushes toward option (b) or (c).
+
+### RESOLUTION 2026-09-25 — option (a), and the macro-F1 rationale survives with a corrected reason
+
+The diagnostic this entry asked for ("per-class redundancy rate, images per pseudo-patient,
+broken down by class") is now computed over the full manifest:
+
+| class | images | pseudo-patients | images/pp | redundancy | raw share | de-dup share |
+|---|---|---|---|---|---|---|
+| glioma | 1,800 | 1,476 | 1.220 | 18.0% | 25.00% | 30.87% |
+| meningioma | 1,800 | 1,403 | 1.283 | 22.1% | 25.00% | 29.34% |
+| pituitary | 1,800 | 1,326 | 1.357 | 26.3% | 25.00% | 27.73% |
+| **notumor** | 1,800 | **577** | **3.120** | **67.9%** | 25.00% | **12.07%** |
+
+Overall redundancy 34.0%. Imbalance ratio: **1.00 raw, 2.56 after de-duplication.**
+
+`notumor` is duplicated at 2.3-2.6x the rate of every tumour class. That is not a gradient, it
+is one class carrying nearly all the redundancy -- the signature the 2026-09-14 entry named as
+evidence of augmentation-based balancing, now quantified.
+
+**Decision: option (a) -- keep this variant, document it precisely, restate the macro-F1
+rationale. CONFIRMED by the project owner 2026-09-25.** Three reasons, in order of weight:
+
+1. **The rationale does not need rescuing, it needs restating.** This entry's concern was that
+   §6.3 justifies macro-F1 because "the dataset is class-imbalanced", which is false of the
+   archive. It is **true of the data actually trained on**: after pseudo-patient de-duplication
+   the distribution is 2.56:1 with `notumor` at 12.07%. The paper states it in that form
+   (`paper/04_EXPERIMENTAL_SETUP.md` §4.1). The metric choice was never wrong; the stated reason
+   was attached to the wrong object.
+2. **Option (b)/(c) are not available.** Fetching the canonical release needs Kaggle
+   credentials this environment does not have, and `www.kaggle.com` is blocked by the egress
+   proxy. Under the 7-9 day deadline it is also not affordable: re-running the audit, the split,
+   the centralized ceiling and every sweep on a second dataset is the whole compute budget again.
+3. **The finding is worth more than the comparability it costs.** "The published balance of this
+   widely used archive is manufactured by duplicating one class, and 28.2% of its images leak
+   across its own published train/test split" is a contribution to the data section. Papers
+   reporting on this variant without de-duplication are reporting on 34%-redundant data with
+   two-thirds of the redundancy in a single class.
+
+**What this costs, recorded rather than buried:** numbers here are not directly comparable to
+published results on the canonical release (~7,023 images). The paper says so in §4.1 and §6.4.
+The pipeline is dataset-agnostic, so running the canonical release later is a config change --
+it is listed as the first thing to add if the deadline moves.
+
+Pinned by `tests/test_paper_numbers.py`, which re-derives every one of these numbers from
+`manifest.csv` and `leakage_report.json` and fails if the paper stops matching them.
 
 ### Diagnostic result (2026-09-14) — the balance is manufactured by duplicating `notumor`
 
@@ -432,26 +477,37 @@ execute, same blocker as everything else in Phase 3 onward.
   yaml` scopes it to FedACO vs. plain FedAvg only, IID partition only, 3 seeds --
   widen it later if the main sweep's results make a broader comparison worth the
   extra compute. Same reasoning duplicated in that file's own header comment.
-- **Robustness configs R1/R2's Krum arm** (`robustness_r1_label_flip.yaml`,
-  `robustness_r2_update_attack.yaml`) fixes `num-malicious-nodes=4` (20% of 20
-  clients) across all three tested attacker fractions (10%/20%/30%), rather than
-  co-varying it with each cell -- a plain Cartesian-product sweep grid doesn't have
-  a clean way to express "this strategy-specific value should track that
-  partition-specific value." Krum is therefore mildly mis-configured (not fatally)
-  at the 10%/30% cells. Flag this if Krum's numbers from these two sweeps are
-  compared against a hypothetical "properly tuned per attacker fraction" version.
-- **R6 (cold start: clients joining after round 20) has no config file here at
-  all** -- a real gap, not an oversight. Which SuperNodes exist/connect at all is
-  controlled by Flower's own Simulation Runtime (Ray actor lifecycle), not by
-  anything `run_config` can express; there is no clean way from application code to
-  say "partition-id 15 must not participate before round 20." What IS built and
-  tested (Phase 4): `Pheromone.begin_round` correctly initializes a fresh row for
-  any client id it has never seen, whenever it first shows up
-  (`test_pheromone_persists`) -- so the *mechanism* R6 wants to stress-test is
-  already correct, but actually engineering controlled late-arrival timing to
-  exercise it on purpose is not implemented. Would need a custom Strategy-level
-  node-filtering wrapper (override `configure_train` to restrict `grid.
-  get_node_ids()`'s candidates by round number) if this becomes a priority.
+- ~~**Robustness configs R1/R2's Krum arm** fixes `num-malicious-nodes=4` across all
+  three attacker fractions.~~ **FIXED 2026-09-24.** The coupling moved into
+  `strategies/factory.py`, which sees the whole resolved run_config: `f` now comes from
+  `attacks.malicious_ids`, the same function the ClientApp uses to pick which partitions
+  lie, so the count Krum assumes and the count that lie cannot drift. It was recorded here
+  as an accepted simplification for days; the fix is smaller than the note explaining why
+  it wasn't made. Worth remembering as a pattern -- "a Cartesian product can't express
+  this" was true of the *config*, and false of the system.
+- ~~**R6 (cold start) has no config file here at all.**~~ **BUILT 2026-09-24**
+  (`fl/cold_start.py`, `configs/experiment/robustness_r6_cold_start.yaml`). The note
+  below was right that the Simulation Runtime's actor lifecycle is out of reach and that
+  no `run_config` key holds a partition back -- and wrong that this closed the door. A
+  strategy never asks the runtime for nodes; it asks the `Grid` it is handed. Every client
+  starts at round 1 and a filtered Grid keeps a deterministic subset (the highest node ids,
+  disjoint from `malicious_ids`' lowest) out of the strategy's view until the join round.
+  The clients exist; the aggregation does not see them, which is exactly the condition R6
+  is about.
+
+  The real hazard turned out to be a hang rather than an error: Flower's `sample_nodes` is
+  `while len(grid.get_node_ids()) < min_available_nodes: sleep(1)` with no give-up, so
+  hiding one node too many burns a whole Kaggle session silently. `with_cold_start`
+  therefore validates the visible count against the strategy's own minimums and raises at
+  construction, and a test builds every strategy the shipped config declares to prove it
+  passes. That is also why the config sets `min-train-nodes: 10`, not 20.
+
+  Still open, and only a real run can answer it: whether `Pheromone.begin_round`'s fresh
+  row for an unseen client is initialised at a sensible level. Too high over-trusts a
+  newcomer, too low freezes it out however good its updates are, and the unit test only
+  establishes that a row appears -- not that its value is right. The config's
+  `fedaco_cold_no_persistence` arm is what separates "the gap is stigmergy" from "the gap
+  is fifteen clients for twenty rounds".
 - **A10 (layer-wise alpha vs. model-wise), the plan's own explicitly optional,
   "time-box it" ablation, is not implemented and has no config file.** It needs a
   real redesign (the construction graph would need K x num_layer_groups stations,
@@ -947,3 +1003,965 @@ robustness configs. The granular configs turned out to be at **3** seeds, not 5:
    re-verified 2026-09-24 with `--dry-run` against the current merged code: `ablation_all`
    60 cells, `robustness` 75 cells, the 9 granular ablation configs 605 cells combined,
    the 5 granular robustness configs 270 cells combined. No overlap, nothing crashes.
+
+## Phase 4 -- the level set did not match the plan's own hyperparameter table
+
+**Status: fixed 2026-09-19. Prior results are affected.**
+
+docs/IMPLEMENTATION_PLAN.md §14 writes the level set out literally:
+
+    [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5]
+
+which is `linspace(0, 2.5, 11)`. `aco/schedules.level_set` was **log-spaced** until today.
+Nobody could have caught it: the plan was not in the repository until the same day.
+
+| | linear (plan) | log (what shipped) |
+|---|---|---|
+| max ratio between positive levels | 10x | **1143x** |
+| levels below 1.0 | 4 of 11 | **9 of 11** |
+
+**Why this is not cosmetic.** Log spacing puts nine of eleven levels below the FedAvg
+point and lets a single ant construct alpha ratios over 1000:1, so a near-vertex weighting
+like [0.99, 0.01] is one greedy draw away. Linear caps it at 10:1.
+
+That bears directly on the degenerate-optimum finding (2026-09-18). The observed
+alpha = [0.990, 0.010] was read as the colony finding the fitness's single-client optimum.
+It was -- but the *reachability* of that corner was inflated by a level set the plan never
+specified. `corner_margin` measures the fitness and is unaffected; how easily the colony
+gets there is not.
+
+**What was done.** `level_spacing` is now selectable, defaults to `"linear"` (the plan's
+spec), and is exposed as `aco-level-spacing`. `"log"` is kept rather than deleted: every
+result produced before today used it, and A6 -- the hyperparameter-sensitivity ablation
+that owns L -- now has a `levels_log_spaced` cell so the choice is measured rather than
+assumed.
+
+**What is still open.** Whether the corner margin stays positive on real deltas under
+*linear* spacing. The synthetic measurements in the 2026-09-18 entry and the K=10
+rehearsal both used the log grid, so neither transfers. The first real run under the new
+default is what settles it -- and until it does, "the fitness prefers one client" should
+be quoted as a lead, not a finding.
+
+## Phase 6 -- the per-ClientApp GPU fraction is wired but unverified on a GPU
+
+**Status: open. Needs one GPU session to close, not analysis.**
+
+`flwr federation simulation-config` takes `--client-resources-num-gpus` (verified against
+the installed flwr 1.36.0: `FLOAT RANGE [x>=0.0]`, "Ratio of a GPU VRAM assigned to the
+execution of each ClientApp"). Neither runner could pass it until today, so a GPU sweep was
+not expressible from the CLI at all; both now accept `--gpus-per-client` and forward it
+through `sweep.configure_federation`, which re-issues it on every K change.
+
+**What is verified here.** The flag is accepted and the config write succeeds on this
+CPU-only box (exit 0, "Updated simulation configuration", no tracked file mutated), and the
+fraction is re-issued on each reconfiguration rather than set once and possibly dropped
+(`tests/test_sweep.py::test_the_gpu_fraction_is_reissued_on_every_reconfiguration`).
+
+**What is not, and cannot be from here.** Whether the fraction actually results in a GPU
+allocation to the ClientApp actors -- that is Ray's placement, and there is no GPU on this
+machine to observe it on. Nothing in this repo has ever run a ClientApp on a GPU.
+
+**Why it matters more than an ordinary perf setting.** A ClientApp that gets no GPU does not
+error; it trains on CPU. For the 576-cell main sweep that reads as "slower than the
+projection". For `overhead.yaml` it is worse: that sweep's deliverable *is* a wall-clock
+curve over K = 5 -> 200, and a CPU-bound curve is still a curve, so it would be reported as
+the measured O(K^2) cost the sweep exists to establish. The first GPU session should print
+`torch.cuda.*` from inside a ClientApp, or compare one cell's wall-clock against the CPU
+rehearsal, before the overhead numbers are trusted.
+
+## Phase 6 -- RESOLVED, badly: the degenerate optimum reproduces on the plan's linear grid
+
+**Status: closed as confirmed, 2026-09-19, by the project's first real GPU run.**
+
+The previous entry left this open: the K=10 rehearsal and every synthetic measurement of
+`corner_margin` ran on the **log-spaced** level set, so none of them transferred to the
+plan's `linspace(0, 2.5, 11)` default. The first run on real MRI data on a Kaggle T4, at
+K=10 and the linear grid, answers it:
+
+> **DEGENERATE**: the best single-client vertex outscored the FedAvg point in **15/15
+> rounds** (mean margin **+0.6252**) at K=10.
+
+Per-round `corner_margin` ranged 0.457 to 0.805 and was positive in every round. So the
+level grid was never what made the corner attractive -- the **fitness function** prefers
+"use one client, discard the rest", and the linear grid only makes it harder to reach.
+
+**What makes this the dangerous shape rather than a bug.** The colony did *not* go to the
+corner in this run: `alpha_max` averaged 0.338 and `alpha_entropy` stayed near 1.9 against
+a 2.303 ceiling. The search is too short and too underpowered to find the optimum it is
+pointed at. So the run *looks* healthy -- no fallbacks fired, best_fitness beat the FedAvg
+point in 14 of 15 rounds -- and the failure arrives only as the colony gets *better*. Any
+change that strengthens the search (more rounds, larger budget, higher `aco-q-deposit`)
+moves FedACO toward a worse model while every diagnostic in the report improves.
+
+**This is a fitness-design problem, and it is A1's problem too.** At equal budget the
+controls (random, grid, PSO, GA) optimize the *same* fitness, so they inherit the same
+corner. A1 could come back "ACO ties random search" for a reason that has nothing to do
+with ACO: both are searching a landscape whose optimum is useless.
+
+**What has to happen before the 576-cell sweep.** Raise `aco-gamma-entropy` until the
+margin is negative at K=20, and confirm it with a gate re-run rather than by argument. The
+knob exists (`concentration_penalty`, `CONCENTRATION_PENALTIES`), A7 owns its shape, and
+`scripts/probe_*` can bracket a value on synthetic deltas -- but the number must be
+confirmed against real deltas, because that is exactly the transfer that failed last time.
+
+## Phase 4 -- the pheromone budget table assumes a fitness 4x the real one
+
+**Status: open. Affects how question 1's verdict should be read, not any result.**
+
+`aco/diagnostics.py` drives the real deposit rule with `MEASURED_FITNESS = 0.8`, and
+`scripts/analyze_pheromone_dynamics.py` reports "must realize 21%" at the plan's budget
+over 20 rounds on that basis. The first real run's `best_fitness` came in at 0.026-0.326,
+mean ~0.19 -- roughly a quarter of the assumed value. The deposit is `rho * Q * max(F, 0)`,
+so a 4x smaller F makes the best case ~4x smaller and the fraction a run must realize
+correspondingly larger. The live run reported needing **253%** of its own best case, i.e.
+question 1 was unanswerable at that budget, not merely tight.
+
+The consequence is only about interpretation: an `UNDERPOWERED` verdict at a budget the
+table calls comfortable is not a contradiction, it is the table's 0.8 being optimistic.
+`MEASURED_FITNESS` should be re-derived from real runs once a gate run exists at the
+corrected `aco-gamma-entropy`, since the fitness magnitude will move with it.
+
+## Phase 3 -- RESOLVED: no FL run was reproducible, and the seed said otherwise
+
+**Status: fixed 2026-09-19. Every FL result produced before this commit is affected.**
+
+Two Kaggle gate runs at **identical config and identical seed** disagreed on every metric:
+
+| | run 1 | run 2 |
+|---|---|---|
+| mean corner margin | +0.6252 | +0.6184 |
+| rounds hitting the deposit floor | 1 (round 12) | 4 (rounds 1, 6, 8, 12) |
+| tau, as a fraction of best case | 36% | 79% |
+| final test macro-F1 | 0.1185 | 0.1381 |
+
+Two independent causes, neither able to show up before this project ran a real federation.
+
+**1. The ClientApp was never seeded.** `seed_everything` is called in `server_app.main()`
+and nowhere else. In the Simulation Runtime a ClientApp is a separate **Ray actor process**,
+so the server's seeding never reached it, and the train loader --
+`DataLoader(..., shuffle=True)` with no `generator` -- drew its batch order from each
+actor's own OS-seeded RNG. The `seed` recorded in every result file governed the server's
+model initialization and nothing on the client. Fixed: both handlers seed themselves from
+f(run seed, partition id, server_round), and the train loader takes an explicit generator.
+
+Folding the **round** in matters as much as the client. Re-seeding to f(seed, partition)
+alone would have made the runs reproduce perfectly while training all 100 rounds on one
+fixed permutation -- a quieter bug that passes exactly the test written to catch this one.
+
+**2. FedACO consumed replies in arrival order.** `deltas`, the Gram matrix, the
+desirability and the colony's stations are all built positionally from the reply list, and
+Ray does not fix its order -- `participating_client_ids` shows it changing between rounds
+of a single run. A permutation hands the same pseudo-random draws to different clients, and
+moves which clients `precompute_gram(trim_fraction=...)` trims when scores are close. The
+aggregate was never *wrong* (alpha is matched to clients by id, the pheromone is keyed by
+id); it was not reproducible. Fixed by sorting on client id before anything positional.
+
+**What this invalidates.** Every FL result in `results/` predating this fix, as a
+*reproducible* artifact. The numbers are not wrong -- they are draws from the right
+distribution with an unrecorded seed. Seed-to-seed variance in the main sweep was still
+real variance, so the 8-seed statistics plan is unaffected in kind. What breaks is
+`verify_repro.py`, `docs/repro_reference.json`'s tolerance band, and the sweep's resume
+logic, all of which assume a run can be repeated. The reference band has to be rebuilt from
+a post-fix run before it means anything.
+
+**Why 491 tests missed it.** Every one of them calls the handlers directly, in one process,
+where the server's `seed_everything` had already run and there is no Ray actor boundary to
+cross. The failure needs a real federation, which this project first had today.
+
+## Phase 4 -- the degenerate corner is a fitness-design fault, not a tuning problem
+
+**Status: cause identified and a fix implemented behind a flag, 2026-09-20. Unconfirmed on
+real deltas.** The previous entry said to raise `aco-gamma-entropy` until the corner margin
+went negative. That was done, and it is the wrong fix.
+
+### What the second gate run showed
+
+At `aco-gamma-entropy=0.6` (the measured 0.481 requirement plus headroom), at K=10:
+
+| check | result |
+|---|---|
+| 3. corner degenerate? | **CLEAR** -- FedAvg outscores the best vertex by 0.4524 |
+| 2. deposit floor | **7 of 15 rounds** had no positive alpha, so deposited nothing |
+| 1. colony searching? | unanswerable (the best case went negative; see below) |
+| 4. beats FedAvg? | **BEHIND: 0.1185 vs 0.3286, margin -0.2101** |
+
+The corner was closed by breaking the mechanism. `F = gamma_1*align - gamma_2*disp -
+gamma_3*P`, so a penalty large enough to outweigh a vertex's free alignment also drags every
+*interior* candidate down. The MAX-MIN rule deposits `rho * Q * max(F, 0)`, so a negative
+fitness deposits nothing however well the colony searches: tau never moves, `tau^a * eta^b`
+collapses to `eta^b`, and what remains is deterministic heuristic weighting that lost to
+plain averaging by 0.21 macro-F1.
+
+### The prior problem, which was in the first run's data all along
+
+`fedavg_fitness` is logged per round and nothing read it. At the **default**
+`gamma_entropy=0.1`, over the first gate's 15 rounds:
+
+    F at the FedAvg point: mean -0.0005, negative in 7/15 rounds, range -0.2798 to +0.1833
+
+The objective does not rank the aggregation FedACO exists to improve on above zero. It is
+zero-centred noise there. So the colony's `best_fitness` mean of +0.1602 is a margin over
+noise, and there is no `gamma_entropy` that fixes that -- raising it only moves the reference
+point further below zero.
+
+### The cause, and why no amount of gamma_3 reaches it
+
+Dispersion is `sum_k alpha_k ||delta_k - Delta(alpha)||^2`: a weighted variance about a mean
+that **moves with alpha**. At `alpha = e_j` the mean *is* `delta_j`, so every term is exactly
+zero -- not small, zero. A single-client answer pays nothing for dispersion and collects the
+alignment for free, leaving only `gamma_3 * log K` against it. The degeneracy is structural.
+
+### The fix, implemented and unconfirmed
+
+`aco-dispersion-reference` selects what the spread is measured about:
+`"weighted_mean"` (the method as proposed, still the default) or `"base"` -- about
+`Delta(base_weights)`, the FedAvg point, which does not move with alpha. A vertex then costs
+`||delta_j - Delta_base||^2`, which is large. Same O(K^2) Gram-only expansion, same cost.
+
+It is also the more defensible quantity: FedACO's job is to beat FedAvg, so "how far are
+these clients from the aggregate I am trying to beat" is worth charging for, while "how far
+are they from wherever I put the mean" is trivially answered by collapsing onto one client.
+
+Measured on synthetic consensus deltas, K in {10, 20}, noise in {1.5, 3.0}, at the **default**
+`gamma_entropy=0.1`:
+
+| | corner margin | F(best) | alpha_max |
+|---|---|---|---|
+| weighted_mean | +0.0571 (corner wins) | +0.3731 | 0.119 |
+| base | **-0.5056** | +0.3720 | 0.119 |
+
+Surgical where `gamma_3=0.6` was not: the corner loses and nothing else moves.
+
+**LOCALLY REPRODUCED AND ANSWERED, 2026-09-24 (`make fitness-repro`).** The claim below that
+only a GPU gate could settle this was wrong -- `ray`/`flwr[simulation]` run in this project's
+Linux containers, and the missing piece was never compute but a fixture heterogeneous enough
+to reproduce the failure. `scripts/synthetic_heterogeneous_dataset.py` gives one (class-correlated
+patterns, so dirichlet skew produces genuinely different local optima; `ci_smoke_dataset.py` is
+deliberately trivial for CI speed and cannot). At gamma_3=0.1, K=10, dirichlet(0.3), 15 rounds,
+about a minute per arm:
+
+| | weighted_mean (local) | real Kaggle | aggregate (local) |
+|---|---|---|---|
+| F at the FedAvg point, mean | **-0.0033** | -0.0005 / -0.0212 | **+0.8141** |
+| negative in | 5/15 rounds | 7/15 rounds | **0/15** |
+| corner_margin, mean | **+0.6185** | +0.3136 / **+0.6184** | **-0.5283** |
+| corner wins in | **15/15** | **15/15** | **0/15** |
+| rounds that deposited nothing | 3/15 | 1-7/15 | **0/15** |
+| final test macro-F1 | 0.1000 | 0.1185 - 0.1381 | 0.1168 |
+
+The left column reproduces the real failure on every axis. The right shows `aggregate` removing
+both halves of it: the corner never wins, and F at the reference point stops being zero-centred
+noise, so every round deposits.
+
+`alpha_max` under `aggregate` is 0.207 against uniform's 0.100, so the colony still has room --
+this is not the `gamma_3=0.6` failure where the landscape was repaired by flattening it.
+
+**What is still open.** A synthetic *signature* match is a much weaker claim than a data match:
+it says the fixture fails the same way, not that the fix transfers. 15 rounds is also far too
+short to read the macro-F1 column. The real gate remains the test that counts -- but it is now
+a confirmation rather than a discovery, and any further fitness change can be screened here
+first for the cost of a minute instead of a GPU session.
+
+**The original note, kept because its reasoning was the mistake worth remembering:** all of
+that is synthetic. Consensus deltas have high alignment and low
+dispersion, which is exactly the regime where this is easy, and real MRI deltas under
+dirichlet(0.3) are not that regime -- the level-set episode is precisely a case of synthetic
+evidence not transferring. The next gate run at `aco-dispersion-reference=base` and
+`aco-gamma-entropy=0.1` is what settles it. A6 gains a `dispersion_about_fedavg_point` cell
+so the choice is measured rather than asserted (250 -> 260 cells).
+
+**If it wins, it is not a hyperparameter result.** It is a correction to the plan's §4.5
+fitness, and the paper has to describe the method that way.
+
+## Phase 4 -- `dispersion_reference="base"` was not the fix, and could not have been
+
+**Status: superseded by `"aggregate"`, 2026-09-20. Unconfirmed on real deltas.**
+
+The gate run at `aco-dispersion-reference=base`, `aco-gamma-entropy=0.1`, K=10:
+
+| | weighted_mean | base |
+|---|---|---|
+| mean corner margin | +0.6184 | **+0.3136** |
+| F at the FedAvg point | -0.0005 | **-0.0212** |
+| vs FedAvg | -- | **BEHIND 0.1328 vs 0.3321** |
+
+It halved the margin and stopped. That is not bad luck, it is the only thing the term can do:
+
+    dispersion_about_reference(alpha) = sum_k alpha_k * c_k,   c_k = ||delta_k - Delta_ref||^2
+
+`c_k` is fixed before alpha is chosen, so the term is **exactly linear in alpha**. A linear
+function on the simplex attains its extremes at vertices, so it has no interior optimum at
+all. It charges for picking *far* clients, never for concentration -- and a vertex on the
+client with the smallest `c_k` is therefore *cheaper* than any mix. Measured at K=10,
+noise 3.0: cheapest vertex 7.29 against 8.01 at every interior point.
+
+So the previous entry's synthetic result (-0.51 at K=10) was real but not general. Consensus
+deltas at low noise make the `c_k` nearly equal, which hides the whole defect; the probe was
+run in the one regime where a linear term looks like a convex one.
+
+### `"aggregate"`: the distance of the AGGREGATE from the consensus
+
+    ||Delta(alpha) - Delta_rob||^2 = alpha' G alpha - 2 alpha . g_rob + ||Delta_rob||^2
+
+Quadratic in alpha, minimized in the interior, and for a reason that is a property of the
+quantity rather than a penalty bolted onto it: averaging cancels per-client noise, so a
+K-way mix keeps roughly 1/K of each client's deviation from the consensus while a single
+client keeps all of its own. An interior point is genuinely nearer the consensus, not merely
+less penalized. Same precompute, no new O(K*d) work.
+
+Swept over K in {10, 20} x noise in {1.5, 3, 6} x {uniform, dirichlet(0.3)-skewed} base
+weights, at the **default** `gamma_entropy=0.1`, it is the only one of the three shapes that
+is correct in all 12 cells:
+
+| mode | corner margin | F at the FedAvg point |
+|---|---|---|
+| weighted_mean | +0.0012 .. +0.3663 (corner wins) | -0.3276 .. +0.3698 |
+| base | -0.0223 .. -0.8621 | -0.2567 .. +0.3698 |
+| **aggregate** | **-0.7373 .. -1.7790** | **+0.3021 .. +0.9885** |
+
+The second column matters as much as the first. Under the other two shapes, F at the
+reference point is zero-centred noise once the base weights are skewed -- which is exactly
+what the real runs measured (-0.0005, then -0.0212) -- so the colony's margin over it is a
+margin over noise regardless of what the corner does.
+
+**The skewed high-noise cells now reproduce the real runs' negative F(fedavg)**, which is the
+first time this project's synthetic proxy has matched the failure it is standing in for. That
+is a reason to trust it more than the last two probes, not a reason to skip the gate run.
+
+A6 keeps a cell for each of the three (260 -> 270): the paper has to show why the obvious
+fixed-reference fix is not the one, and that needs the measurement, not an argument.
+
+
+## Phase 3 -- a mis-set supernode count hangs a run forever, and nothing can detect it
+
+**Status: mitigated where it can be, open where it cannot.**
+
+Flower's node sampler (`flwr.serverapp.strategy.strategy_utils.sample_nodes`) is
+
+    while len(all_nodes := list(grid.get_node_ids())) < min_available_nodes:
+        sleep(1)
+
+with no give-up. If the federation is configured for fewer SuperNodes than a run's
+`min-available-nodes` / `min-train-nodes` asks for, the run does not fail -- it logs
+"Waiting for nodes to connect" once a second and consumes the whole session.
+
+**Observed live, 2026-09-24**, while screening A1 locally: a run configured for 4 supernodes
+while asking for 10 sat at round 1 for over three minutes with the machine *idle*
+(load average 0.29, ClientApp actors at 2% CPU) before it was killed. Identical runs against
+a correctly configured federation finish 15 rounds in 39 seconds. On a Kaggle session that is
+nine hours and no output.
+
+**What makes it worse than an ordinary misconfiguration:** `flwr federation
+simulation-config` can only SET the count, never read it. There is no way to ask what the
+federation is currently configured for, so a preflight cannot check it -- the only protection
+is to set it immediately before every run that depends on it.
+
+**Mitigations in place.** `run_sweep.py` and `run_sweep_granular.py` both call
+`configure_federation` before their cells and refuse if it fails, so every sweep is covered.
+The gap was the notebooks' *bare* `flwr run` gate cells, which relied on a section-3 cell
+having been run earlier in the same session -- a stale kernel, a restarted SuperLink or a
+Run-All from the middle would all leave the count wrong. B's gate cell now sets it itself,
+immediately before the runs.
+
+**Still open.** Nothing can catch this from inside the application once a run has started.
+A wrapper that bounded each `flwr run` with a timeout and treated "Waiting for nodes to
+connect" in the log as fatal would close it -- worth doing if a session is ever lost to this,
+and not worth the complexity before then. If a run sits at round 0 or 1 with an idle machine,
+this is the first thing to check.
+
+## Phase 7, A1 -- LOCAL SCREEN: ACO loses to all four controls, and the mechanism is identified
+
+**Status: the paper's make-or-break result, screened locally 2026-09-24. Needs the real A1 to
+confirm, but the cause is diagnosed and it is a design flaw rather than a verdict on ACO.**
+
+A1 costs 80 cells and 17-33 GPU-hours on Kaggle. Screened on the local heterogeneous fixture
+(5 search methods x 3 seeds x 15 rounds, K=10, dirichlet(0.3), `aggregate` fitness so the
+landscape is not the degenerate one, equal evaluation budget enforced by `BudgetedFitness`):
+
+| method | mean gain over the FedAvg point | alpha_max | budget used |
+|---|---|---|---|
+| **aco** | **+0.0013** | 0.200 | 96.8% |
+| random | +0.0304 | 0.192 | 100% |
+| coordinate_grid | **+0.0501** | 0.158 | 100% |
+| pso | +0.0484 | 0.173 | 100% |
+| ga | +0.0312 | 0.185 | 100% |
+
+Per-seed ACO gain: `[-0.0002, +0.0002, +0.0039]`. **ACO beats every control on 0 of 3 seeds**,
+and loses to the weakest of them (random) by a factor of 23.
+
+The plan's stated failure mode for C2 was "ACO ties random search". This is worse than a tie.
+But it is not the verdict it looks like, because the cause is mechanical and fixable.
+
+### Why: the greedy rule constructs the FedAvg point
+
+`eta_{k,l} = (1 + |lambda_l - d_hat_k|)^-1`, where `d_hat_k` rescales the per-client sigmoid
+score `d_k` across the level range. Measured across K in {10, 20} and noise in {1.5, 3, 6},
+**`d_k` spans about 0.04** (e.g. 0.7685 - 0.8073) against a level spacing of **0.25**. So every
+client's `d_hat` lands in the same level bin, and `argmax_l eta_{k,l}` returns the same level
+for every client -- identical in 3 of the 6 configurations tested, adjacent levels in the rest.
+
+A uniform level assignment normalises back to `base_weights` **exactly**
+(`levels_to_alpha`: `tilde = levels[idx] * base_weights`, then scaled to `target_sum`). So when
+the argmax is client-invariant, the greedy branch of the ACS rule constructs **the FedAvg
+point** -- and the screen ran at `q0=0.9`, so that is **90%** of station decisions.
+
+The 0.9 is itself a bug, found on 2026-09-24 and fixed: plan §14 specifies `q0_exploitation:
+0.70`, and `configs/strategy/fedaco.yaml` encodes it, but `pyproject.toml` -- which is what
+`flwr run` and therefore this screen used -- still carried phase-4's 0.9. See "Four sources of
+truth for the FedACO defaults" below.
+
+The colony is therefore anchored at FedAvg by its own exploitation rule, and can only move via
+the 30% exploratory draws. Its best candidate came in at +0.9559 against F(FedAvg) = +0.9558:
+it finds the reference point and essentially nothing else. The controls, having no such anchor,
+explore and find better points. That is the whole result.
+
+### What this means and what it does not
+
+It does **not** mean ACO cannot help here. It means the heuristic as specified in §4.5 has
+almost no per-client dynamic range, so the pheromone-times-desirability rule degenerates to
+"everyone takes the same level". Candidate fixes -- standardising `d_k` across clients before
+rescaling, widening the sigmoid, or lowering `q0` -- are method changes for the team, not
+something to pick unilaterally. Any of them can now be screened locally in minutes.
+
+`q0` has since been screened (see below): lowering it recovers most of the gap but does not
+close it, so it is a contributing cause rather than the whole story.
+
+### Also measured, and deliberately NOT fixed
+
+The colony visits **82 distinct alphas out of 210 evaluations** (61% duplicates) where random
+search visits 210 of 210. Memoizing within a round is exact -- the Gram matrix is fixed, so a
+repeated alpha has the same fitness by construction -- and was implemented and reverted:
+`run_colony` stops on its own ant/iteration schedule rather than on `remaining()`, so the freed
+budget is never spent and the best fitness was **identical** in all 8 configurations tested. It
+also broke four tests encoding "no method outspends the shared budget" and changed the meaning
+of the logged `evaluations_used`. Spending the freed budget is a change to the colony's stopping
+rule, which belongs with the heuristic decision above.
+
+## Phase 7 -- RESOLVED: `q0` is a contributing cause of A1's result, not the whole one
+
+A1's local screen left the anchoring diagnosis untested: the argument was that a
+client-invariant `argmax` makes the ACS greedy branch reconstruct the FedAvg point, so at
+`q0=0.9` the colony spends 90% of its station decisions standing still. If that is right,
+lowering `q0` must recover gain. Screened on the same heterogeneous fixture (K=10,
+dirichlet(0.3), 15 rounds, `aggregate`, gamma_3=0.1), 4 values x 3 seeds, 12 real runs:
+
+| `q0` | mean gain over the FedAvg point | per-seed |
+|---|---|---|
+| **0.9** (what the screen ran) | **+0.0013** | `[-0.0002, +0.0002, +0.0039]` |
+| 0.5 | +0.0222 | `[+0.0214, +0.0203, +0.0248]` |
+| 0.2 | +0.0259 | `[+0.0294, +0.0242, +0.0239]` |
+| 0.0 | +0.0287 | `[+0.0268, +0.0301, +0.0292]` |
+
+The effect is **+0.0274 from 0.9 to 0.0, a 22x improvement**, against a between-seed spread of
+0.0033-0.0056 at every level -- so unlike the macro-F1 column below this is not an averaging
+artifact. **The anchoring diagnosis is confirmed.**
+
+It is not monotone below 0.5, and that matters for how it gets described: essentially the whole
+effect is the single step from 0.9 to 0.5 (+0.021), and 0.5 / 0.2 / 0.0 are within noise of each
+other. The finding is "0.9 is pathological", not "less greed is always better".
+
+**But it does not close the gap.** The controls on the identical fixture: coordinate_grid
++0.0501, pso +0.0484, ga +0.0312, random +0.0304. Even at `q0=0.0` -- no exploitation at all,
+which is barely ACO any more -- the colony reaches +0.0287 and still loses to every one of them.
+So the greedy branch is *a* cause, and something else is also wrong. The remaining candidates
+are unchanged and still the team's call: standardising `d_k` across clients before rescaling
+(the 0.04-span problem the anchoring argument rests on, which lowering `q0` routes around rather
+than fixes), and widening the sigmoid.
+
+### What this screen could NOT answer, and why the fixture is at fault
+
+The obvious follow-up -- does a bigger fitness gain give a better model? -- **cannot be answered
+on this fixture**, and the attempt is worth recording because the first pass at it looked like a
+result. Over all 27 local runs (A1's 15 + this screen's 12):
+
+    Pearson r(fitness gain, final macro-F1)  = -0.095
+    Spearman rho                             = -0.235,  permutation p = 0.272 (20k shuffles)
+
+Read carelessly that is "optimising the fitness makes the model worse", which is a much stronger
+and more interesting claim than the data supports. It is not significant, and the reason is that
+the outcome variable is mostly a floor indicator: **11 of 27 runs score macro-F1 exactly
+0.1000**, which for 4 classes is what an all-one-class predictor scores, i.e. total collapse.
+The rest are scattered over 0.1168-0.3750 with no structure.
+
+Per seed the q0 sweep's macro-F1 goes `0.1168 -> 0.1000 -> 0.1000 -> 0.1168`,
+`0.3406 -> 0.3643 -> 0.1000 -> 0.1000`, `0.2109 -> 0.1875 -> 0.3720 -> 0.1000` -- no direction in
+any of the three. My own first reading of this screen, before the per-seed check, was that
+macro-F1 degraded monotonically with `q0` (means 0.2228 -> 0.1056) -- an averaging artifact over
+three seeds that flip between the collapse floor and 0.37. It was never written down, and it is
+recorded here because it is the same mistake as the isolated colony probe in a smaller space:
+a number computed correctly from a fixture that cannot support the claim drawn from it.
+
+**So the fixture is an instrument for fitness behaviour only.** It was validated against the real
+runs' *fitness* signature (F at the FedAvg point near zero, corner_margin positive) and it
+reproduces that faithfully -- which is what earned it trust for A1 and this screen. It was never
+validated as an accuracy instrument, and at 15 rounds it is not one. Any claim of the form
+"configuration X trains a better model" needs the real gate. Fixing this would need more rounds
+or an easier signal, and both change the fixture's fitness signature, which is the thing it
+exists to reproduce -- so it is a genuine trade, not an oversight to patch.
+
+## Phase 4/6/7 -- RESOLVED: four sources of truth for the FedACO defaults, no two agreeing
+
+Found while checking whether the screen above had run at the documented `q0`. It had not.
+
+FedACO's default hyperparameters are written down in four places:
+
+| where | role | `aco-q0` | `aco-rho-round` | `aco-gamma-dispersion` |
+|---|---|---|---|---|
+| `docs/IMPLEMENTATION_PLAN.md` §14 | the spec | 0.70 | 0.30 | 0.50 |
+| `configs/strategy/fedaco.yaml` | per-strategy overrides | 0.70 | 0.30 | 0.50 |
+| `pyproject.toml` `[tool.flwr.app.config]` | **what `flwr run` uses** | **0.9** | **0.1** | **1.0** |
+| `paper/ALGORITHM.md` §14 table | the paper's description | 0.70 | 0.30 | 0.50 |
+
+`pyproject.toml` carried phase-4's values (commit `0bb64b7`); `configs/strategy/fedaco.yaml` was
+written later (commit `09739ca`) from the plan, annotating each line with its §14 symbol. Neither
+was ever reconciled, and **nothing checked them against each other** -- the recurring shape in
+this project, arriving this time as two sources of truth rather than a check that means nothing.
+
+**Which values a sweep gets depends only on how its experiment YAML lists strategies.** Bare
+names (`- fedaco`) go through `run_sweep.py`, which never reads `configs/strategy/`, so the run
+takes pyproject's defaults. A `file:` reference goes through
+`sweep.resolve_entry_overrides`, which layers the strategy file on top. The split runs straight
+through the paper's tables:
+
+    pyproject's values (q0=0.9):   main.yaml, ablation_all.yaml, robustness.yaml
+                                   ...and every `flwr run`, so the Kaggle gate too
+    fedaco.yaml's values (q0=0.70): main_client_scale.yaml, robustness_r1..r4, smoke.yaml
+
+So `main.yaml`'s headline table and `main_client_scale.yaml`'s K-scaling table, which the paper
+reads as one method at different client counts, would have run **different algorithms**. Same for
+`robustness.yaml` against `robustness_r1..r4`. And `aco-gamma-dispersion` is a weight *inside the
+fitness*, so the objective differed, not only the search over it -- 1.0 against 0.50 is double
+weight on the dispersion term.
+
+### Fixed
+
+`pyproject.toml` now matches plan §14 on all three keys. That direction is not a choice between
+two defensible values: the plan is the spec, `fedaco.yaml` and `ALGORITHM.md` both already encode
+it, and A6 is the ablation that will tune these from that documented starting point.
+
+`tests/test_config_defaults.py` (32 tests) locks it down, and each assertion was confirmed to
+fail when the drift is reintroduced:
+
+* every `configs/strategy/*.yaml` key that also exists in `pyproject.toml` must hold the same
+  value -- a strategy file may add keys, never contradict a default;
+* every strategy-file key must be a declared run_config key (an undeclared one makes `flwr run`
+  exit with a bare `[code: 15]`, a misspelled declared one is silently ignored);
+* both must match plan §14, with a separate test that re-parses §14 and fails if the
+  transcription in the test file has itself gone stale;
+* and an end-to-end test building the run_config by *both* runner paths and requiring every
+  `aco-*` key to agree.
+
+### Also fixed: `paper/ALGORITHM.md` described keys that do not exist
+
+All 21 flat keys in its §14 table used a `fedaco-` prefix; the real prefix is `aco-`. Anyone
+following that table to reproduce a run would have passed keys `flwr run` rejects outright. It
+also described the levels as "log-spaced over [0.0, 2.5]" -- log spacing was a real experimental
+error, fixed long ago, recorded in `EXPERIMENT_LOG.md`, and still in the paper's own method
+description. Both corrected.
+
+### What this does to results already in hand
+
+Every local screen in this document ran at `q0=0.9`, `gamma_2=1.0`, `rho_round=0.1` -- verified
+from the embedded `config.run_config` in the result JSONs, not inferred. A1's screen is therefore
+a measurement of a configuration the paper does not document, and is being re-run at the
+corrected defaults. The Kaggle gate is in the same position: it used pyproject, so it ran at 0.9.
+
+## Phase 7, A1 -- the fallback rate is the measurement, and standardising `d_k` makes it worse
+
+Two results, from 3 real runs on the heterogeneous fixture at the corrected plan-§14 defaults,
+against the A1 controls already measured there.
+
+### 1. Standardising `d_k` is not the fix
+
+`aco-desirability-scaling='standardized'` z-scores `d_k` across clients before mapping it onto
+the level range, so the measured 0.04 span fills the grid instead of collapsing into one bin.
+It was the leading candidate fix for the anchoring problem. It makes things **worse**:
+
+| arm | mean gain | per-seed |
+|---|---|---|
+| aco, `absolute` (plan §4.2) | +0.0066 | `[+0.0088, +0.0025, +0.0085]` |
+| aco, `standardized` | **+0.0006** | `[+0.0040, -0.0006, -0.0018]` |
+
+An 11x degradation, and negative in 2 of 3 seeds. The diagnosis that the greedy branch
+reconstructs the FedAvg point was correct; the inference that it should therefore be made to
+construct something else does not follow, because what it then constructs is worse. **The
+FedAvg point was a good anchor, not a bad one.**
+
+### 2. The controls search the same space, so A1 is not confounded
+
+Worth stating because it was the next hypothesis and it is false. `aco/controls.py`:
+`random_search`, `coordinate_grid_search` and `genetic_algorithm_search` all construct alpha
+through `levels_to_alpha` -- the identical discretised construction the colony uses. Only
+`pso_search` is continuous, and PSO is not the winner. So ACO is not being beaten by searchers
+with a finer parameterisation; it loses on the same grid.
+
+### 3. What is actually happening: the safety fallback fires in 44% of rounds
+
+`fallback_used = safety_fallback and best_fitness <= fedavg_fitness` -- it records a round in
+which **the colony found nothing better than the FedAvg point**. Across the same fixture and
+budget:
+
+| arm | rounds the search failed to beat FedAvg | mean alpha entropy (max log 10 = 2.3026) | alpha_max |
+|---|---|---|---|
+| **coordinate_grid** | **0.0%** | 2.2507 | 0.1565 |
+| random | 17.8% | 2.1623 | 0.1897 |
+| **aco (`absolute`)** | **44.4%** | 2.1958 | 0.1930 |
+| aco (`standardized`) | 60.0% | 2.1850 | 0.1943 |
+
+A coordinate sweep improves on FedAvg in **every round**. Uniform random sampling over the
+same discrete space fails in about 1 round in 6. The ant colony fails in nearly **half**, and
+standardising `d_k` pushes that to 60%.
+
+This is the same ordering as the fitness-gain table, but it says something the gain does not:
+the colony is not making small improvements, it is **frequently making none at all** and being
+rescued by the safety net. `check_fedaco_health.py` has reported this number since it was
+written, and its docstring already anticipated the reading -- "a high fallback rate with a good
+final score means the score belongs to FedAvg". What had never been done was compare it across
+search methods, at which point it stops being a diagnostic and becomes the result.
+
+Note also that the winner is the **least** concentrated: coordinate_grid has the highest alpha
+entropy and the lowest alpha_max of any arm. Whatever this fitness rewards on heterogeneous
+data, it is not the concentrated weighting the method's story is built around.
+
+### What this leaves
+
+The candidate fixes are now measured rather than speculated:
+
+* lower `q0` -- real (22x), insufficient (still loses to every control)
+* standardise `d_k` -- **harmful** (11x worse, negative on 2 of 3 seeds)
+* widen the sigmoid -- unscreened, and now much less promising: both screened fixes worked by
+  moving the colony *away* from the FedAvg point, and both times that was the wrong direction
+
+The remaining explanation is the one the numbers point at directly: at this evaluation budget,
+`tau^a * eta^b` sampling is simply a worse search of this space than a coordinate sweep, and
+the pheromone adds nothing a uniform sample does not already have. That is a statement about
+claim C2, not a bug to fix, and it is the team's to act on. Plan §11's week-5 gate exists for
+exactly this decision.
+
+Confirming it on the real gate costs A1's 80 cells (17-33 GPU-h). Everything above is the local
+fixture, which has reproduced the real runs' fitness signature on every axis checked but is
+still a fixture.
+
+## The reframe decision — TAKEN 2026-09-25, framing A, and reversible by one experiment
+
+Plan §11's week-5 gate says: "If A1 shows ACO ties random search at equal budget, stop and
+reframe before investing weeks 6-12 in a claim that won't survive review." §12 rates it
+Medium-High likelihood and **fatal to the framing**.
+
+**Status of the evidence.** Three independent local screens on the heterogeneous fixture, at
+both the drifted and the documented defaults, and with a `q0` sweep down to 0.0:
+
+| method | gain over the FedAvg point |
+|---|---|
+| coordinate_grid | +0.0501 |
+| pso | +0.0484 |
+| ga | +0.0312 |
+| random | +0.0304 |
+| **aco** | **+0.0013 → +0.0066** after a config-scoping fix |
+
+ACO beat every control on **0 of 3 seeds**. The plan's stated failure condition was a *tie*;
+this is a loss by 5.9x to the weakest control. The mechanism is identified and is not about ant
+colony optimisation (greedy anchoring to the FedAvg point; see the 2026-09-24 log entry).
+
+**Decision, taken because the work could not proceed without one.** The paper is written under
+**framing A**: the degenerate fitness optimum and the equal-budget result are the findings, and
+the reusable contributions are the `corner_margin` diagnostic, its closed-form penalty
+threshold, the equal-budget protocol, and the de-duplicated split. `paper/01_INTRODUCTION.md`
+§1.3 is written this way.
+
+**This is not a claim that A1 will confirm it, and it is cheap to reverse.** The alternative
+framing is written out in full at the end of `paper/01_INTRODUCTION.md`: if A1 separates ACO
+from all four controls on real data at 8 seeds, §1.3 is deleted and replaced by that block, the
+degeneracy becomes a method subsection rather than a finding, and §5.2 becomes an ablation
+rather than the result. Nothing else in the paper changes -- §4 (setup), §6 (limitations) and §7
+(reproducibility) are framing-independent by construction.
+
+**Why take it now rather than wait for A1.** A1 is 17 GPU-h and cannot run in this environment.
+Waiting leaves the paper unwritten, and the paper is the binding constraint on a 9-day deadline
+far more than 70 GPU-hours is. Writing under the framing the evidence supports, with the switch
+prepared, costs one section if the evidence turns out wrong and saves nine days if it does not.
+
+**CONFIRMED by the project owner, 2026-09-25.** This is no longer a provisional agent call: the
+person now owning the project reviewed the evidence and chose framing A. The reversal path stays
+documented (the alternative framing at the end of `paper/01_INTRODUCTION.md`) because A1 on real
+data can still overturn the *evidence* — but the decision itself is made, and §1.3 should be
+written as the paper's actual position rather than hedged.
+
+## Figures 1 and 2 (`figure_convergence`, `figure_comparison`) skip every real sweep — 2026-10-11
+
+Discovered regenerating figures from the real `results/fl/main` (168/168, pulled off Kaggle)
+after Day 3 finished: `make figures` writes the three figures that do not filter on variant
+(`alpha_heatmap`, `alpha_entropy`, `gain_vs_heterogeneity`) and reports
+`skipped (no data): convergence, comparison, ...` even though 168 complete, correctly-labeled
+results are present and `_variant_of` is resolving correctly (confirmed: every row reads
+`K=10`, the real condition, not a stale hardcoded label — the 2026-09-24 fix for that exact
+class of bug, logged above, is working as intended).
+
+**Root cause, verified directly, not guessed:** `pyproject.toml`'s bare `[tool.flwr.app.config]`
+default is `num-clients = 2` (a dev/CI smoke value). `_variant_of` correctly marks any run whose
+`num-clients` differs from that as a non-"default" variant. But **no real experiment config in
+this project uses `num-clients = 2`** — `main_reduced.yaml` and every ablation/robustness config
+use `10`, `main.yaml` (never run, see the compute-budget entries above) uses `20`. So every
+real result ever produced reads as a `K=10` (or `K=20`) variant, never literally `"default"` —
+and `figure_convergence`/`figure_comparison` (`scripts/make_figures.py`), the paper's two
+headline figures, both filter to `rows if r["variant"] == "default"`. They have never once had
+data to plot, for any sweep this project has run, including the smoke fixture that caught the
+*other* variant bug on 2026-09-24 (that fixture apparently did not override `num-clients` away
+from 2, which is why it didn't also catch this one).
+
+**Why this is not the same bug as the 2026-09-24 one, and not a one-line revert:** `num-clients`
+is a genuine experimental condition in at least one real sweep —
+`configs/experiment/robustness_r5_client_scaling.yaml` exists specifically to vary it. Adding
+`"num-clients"` to `make_tables.py`'s `_NOT_A_CONDITION` (the fix that would unblock Figures 1/2
+for `main`/`ablation`/`robustness` R1+R2) would silently collapse R5's own client-scaling rows
+into a single "default" bucket the same way the 2026-09-24 bug did — correct for three sweeps,
+wrong for the fourth. The real fix is more likely: "default" for figure purposes should mean
+*this results directory's own modal `num-clients`*, not literally the value in `pyproject.toml`
+— but that is a design change to shared code, not a one-line patch, and R5 hasn't run yet to
+confirm the fix against real multi-K data in the one sweep where it matters.
+
+### A second effect of the same fix, found regenerating the tables: `p (Holm)` and Cohen's `d` were also silently empty
+
+`add_deltas`/`add_significance` (`make_tables.py`) compute a delta, a paired Wilcoxon p-value
+and Cohen's `d` only for rows whose `variant == "default"` — the identical filter
+`figure_convergence`/`figure_comparison` used, so it had the identical bug: every real sweep's
+table (`main`, `robustness`) printed `—` in the `p (Holm)` and `d` columns for every row, not
+because the test wasn't computable but because no row ever read `"default"`. Fixed by the same
+change below. `paper/tables/main.csv`/`robustness.csv`, regenerated, now carry real values —
+e.g. FedACO vs FedAvg at `dirichlet_0.3`: `d = -1.07`, `p = 0.766` (not even at the 8-seed/
+18-comparison adjusted floor of 0.1406 the table's own footer states, so the seeds do not
+uniformly favor either side). **Not independently re-read or interpreted further here** — that
+is `HANDOVER.md`'s "human pass on citations, §5's framing, and the abstract" item, now with
+real numbers behind it rather than placeholders.
+
+### FIXED, 2026-10-11 (same day) — "default" is now relative to the loaded results, not pyproject
+
+Implemented the semantics this entry predicted: **a config key is an experimental condition
+only if the results actually being tabulated together disagree on its value** — not whether it
+differs from `pyproject.toml`'s bare default. New `make_tables.varying_keys(results)` scans the
+whole loaded set once and returns the keys (outside `_NOT_A_CONDITION`) that take more than one
+distinct value across it; `cell_key`/`_variant_of` take this as an optional second argument and
+only mark a key when it's in that set (an explicit-value-on-some-rows / absent-on-others split
+counts as varying too — resolved against `_defaults()` for the absent side, not just compared
+literally, so a key set on half the results and implicitly left at its default on the other
+half isn't miscounted as constant). `summarize()` (`make_tables.py`'s and `make_figures.py`'s
+real entry point) computes and threads it through automatically.
+
+This is exactly the "this results directory's own modal value" idea from above, generalized
+correctly: `main`/`ablation`/`robustness` R1+R2 each hold `num-clients` fixed at one value, so
+it drops out and every row reads `"default"` again — Figures 1/2/colony-health now render
+(confirmed on real data: `paper/figures/convergence.png`, `comparison.png`,
+`colony_health.png`, all regenerated). `configs/experiment/robustness_r5_client_scaling.yaml`,
+*if it is ever run*, would hold multiple `num-clients` values in one results directory — the
+key would correctly stay a real, marked condition there (`K=5`, `K=10`, `K=20`, ... rather than
+collapsing), the exact failure mode adding `num-clients` to `_NOT_A_CONDITION` outright would
+have caused. Verified directly, not just reasoned about: `tests/test_tables.py` has both cases
+as actual tests (a synthetic multi-`num-clients` set correctly stays split; a constant one
+correctly collapses to `"default"`), not only the real single-K sweeps this project has run so
+far. Regenerating one sweep's figures no longer silently overwrites another's, in this fix —
+but `make_figures.py` itself still writes `convergence.png`/`comparison.png`/etc. under the same
+filename regardless of `--results-dir`, same as before (`--only robustness`/`--only ablation`
+restrict which figures a given call touches, already how `ablations.png` avoided this; generate
+`results/fl/main`'s figures *last*, or always pass `--only`, to avoid one sweep's regeneration
+overwriting another's headline figures on disk — a mistake made and caught once already this
+session).
+
+## SCAFFOLD collapses to a single predicted class in most of its own main-table runs — 2026-10-11
+
+`scripts/check_iid_band.py --results-dir results/fl/main` **fails**: spread of strategy means
+under `iid` is 0.6844 against a 0.0500 band (and against 2x seed noise of 0.0388) —
+`paper/05_RESULTS.md`'s own §5.1 instruction is "if the IID column shows a wide spread, stop",
+so this is written up rather than narrated past.
+
+**Root cause, checked directly on the real result JSONs, not inferred from the aggregate
+number alone:** `scaffold`'s `per_class_recall` at the final round is `{glioma: 0, meningioma:
+0, notumor: 0, pituitary: 1}` (or the equivalent for a different single class) in **15 of its
+24 `results/fl/main` runs (62.5%)**, across all three regimes, not just `iid` — the model has
+collapsed to predicting one class for every input and never recovered. This is the same
+degenerate-single-class signature `HANDOVER.md` §2 names as "the expected random-init signature"
+for **round 0** of a healthy run — here it persists to round 100.
+
+**Consequence for the main table:** `scaffold`'s row (`paper/tables/main.csv`/`.md`) is not a
+measurement of SCAFFOLD's relative merit on this task; it is close to the score of a trivial
+one-class classifier. `fedlaw` and `krum` also sit well below `fedavg`/`fedprox`/`trimmed-mean`/
+`fedaco` even under `iid` (where a competent method should land close to the pack — Phase 1.4
+measured this partition's JS divergence at 0.007, almost no heterogeneity to exploit), which is
+worth checking the same way before trusting those two rows either; `scaffold` is the only one
+confirmed collapsed by this check.
+
+**Not fixed here.** This needs the SCAFFOLD strategy implementation checked (control-variate
+update, `mu`/learning-rate interaction, or a partition edge case) against a working reference
+run, which is debugging work, not a results-writing task. Until it is: **§5.1 and any main-table
+figure must either exclude `scaffold` or mark it explicitly as non-convergent**, and should not
+report it as "SCAFFOLD underperforms the other baselines" without that caveat — that is a
+different and much weaker claim than what the raw number implies.
+
+### 2026-10-11, later — mechanism confirmed; exact trigger still open
+
+Investigated further. `src/fedswarm/strategies/scaffold.py`'s control-variate math (the
+`c - c_i` correction, the Option-II `c_i` update in `fl/app.py::train_handler`) checked line by
+line against the SCAFFOLD paper's update rule — **no sign error or formula mismatch found.**
+
+**The frozen-metric symptom has a confirmed mechanical cause.** Every scaffold result in
+`results/fl/main` reads the *exact same* `test_macro_f1`/`test_loss`/`per_class_recall` at every
+one of its 101 logged rounds — not just similar, bit-identical. Reading the installed
+`flwr.serverapp.strategy.strategy.Strategy.start()` source directly (not assumed): after
+`aggregate_train`, `arrays` is updated only `if agg_arrays is not None`; when
+`Scaffold.aggregate_train` returns `(None, None)` — which it does whenever `valid_replies` is
+empty, i.e. every client's training reply has `msg.has_error()` — the loop silently keeps
+training *and* evaluating against the previous round's (eventually round-0's) frozen arrays,
+forever, with no error surfaced at the run level (`status: "completed"` is still correct, from
+Flower's point of view nothing failed). This reproduces the exact observed symptom exactly, by
+construction of the library code, not by inference from the aggregate number alone.
+
+**What is not yet confirmed: why every client reply errors, specifically for SCAFFOLD.**
+`tests/test_fl_app.py::test_train_handler_scaffold_*` calls `train_handler` directly with a
+hand-built `Message`/`Context` and passes — so the client-side code does not crash on a
+synthetic, minimal input. The real Kaggle runs use the real model/data/Ray actor path, which
+these unit tests do not exercise.
+
+**Local reproduction attempted, blocked by an unrelated environment bug in this container, not
+by anything in SCAFFOLD.** `flwr run`'s per-invocation isolated dependency environment
+(`/root/.flwr/runtime-envs/...`, a fresh `uv sync` each time — the same mechanism
+`docs/OPEN_QUESTIONS.md`'s "flwr run executes an installed copy" entry describes) resolves a
+`pyarrow` that requires NumPy ≥2.0 against a NumPy 1.26.4 it installs alongside it, so **every**
+`ClientAppActor` dies on startup for **every** strategy tried locally (confirmed: plain `fedavg`
+fails identically) — not a SCAFFOLD-specific failure, and unrelated to the real Kaggle hardware
+where every other strategy trained successfully. Clearing `/root/.flwr/runtime-envs/` and
+retrying reproduces the same pin conflict, so it is this container's dependency resolution, not
+a stale cache.
+
+**Next step, waiting on the Kaggle session's own log** (the `kaggle_day3d_main.ipynb` commit,
+2026-10-08 ~05:56–11:45 UTC, scaffold cells specifically ~08:31–10:17 UTC — identified from
+`results/fl/main`'s own `provenance.hostname`/`timestamp_utc` fields grouped by session, cross-
+checked against the known 168-cell total: 40+37+35+35+21). Flower prints the per-client
+exception directly (`"Received error in reply from node <id>: <exception>"`, confirmed format
+from the local repro above) — that line, once available from the real run, names the actual
+trigger instead of leaving it to further inference.
+
+### 2026-10-11, same day — ROOT CAUSE FOUND AND REPRODUCED (not a Kaggle-specific issue)
+
+The log requested above (`kaggle_day3d_main.ipynb`'s "Download Logs" export) turned out to be
+the **sweep runner's** one-line-per-cell summary (`subprocess.run` with no output capture, so
+Flower's own verbose `--stream` output goes straight to Kaggle's cell output — but the
+downloaded log only contains the sweep script's own progress/completion lines, not that
+output). It does not contain a per-client exception line, so it could not resolve this on its
+own. Separately, and more productively: `flwr run`'s per-invocation isolated `uv sync`
+environment in this container has an unrelated `pyarrow`/`numpy` ABI conflict that kills every
+`ClientAppActor` for every strategy (confirmed on plain `fedavg` too) — so a real `flwr run`
+repro was not available here either.
+
+**Worked around both: drove the real `Scaffold` strategy and the real `train_handler` in-process
+for 100 rounds, calling the actual project code directly with hand-built `Message`/`Context`
+objects (the same pattern `tests/test_fl_app.py`'s and `tests/test_baselines.py`'s existing
+scaffold unit tests already use, just looped across rounds with real, non-trivial training data
+— no Ray, no subprocess, so the container's pyarrow/numpy issue above never enters the path).**
+10 clients, `dirichlet(alpha=0.3)`, a 2,000-image synthetic fixture (large enough that
+`build_partition` succeeds reliably at `min-client-size=5`), otherwise matching
+`main_reduced.yaml`'s real settings (`local-batch-size=32`, `local-lr=0.01`, `local-epochs=1`).
+
+**The global model's parameter norm:**
+
+| round | `‖w‖` | `‖global_c‖` |
+|---|---:|---:|
+| 1 | 67.3 | 25.9 |
+| 2 | 80.3 | 17.0 |
+| 3 | 149.2 | 67.7 |
+| 10 | 23,588,493 | 11,021,507 |
+| 16 | NaN | NaN |
+
+**This is a real, reproducible numerical blow-up in SCAFFOLD's control-variate update, not a
+Kaggle/environment artifact.** The mechanism (`fl/app.py`'s `new_local_c` computation, the
+paper's own Option-II formula):
+
+```python
+new_local_c[name] = local_c[name] - global_c[name] + (params_before[name] - model.state_dict()[name]) / (tau * lr)
+```
+
+`tau = max(num_batches, 1)`. Under a skewed (`dirichlet`) partition with `min-client-size=5` and
+`local-batch-size=32`, several clients legitimately have `tau = 1` (one batch covers their whole
+local dataset) — so the division is by `1 * 0.01 = 0.01`, a **100x amplification** of that
+round's local update `(x − y_i)` into the control-variate delta. `aggregate_train` then adds
+this straight into `self._global_c` as a running sum (not an EMA, no decay, no clipping), and
+next round's correction term (`global_c − local_c`, added directly to every client's loss
+gradient) is proportionally larger — a positive feedback loop. With `momentum=0.9` in the local
+optimizer compounding it further, the blow-up above (67 → 23M in 10 rounds, NaN by round 16) is
+the result. The real Kaggle runs (`image-size=112`, a much larger model, `K=10` with the same
+`local-batch-size=32`/`min-client-size=5`) plausibly diverge even faster than this toy
+repro — consistent with the observed symptom being frozen from round 0 itself rather than
+round ~16: the real run most likely hits NaN within round 1, before the second evaluation ever
+happens, and the NaN-corrupted model's evaluation output is deterministic-but-degenerate (NaN
+weights produce a fixed degenerate prediction every round, which is what both `scaffold`'s
+"predicts one class" signature and its round-to-round frozen metric are — the same underlying
+cause presenting as two symptoms already recorded above in this file).
+
+**This is a real, known category of practical SCAFFOLD instability** (Option II's `c_i` update
+is sensitive to `K·η_l`, the total local SGD distance, and gets noisy/unstable when `K` — local
+steps — is small), not specific to this codebase's math being wrong; the formula matches the
+paper. The codebase has no stabilization against it (no clipping, no EMA, no guard on `tau`
+being small). **Candidate fixes, not applied here pending the project owner's choice** (this is
+a design/hyperparameter decision, like the Figures-1/2 entry above, not a one-line patch):
+
+1. Clip `new_local_c`'s per-tensor norm (or the correction term) to a fixed bound before it's
+   used — cheapest, changes convergence behavior in a way that needs re-validation.
+2. Use an EMA for `self._global_c` instead of a raw running sum (`global_c = β·global_c + (1-β)·update`)
+   — closer to how similar instabilities are handled elsewhere, but is a deviation from the
+   paper's Option II as implemented.
+3. Raise `min-client-size` relative to `local-batch-size` (or lower `local-batch-size`) so `tau`
+   is never 1 — treats the symptom's trigger, not the underlying sensitivity; the scheme is
+   still fragile at `tau=2` or `3`, just less likely to hit it.
+4. Lower `scaffold-server-lr` below its default `1.0` — directly dampens the feedback loop's
+   gain, cheapest to try, easiest to justify (it is already an exposed, documented knob).
+
+Whichever is chosen, re-run this same in-process repro script (kept at
+`/tmp/.../scratchpad/debug_scaffold.py` this session, not committed — worth moving into
+`scripts/` or a test if this becomes a real fix) over 100 rounds and confirm `‖w‖` stays bounded
+before spending any Kaggle GPU-hours re-running `scaffold`'s arm of `main_reduced.yaml`.
+
+### 2026-10-11, same day — FIXED, confirmed over the full 100-round budget
+
+Committed in three steps (`09ca831`, `41f98a8`, kept at `scripts/debug_scaffold_divergence.py`
+rather than the earlier scratchpad copy):
+
+1. **Client-side clip** (`fl/app.py::train_handler`): a client's contribution to the control
+   variate can never exceed its own actual local movement that round (`update_norm`, already
+   measured) — bounds the single worst trigger (`tau=1` clients) at its source.
+2. **Server-side EMA + hard norm clip** (`strategies/scaffold.py::Scaffold`): `self._global_c`
+   was an undamped running sum (textbook integral windup for a term that persists across every
+   round). Now `global_c_decay=0.9` (EMA) plus `global_c_max_norm=10.0` (hard clip, same
+   mechanism as gradient-norm clipping) — the clip is what actually guarantees boundedness.
+3. **This alone was not enough**: with only 1-2, `‖global_c‖` correctly plateaued near its cap
+   by round ~40, but `‖w‖` (the model) kept growing past it — reached 24M by round 90. A
+   bounded-but-nonzero `correction` term, injected as a *constant* per-step gradient every
+   round under SGD momentum (0.9), drives ballistic divergence on its own, independent of
+   `global_c`'s own norm. Fix: clip `correction` itself (`_SCAFFOLD_CORRECTION_MAX_NORM = 1.0`),
+   right where it is computed in `train_handler`, before `local_train` uses it.
+
+**All three together, confirmed over the real 100-round budget**
+(`scripts/debug_scaffold_divergence.py`, `dirichlet(0.3)`, K=10, `min-client-size=5`,
+`local-batch-size=32` — `main_reduced.yaml`'s real settings except `image-size` for speed):
+
+| round | `‖w‖` | `‖global_c‖` |
+|---|---:|---:|
+| 1 | 67.69 | 1.54 |
+| 50 | 69.26 | 0.54 |
+| 100 | 73.72 | 0.59 |
+
+Smooth, bounded growth (≈9% over 100 rounds — ordinary training, not divergence), no NaN,
+`‖global_c‖` never leaves a `[0.3, 1.5]` band the whole run. All three fixes are each
+individually a no-op whenever the pathology they target is not present (confirmed: existing
+`tests/test_baselines.py`/`tests/test_fl_app.py` scaffold unit tests and the full 913-test
+suite pass unchanged).
+
+**Not done, and closed without doing it, 2026-10-12.** The re-run (cheap — scaffold is one arm of
+`main_reduced.yaml`, ~3.7 GPU-h -- 24 cells, measured from the broken run's own log) was attempted
+on `notebooks/kaggle_day3_scaffold_refit.ipynb`; the Kaggle session hit a `ConcurrencyViolation`
+on commit and then stopped loading entirely before finishing. Rather than keep waiting on a stuck
+kernel, the project owner chose to finalize the paper with the existing (broken) `scaffold` row
+rather than retry. `paper/05_RESULTS.md` §5.1 now states this as final: the fix above is real and
+tested in-process, but **unconfirmed on the real sweep**, so the paper never claims it — the
+`scaffold` row stays excluded from every headline comparison, permanently for this draft, not an
+open item. `docs/OPEN_QUESTIONS.md`'s earlier "SCAFFOLD collapses..." entry above still describes
+the *symptom* correctly — this entry is the fix's writeup, not a trustworthy Table 1 row. The
+notebook itself is untouched, so re-running is still possible later if someone gets a clean
+Kaggle session, but nothing in this repo depends on that happening.

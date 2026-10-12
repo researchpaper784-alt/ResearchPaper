@@ -11,9 +11,14 @@
 # the same budget. Report that budget difference alongside any results table built
 # from this ablation; do not present the two rows as apples-to-apples cost-wise.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a3.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a3.yaml
 
 base_overrides:
+  # Where results land. Without this the run falls through to pyproject's `output-dir`
+  # (`results/fl`), where `make tables-ablation` does not look -- so a finished sweep would
+  # produce an empty table, and every granular sweep would share one directory. Added
+  # 2026-09-24; the three aggregate configs (main/robustness/ablation_all) already did this.
+  output-dir: results/fl/ablation
   num-clients: 20
   min-client-size: 5
   fraction-train: 1.0

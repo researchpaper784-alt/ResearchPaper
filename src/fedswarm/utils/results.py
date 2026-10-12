@@ -16,6 +16,23 @@ from typing import Any
 from fedswarm.utils.provenance import capture
 
 
+def resolved_config(run_config: dict, strategy: str, seed: int) -> dict:
+    """The `config` block every result file carries: settings NESTED under `run_config`.
+
+    One definition, used by the ServerApp when it writes results and by tests when they fake
+    them. `scripts/apply_gate_fix.py` was written against a guessed FLAT layout and tested
+    with files built in that same guess, so it passed every test and, on the first real gate
+    run on Kaggle, read no settings at all -- every arm came out labelled `default`.
+    """
+    return {"run_config": dict(run_config), "strategy": strategy, "seed": seed}
+
+
+def result_settings(result: dict) -> dict:
+    """A result file's resolved run settings (the `aco-*`, `strategy-name`, ... keys)."""
+    config = result.get("config") or {}
+    return config.get("run_config") or {}
+
+
 def make_run_id(config: dict, seed: int, length: int = 10) -> str:
     canonical = json.dumps(config, sort_keys=True, default=str)
     config_hash = hashlib.sha256(canonical.encode()).hexdigest()[:length]

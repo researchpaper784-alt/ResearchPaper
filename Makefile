@@ -1,17 +1,37 @@
-.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro clean
+.PHONY: setup data test lint smoke smoke-all validate-fedaco health pheromone-budget fitness-landscape hparam-search hparam-search-plan iid-band main main-plan main-client-scale ablations ablations-plan ablations-granular robustness robustness-plan robustness-granular overhead tables-robustness figures-data figures figures-ablation tables tables-ablation verify-repro fitness-repro clean main-reduced main-reduced-plan preflight-configs verify-phase9 c-reduced-plan r1-reduced r2-reduced a2-reduced c-all gate-fitness a1-reduced b-all day1
+
+# Interpreter paths, overridable. The default is the local `uv` venv from `make setup`
+# (CLAUDE.md), but Colab and Kaggle install into the system Python and have no .venv at
+# all -- every target here was unusable there until these became variables. On a notebook
+# runtime:
+#
+#     make validate-fedaco PY=python FLWR=flwr
+#
+PY ?= .venv/bin/python
+
+# Fraction of a GPU per ClientApp, forwarded to every sweep target. **Set this on a GPU
+# box.** Ray hides the GPU from any actor requested with num_gpus=0, so unset, every client
+# trains on CPU while the server keeps the GPU -- results look correct and the sweep never
+# finishes. The runners refuse to start when a GPU is present and this is empty; they name
+# the fraction to use (1/num-clients lets them all share one card). Leave it empty on CPU.
+#   make main GPUS=0.05
+GPUS ?=
+GPUS_ARG = $(if $(GPUS),--gpus-per-client $(GPUS),)
+FLWR ?= .venv/bin/flwr
+
 
 setup:
 	uv venv --python 3.12 .venv
-	uv pip install -e ".[dev]" --python .venv/bin/python
+	uv pip install -e ".[dev]" --python $(PY)
 
 data:
-	.venv/bin/python -m fedswarm.data.download --verify
+	$(PY) -m fedswarm.data.download --verify
 
 test:
-	.venv/bin/python -m pytest -q
+	$(PY) -m pytest -q
 
 lint:
-	.venv/bin/python -m ruff check src tests scripts
+	$(PY) -m ruff check src tests scripts
 
 # Phase 3 FL smoke run (2 clients, 2 rounds -- the plan's Step 3.1 acceptance size,
 # set as the [tool.flwr.app.config] defaults in pyproject.toml). Needs the `simulation`
@@ -19,20 +39,20 @@ lint:
 # so this only actually runs there, not on this machine. Real Colab CPU-runtime recipe:
 # notebooks/colab_fl_smoke.ipynb.
 smoke:
-	.venv/bin/flwr run . --stream
+	$(FLWR) run . --stream
 
 # Every strategy, tiny scale, one partition -- "does everything still run" (Phase 6/10).
 smoke-all:
-	.venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/smoke.yaml
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/smoke.yaml
 
 # Phase 5 -- give every baseline an honest hyperparameter search on the val split, with
 # a budget matched to FedACO's. Selection reads best_val_macro_f1 only; it never touches
 # the test metric. --dry-run prints the trial plan without spending any compute.
 hparam-search:
-	.venv/bin/python scripts/run_hparam_search.py --strategy all --budget 8
+	$(PY) scripts/run_hparam_search.py --strategy all --budget 8
 
 hparam-search-plan:
-	.venv/bin/python scripts/run_hparam_search.py --strategy all --budget 8 --dry-run
+	$(PY) scripts/run_hparam_search.py --strategy all --budget 8 --dry-run
 
 # The real-data validation run: the first federated training this project will have done
 # on actual images rather than a synthetic cache. Two runs (FedACO and FedAvg, same seed
@@ -62,43 +82,52 @@ validate-fedaco:
 	# recording K, and a min-train-nodes above the supernode count hangs at round 0 with
 	# idle actors and no error -- which this project previously misdiagnosed as CPU
 	# oversubscription (docs/OPEN_QUESTIONS.md). Both are set here.
-	.venv/bin/flwr federation simulation-config --num-supernodes $(K) --client-resources-num-cpus 1
-	FEDSWARM_REPO_ROOT=$(PWD) .venv/bin/flwr run . --stream --run-config \
+	$(FLWR) federation simulation-config --num-supernodes $(K) --client-resources-num-cpus 1
+	FEDSWARM_REPO_ROOT=$(PWD) $(FLWR) run . --stream --run-config \
 	  "strategy-name='fedaco' num-clients=$(K) min-train-nodes=$(K) min-evaluate-nodes=$(K) \
 	   min-available-nodes=$(K) num-rounds=$(ROUNDS) local-epochs=1 regime='dirichlet' alpha=0.3 seed=0"
-	FEDSWARM_REPO_ROOT=$(PWD) .venv/bin/flwr run . --stream --run-config \
+	FEDSWARM_REPO_ROOT=$(PWD) $(FLWR) run . --stream --run-config \
 	  "strategy-name='fedavg' num-clients=$(K) min-train-nodes=$(K) min-evaluate-nodes=$(K) \
 	   min-available-nodes=$(K) num-rounds=$(ROUNDS) local-epochs=1 regime='dirichlet' alpha=0.3 seed=0"
-	.venv/bin/python scripts/check_fedaco_health.py --results-dir results/fl
+	$(PY) scripts/check_fedaco_health.py --results-dir results/fl
 
 health:
-	.venv/bin/python scripts/check_fedaco_health.py --results-dir results/fl
+	$(PY) scripts/check_fedaco_health.py --results-dir results/fl
 
 # What a given colony budget makes *reachable* on question 1, before spending a run on it.
 pheromone-budget:
-	.venv/bin/python scripts/analyze_pheromone_dynamics.py
+	$(PY) scripts/analyze_pheromone_dynamics.py
 
 # Where (K, gamma_entropy, heterogeneity) makes the fitness prefer a single-client answer.
 fitness-landscape:
-	.venv/bin/python scripts/analyze_fitness_landscape.py
+	$(PY) scripts/analyze_fitness_landscape.py
 
 # Phase 5 -- the IID acceptance gate. Under IID there is little heterogeneity for an
 # aggregation rule to exploit, so a large spread means something other than the method is
 # driving the number. Exits nonzero on FAIL.
 iid-band:
-	.venv/bin/python scripts/check_iid_band.py --results-dir results/fl
+	$(PY) scripts/check_iid_band.py --results-dir results/fl
 
 # Always run `make main-plan` first: it prints the cell count and a cost projection, and
 # refuses nothing, so it is the cheapest way to find out that 576 cells x 100 rounds is
 # more compute than you have before committing to it.
 main-plan:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml --dry-run
+	$(PY) scripts/run_sweep.py --config configs/experiment/main.yaml --dry-run
 
 main:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/main.yaml
+	$(PY) scripts/run_sweep.py --config configs/experiment/main.yaml $(GPUS_ARG)
+
+# The 9-day / ~100 GPU-h budget version of the main sweep: K=10, 3 regimes, 7
+# strategies (incl. scaffold), 8 seeds = 168 cells / ~35 GPU-h. Every cut is named in
+# the config header.
+main-reduced-plan:
+	$(PY) scripts/run_sweep.py --config configs/experiment/main_reduced.yaml --dry-run
+
+main-reduced:
+	$(PY) scripts/run_sweep.py --config configs/experiment/main_reduced.yaml $(GPUS_ARG)
 
 main-client-scale:
-	.venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/main_client_scale.yaml
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/main_client_scale.yaml $(GPUS_ARG)
 
 # Phase 7. The two families are now disjoint (2026-09-19). A1-A9 live in their own
 # per-ablation configs and are driven by `ablations-granular`; `ablation_all.yaml` keeps
@@ -108,14 +137,14 @@ main-client-scale:
 # persistence "A1" while ablation_a1.yaml is the ACO-vs-random-search control, both
 # writing to results/fl/ablation. Run BOTH targets; they no longer overlap.
 ablations-plan:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml --dry-run
+	$(PY) scripts/run_sweep.py --config configs/experiment/ablation_all.yaml --dry-run
 
 ablations:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_all.yaml
+	$(PY) scripts/run_sweep.py --config configs/experiment/ablation_all.yaml $(GPUS_ARG)
 
 ablations-granular:
 	for f in configs/experiment/ablation_a[0-9].yaml; do \
-		.venv/bin/python scripts/run_sweep_granular.py --config "$$f" || exit 1; \
+		$(PY) scripts/run_sweep_granular.py --config "$$f" $(GPUS_ARG) || exit 1; \
 	done
 
 # Phase 8. Same split. R1-R5 live in their own configs (`robustness-granular`);
@@ -125,47 +154,177 @@ ablations-granular:
 # The granular configs sweep three attacker fractions where the combined file sampled
 # one or two, so the finer grid strictly contains the coarser one. Run both.
 robustness-plan:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness.yaml --dry-run
+	$(PY) scripts/run_sweep.py --config configs/experiment/robustness.yaml --dry-run
 
 robustness:
-	.venv/bin/python scripts/run_sweep.py --config configs/experiment/robustness.yaml
+	$(PY) scripts/run_sweep.py --config configs/experiment/robustness.yaml $(GPUS_ARG)
 
 robustness-granular:
 	for f in configs/experiment/robustness_r*.yaml; do \
-		.venv/bin/python scripts/run_sweep_granular.py --config "$$f" || exit 1; \
+		$(PY) scripts/run_sweep_granular.py --config "$$f" $(GPUS_ARG) || exit 1; \
 	done
 
 # The dedicated, denser K sweep for the O(K^2) overhead curve (plan Sec 9.2, figure 5).
 overhead:
-	.venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/overhead.yaml
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/overhead.yaml $(GPUS_ARG)
 
+# --expected-seeds 5, not the script's default of 8. The 8-seed floor exists only where a
+# p-value is actually claimed -- main.yaml's headline comparison and ablation_a1's
+# ACO-vs-random-search control -- and every robustness config runs 5 by design, because a
+# degradation curve carries its meaning through effect sizes rather than significance.
+# Leaving the default here would dagger every cell of a correctly completed sweep and print
+# "Do not quote these numbers" under it, which is both wrong and the fastest way to teach a
+# reader to ignore the marking.
 tables-robustness:
-	.venv/bin/python scripts/make_tables.py --results-dir results/fl/robustness
+	$(PY) scripts/make_tables.py --results-dir results/fl/robustness --expected-seeds 5
 
 figures-data:
-	.venv/bin/python scripts/make_partition_figures.py
+	$(PY) scripts/make_partition_figures.py
 
 # Phase 9. Four figures to paper/figures/. Each is skipped (and named as skipped) when
 # the sweep feeding it has not run, rather than rendered blank.
 figures:
-	.venv/bin/python scripts/make_figures.py --results-dir results/fl/main
+	$(PY) scripts/make_figures.py --results-dir results/fl/main
 
 figures-ablation:
-	.venv/bin/python scripts/make_figures.py --results-dir results/fl/ablation --only ablation
+	$(PY) scripts/make_figures.py --results-dir results/fl/ablation --only ablation
+
+# --only robustness, not the bare default: without it this writes convergence.png and
+# comparison.png from robustness's single-regime data too, clobbering the real ones `figures`
+# just wrote from results/fl/main. Confirmed this is still live 2026-10-11.
+figures-robustness:
+	$(PY) scripts/make_figures.py --results-dir results/fl/robustness --only robustness
 
 # Phase 9. Aggregates over seeds and writes Markdown + CSV to paper/tables/. Exits
 # nonzero when any cell has fewer seeds than expected, so an incomplete sweep cannot be
 # quoted from by accident.
 tables:
-	.venv/bin/python scripts/make_tables.py --results-dir results/fl/main
+	$(PY) scripts/make_tables.py --results-dir results/fl/main --expected-seeds 8
 
+# 5 seeds for A2-A9 and ablation_all; ablation_a1 runs 8 because it is the one ablation a
+# p-value is claimed from, and it writes to the same directory. A single number cannot be
+# right for both, so this marks the 8-seed cells as complete and leaves A1's own power
+# reporting to `make tables` on its results -- flagging 5-seed ablations as incomplete would
+# be the worse error, since there are 585 of those cells and 80 of A1's.
 tables-ablation:
-	.venv/bin/python scripts/make_tables.py --results-dir results/fl/ablation
+	$(PY) scripts/make_tables.py --results-dir results/fl/ablation --expected-seeds 5
 
 # Phase 10 -- runs the smoke config and checks final metrics against a recorded
 # tolerance band (scripts/verify_repro.py).
+# The project's blocking question, answerable locally in about a minute per arm.
+#
+# `ray`/`flwr[simulation]` DO run in this project's Linux containers and on Kaggle -- the
+# "cannot run locally" notes are about the Intel-macOS dev machine. So the fitness question
+# does not need a GPU session: it needs data heterogeneous enough to reproduce the failure,
+# which `scripts/synthetic_heterogeneous_dataset.py` provides and `ci_smoke_dataset.py`
+# (deliberately trivial, for CI speed) cannot.
+#
+# Reproduces, at gamma_3=0.1, K=10, dirichlet(0.3), 15 rounds:
+#   weighted_mean  corner_margin +0.6185, positive 15/15; F(FedAvg point) -0.0033, negative 5/15
+#   real Kaggle    corner_margin +0.6184, positive 15/15; F(FedAvg point) -0.0005, negative 7/15
+# and shows `aggregate` fixing both (corner -0.5283 positive 0/15; F(FedAvg) +0.8141).
+#
+# ⚠️ A synthetic *signature* match is much weaker than a data match. Confirm anything found
+# here on the real gate before it goes in the paper.
+fitness-repro:
+	$(PY) scripts/synthetic_heterogeneous_dataset.py --out-dir /tmp/fedswarm_het --num-images 600 --image-size 32
+	$(FLWR) federation simulation-config --num-supernodes 10 --client-resources-num-cpus 1
+	for mode in weighted_mean base aggregate; do \
+		echo "=== $$mode ==="; \
+		$(FLWR) run . --stream --run-config "strategy-name='fedaco' num-clients=10 min-client-size=3 min-train-nodes=10 min-evaluate-nodes=10 min-available-nodes=10 num-rounds=15 local-epochs=1 num-classes=4 image-size=32 local-batch-size=8 regime='dirichlet' alpha=0.3 seed=0 aco-dispersion-reference='$$mode' aco-gamma-entropy=0.1 cache-dir='/tmp/fedswarm_het/cache' manifest-path='/tmp/fedswarm_het/manifest.csv' partition-cache-dir='/tmp/fedswarm_het/parts' output-dir='/tmp/fedswarm_het/$$mode' checkpoint-dir='/tmp/fedswarm_het/ckpt_$$mode'" || exit 1; \
+		$(PY) scripts/check_fedaco_health.py --results-dir /tmp/fedswarm_het/$$mode; \
+	done
+
+# Execute one tiny cell of every arm of every sweep config, to prove the config survives
+# round 1 before anyone spends GPU hours on it. Constructing a strategy is not the same as
+# running a round, and the worst failure here does not raise at all: a `min-train-nodes` above
+# the supernode count makes Flower's sample_nodes loop forever, consuming a whole Kaggle
+# session and writing nothing. Needs a synthetic fixture -- build one with
+# scripts/synthetic_heterogeneous_dataset.py and point FIXTURE at it.
+FIXTURE ?= /tmp/fedswarm_fixture
+CONFIGS ?= configs/experiment/robustness_r*.yaml configs/experiment/ablation_a[0-9].yaml
+preflight-configs:
+	$(PY) scripts/preflight_sweep_configs.py --fixture $(FIXTURE) --configs $(CONFIGS)
+
+# DAY 1, as notebooks/kaggle_day1_gate_and_a2.ipynb runs it: settle which fitness fix closes
+# the degenerate corner, apply it, then ask whether cross-round persistence does anything.
+# ~6.25 GPU-h, and it answers both questions the paper's structure depends on.
+day1: gate-fitness
+	$(PY) scripts/apply_gate_fix.py --from-results results/fl/gate --apply-verdict
+	$(MAKE) a2-reduced
+
+# Person B's day 1-2, and the critical path for the whole 9 days: the gate re-run that
+# decides which fitness fix to use, then A1 which decides the paper's framing.
+# gate-fitness is ~15 minutes; a1-reduced is ~17 GPU-h. Run them in that order.
+gate-fitness:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/gate_fitness.yaml $(GPUS_ARG)
+	$(PY) scripts/check_fedaco_health.py --results-dir results/fl/gate
+
+a1-reduced:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/ablation_a1_reduced.yaml $(GPUS_ARG)
+
+b-all: gate-fitness a1-reduced
+
+# Person C's 9-day set (2026-09-25). The full R1/R2/A2 configs are 240 cells and
+# 100-200 GPU-h; these three are 110 cells / ~23 GPU-h and each names its cuts in its
+# own header. R1-reduced carries the `clean` arm that R2-reduced's deltas are measured
+# against, so run r1-reduced before r2-reduced and do not trim it further.
+c-reduced-plan:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_reduced.yaml --dry-run
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_reduced.yaml --dry-run
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/ablation_a2_reduced.yaml --dry-run
+
+r1-reduced:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/robustness_r1_reduced.yaml $(GPUS_ARG)
+
+r2-reduced:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/robustness_r2_reduced.yaml $(GPUS_ARG)
+
+a2-reduced:
+	$(PY) scripts/run_sweep_granular.py --config configs/experiment/ablation_a2_reduced.yaml $(GPUS_ARG)
+
+# Everything C runs in the 9-day plan, 254 cells / ~53 GPU-h, in DECISION order rather than
+# in the order the sweeps were written.
+#
+# a2-reduced runs FIRST, and that changed on 2026-09-25 when resolving the paper's citations
+# showed the novelty claim was already occupied: FedAWA (CVPR 2025), Adp-FL-PSO and FedPSO all
+# optimise aggregation weights, and all three are STATELESS between rounds. Cross-round
+# pheromone persistence is the only structural novelty left, and A2 -- none / decayed / full --
+# is the only experiment that tests it. 30 cells and ~6 GPU-h decide whether the paper has a
+# contribution at all, so they come before main_reduced's 30 GPU-h of headline table.
+#
+# r1-reduced still precedes r2-reduced: r2 has no unattacked arm and uses r1's `clean` arm.
+c-all: a2-reduced main-reduced r1-reduced r2-reduced
+
+# Plan §9.3's acceptance criterion: every figure and table regenerates from results/ with
+# no manual steps, byte-for-byte identically on a second pass. Nothing checked this until
+# 2026-09-24, and the first run found two faults no unit test could see -- both needed the
+# whole chain pointed at real result files.
+#
+# One combined --results-dir results/fl pass cannot express this project's real layout:
+# main/ablation/robustness carry different seed counts (8/5/5) and results/fl/gate is a
+# handful of health-check runs never meant to clear any --expected-seeds floor, so a single
+# combined run either flags real sweeps' complete cells as incomplete or silently swallows
+# gate's genuinely-incomplete ones -- it was never run end-to-end before 2026-10-11, when
+# doing so surfaced exactly this. Each sweep gets its own pass instead, matching the
+# --results-dir/--expected-seeds pairing `tables`/`tables-ablation`/`tables-robustness`
+# already use; ablation has no non-fedaco baseline, so it compares fedaco's own variants.
+verify-phase9: verify-phase9-main verify-phase9-ablation verify-phase9-robustness
+
+verify-phase9-main:
+	$(PY) scripts/verify_phase9_repro.py --results-dir results/fl/main \
+		--expected-seeds 8 --baselines fedavg --partitions dirichlet_0.3 iid
+
+verify-phase9-ablation:
+	$(PY) scripts/verify_phase9_repro.py --results-dir results/fl/ablation \
+		--expected-seeds 5 --baselines fedaco --partitions dirichlet_0.1 dirichlet_0.3 iid
+
+verify-phase9-robustness:
+	$(PY) scripts/verify_phase9_repro.py --results-dir results/fl/robustness \
+		--expected-seeds 5 --baselines fedavg krum trimmed-mean --partitions dirichlet_0.3
+
 verify-repro:
-	.venv/bin/python scripts/verify_repro.py
+	$(PY) scripts/verify_repro.py
 
 clean:
 	find . -name '__pycache__' -type d -prune -exec rm -rf {} +

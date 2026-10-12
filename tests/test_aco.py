@@ -338,3 +338,528 @@ def test_the_default_is_still_the_method_as_proposed() -> None:
     from fedswarm.aco.fitness import DataFreeFitnessConfig
 
     assert DataFreeFitnessConfig().concentration_penalty == "entropy"
+
+
+# ======================================================================================
+# The level set, against the plan's own hyperparameter table
+# ======================================================================================
+
+
+def test_the_default_level_set_is_exactly_the_one_the_plan_specifies() -> None:
+    """docs/IMPLEMENTATION_PLAN.md §14 writes the level set out literally. This function
+    was log-spaced until 2026-09-19 -- a deviation nobody could catch, because the plan
+    was not in the repository. Pinned here so the code and the paper describe the same
+    search space."""
+    expected = [0.0, 0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5]
+
+    assert [round(float(x), 6) for x in level_set()] == expected
+
+
+def test_log_spacing_is_still_reachable_and_materially_different() -> None:
+    """Kept rather than deleted: it is what every result before 2026-09-19 used, and A6 --
+    the hyperparameter-sensitivity ablation that owns L -- is where the choice belongs.
+
+    The difference is not cosmetic. Log spacing lets one ant construct alpha ratios of
+    1000:1, putting a near-vertex weighting like [0.99, 0.01] one greedy draw away; linear
+    caps it at 10:1. That changes how reachable the degenerate single-client optimum is,
+    so a conclusion about the fitness drawn under one spacing does not transfer to the
+    other."""
+    linear = [float(x) for x in level_set(spacing="linear") if x > 0]
+    log = [float(x) for x in level_set(spacing="log") if x > 0]
+
+    assert max(linear) / min(linear) == pytest.approx(10.0, rel=1e-3)
+    assert max(log) / min(log) > 100
+    # And log pushes most of the grid below the FedAvg point.
+    assert sum(1 for x in level_set(spacing="log") if x < 1.0) > sum(
+        1 for x in level_set(spacing="linear") if x < 1.0
+    )
+
+
+@pytest.mark.parametrize("spacing", ["linear", "log"])
+def test_fedavg_stays_reachable_under_either_spacing(spacing: str) -> None:
+    """lambda=1 is the level that makes an ant's choice recover the FedAvg weight at every
+    station. Losing it would remove FedAvg from the search space entirely, which
+    `test_fedavg_recoverable` (plan §4.8 acceptance #2) depends on."""
+    levels = level_set(spacing=spacing)
+
+    assert torch.any(levels == 1.0)
+    assert torch.equal(levels, torch.sort(levels).values)
+
+
+def test_an_unknown_spacing_raises_rather_than_silently_picking_one() -> None:
+    with pytest.raises(ValueError, match="Unknown level spacing"):
+        level_set(spacing="geometric")
+
+
+def test_the_spacing_reaches_the_strategy_from_run_config() -> None:
+    """A6 varies this through `--run-config`, so an unwired key would run the default
+    under the ablation's label -- the same silent-substitution failure A1 had."""
+    from fedswarm.strategies.factory import strategy_from_run_config
+
+    strategy = strategy_from_run_config(
+        {"strategy-name": "fedaco", "aco-level-spacing": "log"}
+    )
+
+    assert strategy.aco_config.level_spacing == "log"
+    assert float(strategy.levels[1]) < 0.01  # the log grid's second level, not 0.25
+
+
+# ======================================================================================
+# required_gamma_entropy -- the number the first GPU run's health check could not name
+# ======================================================================================
+
+
+@pytest.mark.parametrize("num_clients", [2, 4, 10, 20])
+@pytest.mark.parametrize("noise", [0.5, 1.5, 3.0])
+def test_the_returned_gamma_actually_zeroes_the_margin(num_clients: int, noise: float) -> None:
+    """The round trip, and the only guarantee worth having: feed the answer back in and the
+    corner stops winning.
+
+    Written this way on purpose rather than asserting the algebra. `required_gamma_entropy`
+    derives its closed form from the *claim* that the margin is linear in gamma_entropy --
+    true for today's fitness, and exactly the kind of assumption that rots when someone adds
+    a term. Checking the returned value against the real `corner_margin` catches that; a
+    test of the formula against itself would not.
+    """
+    from fedswarm.aco.fitness import DataFreeFitnessConfig, corner_margin, required_gamma_entropy
+
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=noise))
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    config = DataFreeFitnessConfig(gamma_entropy=0.1)
+
+    needed = required_gamma_entropy(gram, base, config)
+    at_crossing = corner_margin(gram, base, DataFreeFitnessConfig(gamma_entropy=needed))
+
+    assert at_crossing == pytest.approx(0.0, abs=1e-5), (
+        f"K={num_clients} noise={noise}: gamma_entropy={needed} left a margin of "
+        f"{at_crossing}, so the reported value does not fix what it claims to"
+    )
+
+
+def test_headroom_puts_the_margin_strictly_negative() -> None:
+    """Landing exactly on the crossing leaves the corner *tied* with FedAvg, not beaten --
+    and a tie is not a safe place to run 576 cells from, because any drift in the deltas
+    puts it back on the wrong side."""
+    from fedswarm.aco.fitness import DataFreeFitnessConfig, corner_margin, required_gamma_entropy
+
+    num_clients = 10
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    config = DataFreeFitnessConfig(gamma_entropy=0.1)
+
+    with_headroom = required_gamma_entropy(gram, base, config, headroom=0.2)
+    margin = corner_margin(gram, base, DataFreeFitnessConfig(gamma_entropy=with_headroom))
+
+    assert margin < 0.0
+    assert with_headroom > required_gamma_entropy(gram, base, config)
+
+
+def test_a_non_uniform_base_needs_more_than_the_uniform_estimate() -> None:
+    """Why the closed form subtracts `P(base_weights)` rather than using `log K` alone.
+
+    FedACO's reference point is the num-examples-weighted average, not the uniform one, and
+    under dirichlet(0.3) those are far apart. A non-uniform base is *already* concentrated,
+    so the penalty charges it too -- which shrinks the gap the penalty can open between the
+    corner and the reference, and raises the gamma_entropy needed to close it. Reading
+    `log K` as the denominator therefore under-reports the requirement, which is the
+    direction that matters: it would say the corner is fixed when it is not.
+    """
+    from fedswarm.aco.fitness import DataFreeFitnessConfig, required_gamma_entropy
+
+    num_clients = 10
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    config = DataFreeFitnessConfig(gamma_entropy=0.1)
+
+    uniform = torch.full((num_clients,), 1.0 / num_clients)
+    skewed = torch.tensor([0.55, 0.20, 0.10, 0.05, 0.04, 0.03, 0.01, 0.01, 0.005, 0.005])
+
+    assert required_gamma_entropy(gram, skewed, config) > required_gamma_entropy(
+        gram, uniform, config
+    )
+
+
+def test_a_degenerate_base_is_reported_as_impossible_not_as_a_big_number() -> None:
+    """If one client holds every example, the reference point *is* the corner. The penalty
+    charges both identically and no gamma_entropy separates them. Returning `inf` says that;
+    returning 1e9 would look like a value someone could set."""
+    from fedswarm.aco.fitness import DataFreeFitnessConfig, required_gamma_entropy
+
+    num_clients = 4
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    vertex = torch.tensor([1.0, 0.0, 0.0, 0.0])
+
+    assert required_gamma_entropy(gram, vertex, DataFreeFitnessConfig()) == float("inf")
+
+
+# ======================================================================================
+# dispersion_reference -- removing the vertex degeneracy at its root
+# ======================================================================================
+
+
+@pytest.mark.parametrize("num_clients", [4, 10, 20])
+def test_a_fixed_reference_charges_a_vertex_what_a_moving_one_does_not(num_clients: int) -> None:
+    """The root of the whole problem, stated as the difference between the two modes.
+
+    `weighted_dispersion` is a weighted variance about `Delta(alpha)`, and at `alpha = e_j`
+    the mean *is* `delta_j` -- so the term is exactly zero and a single-client answer pays
+    nothing. About a fixed reference the same vertex costs `||delta_j - Delta_base||^2`, which
+    is large. This is not "small vs smaller": one is zero.
+    """
+    from fedswarm.aco.gram import dispersion_about_reference, weighted_dispersion
+
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    vertex = torch.eye(num_clients)[0]
+
+    assert float(weighted_dispersion(vertex, gram.gram)) == pytest.approx(0.0, abs=1e-9)
+    assert float(dispersion_about_reference(vertex, base, gram.gram)) > 0.1
+
+
+@pytest.mark.parametrize("num_clients", [10, 20])
+@pytest.mark.parametrize("noise", [1.5, 3.0])
+def test_the_fixed_reference_kills_the_corner_at_the_default_penalty(
+    num_clients: int, noise: float
+) -> None:
+    """Both halves at once, at `gamma_entropy=0.1`, which is what makes this the fix rather
+    than another trade.
+
+    Raising `gamma_entropy` to 0.6 also made the margin negative -- and pushed the whole
+    landscape down with it: the MAX-MIN rule deposits `rho * Q * max(F, 0)`, so 7 of 15 real
+    rounds deposited nothing, tau never moved, and FedACO finished 0.21 macro-F1 behind plain
+    FedAvg. A fix has to leave the fitness positive where the colony actually searches.
+    """
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, corner_margin
+
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=noise), trim_fraction=0.2)
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    cfg = DataFreeFitnessConfig(gamma_entropy=0.1, dispersion_reference="base")
+
+    assert corner_margin(gram, base, cfg) < 0.0, "the corner still wins"
+    # The FedAvg point -- where the colony starts and what it is judged against -- must stay
+    # in positive territory, or the deposit rule silently switches the mechanism off.
+    assert DataFreeFitness(gram, cfg, reference=base).evaluate(base) > 0.0
+
+
+def test_base_mode_refuses_to_run_without_a_reference() -> None:
+    """A silently-uniform default would remove the vertex degeneracy too, so every diagnostic
+    would look repaired while the term measured spread about a point the aggregation never
+    uses. That is the failure mode this project keeps finding; refusing is cheaper."""
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig
+
+    gram = precompute_gram(_consensus_deltas(4, noise=1.5))
+
+    with pytest.raises(ValueError, match="needs `reference`"):
+        DataFreeFitness(gram, DataFreeFitnessConfig(dispersion_reference="base"))
+
+
+def test_corner_margin_under_base_mode_agrees_with_evaluating_the_vertices() -> None:
+    """`corner_margin`'s closed form assumes dispersion vanishes at a vertex, which is false
+    in this mode -- so it switches to direct evaluation. Same quantity, checked."""
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, corner_margin
+
+    num_clients = 6
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=1.5))
+    base = torch.full((num_clients,), 1.0 / num_clients)
+    cfg = DataFreeFitnessConfig(gamma_entropy=0.1, dispersion_reference="base")
+    fitness = DataFreeFitness(gram, cfg, reference=base)
+
+    direct = max(
+        fitness.evaluate(torch.eye(num_clients)[j]) for j in range(num_clients)
+    ) - fitness.evaluate(base)
+
+    assert corner_margin(gram, base, cfg) == pytest.approx(direct, abs=1e-6)
+
+
+def test_the_default_dispersion_reference_is_still_the_method_as_proposed() -> None:
+    """Every result produced before 2026-09-20 used the moving mean. Changing the default
+    would silently make them incomparable with anything produced after -- and "base" is
+    supported by synthetic deltas so far, which is exactly the evidence that mislead this
+    project on the level set."""
+    from fedswarm.aco.fitness import DataFreeFitnessConfig
+
+    assert DataFreeFitnessConfig().dispersion_reference == "weighted_mean"
+
+
+def _skewed_weights(num_clients: int, seed: int) -> torch.Tensor:
+    """Num-examples weights under a dirichlet(0.3)-like skew -- the regime the main sweep
+    actually runs, and the one a uniform-base probe hides."""
+    torch.manual_seed(seed)
+    w = torch.distributions.Dirichlet(torch.full((num_clients,), 0.3)).sample()
+    return w / w.sum()
+
+
+def test_base_mode_is_linear_in_alpha_and_therefore_cannot_rule_out_a_vertex() -> None:
+    """Why `dispersion_reference="base"` was not the fix, stated as the property that makes
+    it impossible rather than as a measurement that happened to come out badly.
+
+    `sum_k alpha_k * ||delta_k - Delta_ref||^2` is a weighted average of constants fixed
+    before alpha is chosen. A linear function on the simplex takes its extremes at vertices,
+    so the term has no interior optimum at all -- it charges for picking FAR clients, never
+    for concentration, and a vertex on the client with the smallest constant is CHEAPER than
+    any mix. On real MRI deltas it moved the corner margin from +0.6184 to +0.3136 and could
+    not have flipped the sign at any weight.
+    """
+    from fedswarm.aco.gram import dispersion_about_reference
+
+    num_clients = 10
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=3.0), trim_fraction=0.2)
+    base = torch.full((num_clients,), 1.0 / num_clients)
+
+    a, b = torch.rand(num_clients), torch.rand(num_clients)
+    a, b = a / a.sum(), b / b.sum()
+    mixed = 0.3 * a + 0.7 * b
+    assert float(dispersion_about_reference(mixed, base, gram.gram)) == pytest.approx(
+        0.3 * float(dispersion_about_reference(a, base, gram.gram))
+        + 0.7 * float(dispersion_about_reference(b, base, gram.gram)),
+        abs=1e-5,
+    )
+
+    vertex_costs = [
+        float(dispersion_about_reference(torch.eye(num_clients)[j], base, gram.gram))
+        for j in range(num_clients)
+    ]
+    assert min(vertex_costs) < float(dispersion_about_reference(base, base, gram.gram)), (
+        "the cheapest vertex should undercut an interior point -- that is the defect"
+    )
+
+
+@pytest.mark.parametrize("num_clients", [10, 20])
+@pytest.mark.parametrize("noise", [1.5, 3.0, 6.0])
+def test_aggregate_mode_rules_out_the_corner_under_skew_and_keeps_the_reference_positive(
+    num_clients: int, noise: float
+) -> None:
+    """Both failures at once, in the regime that matters, at the DEFAULT gamma_entropy.
+
+    Skewed base weights and high noise are what the main sweep runs and what the first
+    probes left out. There `weighted_mean` loses the corner AND drives F at the FedAvg point
+    negative (matching the real run's -0.0212), and `base` cannot fix either. `aggregate`
+    measures ||Delta(alpha) - Delta_rob||^2: quadratic in alpha, minimized in the interior
+    because averaging cancels per-client noise, so a mix is genuinely nearer the consensus
+    than any single client rather than merely less penalized.
+    """
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig, corner_margin
+
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=noise), trim_fraction=0.2)
+    base = _skewed_weights(num_clients, seed=num_clients)
+    cfg = DataFreeFitnessConfig(gamma_entropy=0.1, dispersion_reference="aggregate")
+
+    assert corner_margin(gram, base, cfg) < 0.0, "a single client still outscores FedAvg"
+    assert DataFreeFitness(gram, cfg, reference=base).evaluate(base) > 0.0, (
+        "the objective must rank the aggregation this method exists to improve on above "
+        "zero, or the colony's margin over it is a margin over noise"
+    )
+
+
+def test_aggregate_drift_prefers_an_average_to_any_single_client() -> None:
+    """The mechanism, isolated from the rest of the fitness. A K-way average keeps roughly
+    1/K of each client's deviation from the consensus; one client keeps all of its own."""
+    from fedswarm.aco.gram import aggregate_drift
+
+    num_clients = 10
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=3.0), trim_fraction=0.2)
+    uniform = torch.full((num_clients,), 1.0 / num_clients)
+
+    at_uniform = float(aggregate_drift(uniform, gram.g_rob, gram.rob_norm_sq, gram.gram))
+    cheapest_vertex = min(
+        float(aggregate_drift(torch.eye(num_clients)[j], gram.g_rob, gram.rob_norm_sq, gram.gram))
+        for j in range(num_clients)
+    )
+    assert at_uniform < cheapest_vertex
+
+
+def test_aggregate_mode_needs_no_reference() -> None:
+    """Unlike "base" it is defined by the robust consensus, which the precompute already
+    holds -- so it cannot be misconfigured by passing the wrong reference."""
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig
+
+    gram = precompute_gram(_consensus_deltas(6, noise=1.5))
+    fitness = DataFreeFitness(gram, DataFreeFitnessConfig(dispersion_reference="aggregate"))
+
+    assert isinstance(fitness.evaluate(torch.full((6,), 1 / 6)), float)
+
+
+def _colony_under(mode: str, num_clients: int = 10, noise: float = 3.0, seed: int = 0):
+    """One real `run_colony` under a dispersion shape, on skewed base weights."""
+    from fedswarm.aco.colony import ColonyConfig, run_colony
+    from fedswarm.aco.fitness import DataFreeFitness, DataFreeFitnessConfig
+    from fedswarm.aco.heuristics import (
+        HeuristicWeights,
+        desirability_matrix,
+        desirability_scores,
+    )
+    from fedswarm.aco.pheromone import Pheromone, PheromoneConfig
+    from fedswarm.aco.schedules import level_set
+
+    levels = level_set(11, 0.0, 2.5, spacing="linear")
+    gram = precompute_gram(_consensus_deltas(num_clients, noise=noise, seed=seed), trim_fraction=0.2)
+    base = _skewed_weights(num_clients, seed=seed)
+    cfg = DataFreeFitnessConfig(gamma_entropy=0.1, dispersion_reference=mode)
+    fitness = DataFreeFitness(gram, cfg, reference=base)
+    d_k = desirability_scores(gram, base * 4000, torch.zeros(num_clients), HeuristicWeights())
+    eta = desirability_matrix(d_k, levels)
+    tau0 = Pheromone(11, PheromoneConfig()).begin_round([str(i) for i in range(num_clients)])
+    result = run_colony(
+        tau0, eta, levels, base, fitness.evaluate, num_ants=30, num_iterations=10,
+        config=ColonyConfig(), generator=torch.Generator().manual_seed(seed),
+    )
+    return {
+        "improvement": result.best_fitness - fitness.evaluate(base),
+        "alpha_max": float(result.alpha_best.max()),
+        "moved": float((result.alpha_best - base).abs().sum()),
+    }
+
+
+def test_aggregate_mode_leaves_the_colony_somewhere_to_go() -> None:
+    """A sane landscape is not the same as a useful one, and this is the check that was
+    missing when `gamma_entropy=0.6` shipped.
+
+    That setting passed the corner test and collapsed alpha onto the FedAvg point, which made
+    FedACO a slower FedAvg -- and the two numbers being checked at the time (corner margin,
+    F at the reference) both looked fine. What they could not see was whether the colony had
+    anywhere left to move.
+
+    So: under `aggregate` the colony must still find a meaningful improvement over the FedAvg
+    point, with an alpha that is neither collapsed onto it nor at a vertex.
+    """
+    result = _colony_under("aggregate")
+
+    assert result["improvement"] > 0.05, (
+        f"the colony gained only {result['improvement']:+.4f} over FedAvg -- a landscape with "
+        "no corner but nothing to find makes FedACO a slower FedAvg"
+    )
+    assert result["moved"] > 0.1, "alpha barely left the FedAvg point"
+    assert 0.15 < result["alpha_max"] < 0.9, (
+        f"alpha_max {result['alpha_max']:.3f} is either collapsed onto uniform (1/K = 0.1) "
+        "or sitting on a vertex"
+    )
+
+
+def test_base_mode_flattens_the_landscape_as_well_as_failing_on_the_corner() -> None:
+    """The second, independent reason `dispersion_reference="base"` was the wrong fix, and a
+    consequence of the same linearity: a linear term added to the objective tilts it without
+    curving it, so the corner is charged and the interior is levelled. The colony finds an
+    order of magnitude less improvement than under `aggregate`."""
+    assert _colony_under("aggregate")["improvement"] > 5 * _colony_under("base")["improvement"]
+
+
+# ======================================================================================
+# `aco-desirability-scaling` -- the screenable candidate fix for the anchoring problem
+# ======================================================================================
+
+
+def test_absolute_scaling_collapses_a_realistic_d_k_spread_into_one_level() -> None:
+    """This is the bug, stated as a test rather than as prose.
+
+    The measured `d_k` span across K in {10, 20} and noise in {1.5, 3, 6} is about 0.04.
+    Against a level spacing of 0.25, every client's argmax lands on the same level -- and a
+    uniform level assignment normalises back to `base_weights` exactly, so the ACS greedy
+    branch reconstructs the FedAvg point. The test pins the mechanism so a future change to
+    the level grid or the sigmoid cannot quietly stop reproducing it.
+    """
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    d_k = torch.tensor([0.7685, 0.7823, 0.7901, 0.7955, 0.8073])
+
+    eta = desirability_matrix(d_k, levels, "absolute")
+    chosen = eta.argmax(dim=1)
+
+    assert len(set(chosen.tolist())) == 1, (
+        "the premise of the anchoring diagnosis no longer holds -- absolute scaling used to "
+        "map a 0.04-wide d_k onto a single level"
+    )
+
+
+def test_standardized_scaling_separates_the_same_spread() -> None:
+    """The candidate fix, on the identical input."""
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    d_k = torch.tensor([0.7685, 0.7823, 0.7901, 0.7955, 0.8073])
+
+    chosen = desirability_matrix(d_k, levels, "standardized").argmax(dim=1)
+
+    assert len(set(chosen.tolist())) > 1
+    # Ranking must survive: standardizing may rescale, never reorder.
+    assert chosen.tolist() == sorted(chosen.tolist())
+
+
+def test_standardized_scaling_preserves_the_ranking_of_d_k() -> None:
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    d_k = torch.tensor([0.9, 0.1, 0.5, 0.7, 0.3])
+
+    d_hat_order = desirability_matrix(d_k, levels, "standardized").argmax(dim=1).tolist()
+    for i in range(len(d_k)):
+        for j in range(len(d_k)):
+            if d_k[i] > d_k[j]:
+                assert d_hat_order[i] >= d_hat_order[j]
+
+
+def test_standardized_scaling_falls_back_to_the_midpoint_with_no_spread() -> None:
+    """K identical scores carry no ranking information. Standardizing by ~0 would amplify
+    floating-point dust into confident level assignments, which is worse than the anchoring
+    this option exists to fix -- so it returns the uniform midpoint instead."""
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    identical = torch.full((6,), 0.8)
+
+    chosen = desirability_matrix(identical, levels, "standardized").argmax(dim=1)
+    assert len(set(chosen.tolist())) == 1
+
+
+def test_standardized_scaling_stays_inside_the_level_grid() -> None:
+    """What the +/-2 sigma clamp actually buys: d_hat never lands outside
+    [lambda_1, lambda_L], so no client is scored against an extrapolated level."""
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    spread_wide = torch.tensor([0.01, 0.2, 0.5, 0.8, 0.99, 40.0])
+
+    eta = desirability_matrix(spread_wide, levels, "standardized")
+    chosen = eta.argmax(dim=1)
+    assert chosen.min() >= 0 and chosen.max() <= len(levels) - 1
+
+
+def test_standardized_scaling_is_outlier_sensitive() -> None:
+    """A documented limitation, not a bug, and pinned so it is not mistaken for one.
+
+    The clamp bounds an outlier's own position but does not stop it inflating sigma. With
+    one client at 50 against four near 0.5, the four span 0.0009 in d_hat against a level
+    spacing of 0.25 -- they collapse into a single bin exactly as under "absolute". Fixing
+    that needs a robust centre and scale (median/MAD), a third variant and a further
+    departure from plan §4.2, which is not worth adding before a screen asks for it.
+    """
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    levels = torch.linspace(0.0, 2.5, 11)
+    with_outlier = torch.tensor([0.50, 0.51, 0.52, 0.53, 50.0])
+
+    chosen = desirability_matrix(with_outlier, levels, "standardized").argmax(dim=1)
+    assert len(set(chosen[:4].tolist())) == 1, (
+        "if the four ordinary clients now separate, `standardized` has gained robustness "
+        "that the docstring says it lacks -- update both together"
+    )
+
+
+def test_an_unknown_scaling_is_refused() -> None:
+    from fedswarm.aco.heuristics import desirability_matrix
+
+    with pytest.raises(ValueError, match="not one of"):
+        desirability_matrix(torch.tensor([0.5]), torch.linspace(0.0, 2.5, 11), "zscore")
+
+
+def test_absolute_is_the_default_so_the_spec_is_what_runs() -> None:
+    """`standardized` discards absolute scale by construction: an iid federation of equally
+    good clients gets forced apart. That is a modelling decision for the team, so the flag
+    must default to plan §4.2."""
+    from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix
+
+    assert HeuristicWeights.scaling == "absolute"
+    levels = torch.linspace(0.0, 2.5, 11)
+    d_k = torch.tensor([0.30, 0.55, 0.80])
+    assert torch.allclose(
+        desirability_matrix(d_k, levels), desirability_matrix(d_k, levels, "absolute")
+    )

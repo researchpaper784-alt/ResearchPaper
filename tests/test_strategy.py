@@ -70,7 +70,13 @@ def test_fedavg_recoverable(monkeypatch: pytest.MonkeyPatch) -> None:
 
     one_index = int(torch.argmin(torch.abs(fedaco_module.level_set(11, 0.0, 2.5) - 1.0)))
 
-    def _one_hot_eta(d_k: torch.Tensor, levels: torch.Tensor) -> torch.Tensor:
+    # `scaling` is accepted and ignored: this stub forces every client onto one level on
+    # purpose, which is the condition the test is constructed around, so how d_k would have
+    # been mapped is irrelevant here. It has to be in the signature because the real
+    # `desirability_matrix` takes it.
+    def _one_hot_eta(
+        d_k: torch.Tensor, levels: torch.Tensor, scaling: str = "absolute"
+    ) -> torch.Tensor:
         eta = torch.zeros(d_k.numel(), levels.numel())
         eta[:, one_index] = 1.0
         return eta
@@ -418,3 +424,68 @@ def test_a1_config_key_is_declared_in_pyproject() -> None:
 
     declared = tomllib.load(open(Path(__file__).resolve().parents[1] / "pyproject.toml", "rb"))
     assert "aco-search-method" in declared["tool"]["flwr"]["app"]["config"]
+
+
+# ======================================================================================
+# server_round reaches the client -- found in the first real GPU run's metrics
+# ======================================================================================
+
+
+def test_the_wrapper_sets_the_round_number_before_delegating() -> None:
+    """The ServerApp builds `train_config` once, before round 1, and never put a round
+    number in it. `train_handler` reads `config.get("server_round", -1)`, so every train
+    reply in the first real GPU run recorded `server_round = -1`.
+
+    That is a correctness bug, not a cosmetic one, because of R4: the Gaussian mechanism
+    seeds its noise with `seed*104729 + partition*1000003 + server_round`. With that term
+    pinned at 0, every round drew the SAME noise -- a fixed per-client perturbation the
+    model trains around, not DP noise. R4 would have reported the method as far more
+    noise-robust than it is, and nothing in the result file would have shown why.
+    """
+    from flwr.app import ConfigRecord
+
+    from fedswarm.strategies.factory import _with_server_round
+
+    seen: list[int] = []
+
+    class _Stub:
+        def configure_train(self, server_round, arrays, config, grid):
+            # Reads it back out, so this asserts the assignment happens BEFORE delegation
+            # -- a wrapper that set it afterwards would leave the client reading -1.
+            seen.append(int(config["server_round"]))
+            return []
+
+    stub = _Stub()
+    config = ConfigRecord({"local-epochs": 1})
+    _with_server_round(stub).configure_train(7, None, config, None)
+
+    assert seen == [7]
+    assert config["server_round"] == 7
+
+
+@pytest.mark.parametrize(
+    "strategy_name",
+    ["fedavg", "fedprox", "fedadam", "fedyogi", "median", "fedtrimmedavg", "krum",
+     "scaffold", "fednova", "loss-based", "fedaco"],
+)
+def test_every_strategy_the_factory_builds_goes_through_the_wrapper(strategy_name: str) -> None:
+    """Parametrized over the BUILT-INS on purpose. Five strategies in this repo override
+    `configure_train` and could have been fixed individually; `fedavg`, `fedprox`,
+    `fedadam`, `fedyogi`, `median`, `fedtrimmedavg` and `krum` are Flower built-ins
+    with no subclass here, and they are every baseline the paper compares against -- so a
+    per-subclass fix would have left the comparison arm broken and the method arm correct.
+
+    Checks the wrapper is in place rather than calling it: `configure_train` on a real
+    strategy reaches Flower's `sample_nodes`, which blocks waiting for SuperNodes that no
+    unit test has. The wrapper's own behaviour is covered by the test above.
+    """
+    from fedswarm.strategies.factory import strategy_from_run_config
+
+    strategy = strategy_from_run_config({"strategy-name": strategy_name, "num-clients": 2})
+
+    assert getattr(strategy.configure_train, "__qualname__", "").startswith(
+        "_with_server_round"
+    ), (
+        f"{strategy_name} is returned unwrapped, so it never tells the client the round "
+        "number and R4's DP noise would be identical in every round"
+    )

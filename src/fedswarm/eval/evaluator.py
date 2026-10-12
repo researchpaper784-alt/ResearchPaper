@@ -12,6 +12,19 @@ from fedswarm.eval.metrics import compute_metrics
 
 @torch.no_grad()
 def evaluate(model: torch.nn.Module, loader: DataLoader, device: torch.device) -> dict:
+    # Moving the MODEL is not the caller's job, because the data movement below is not
+    # either. This function took a `device`, moved the batches onto it and left the
+    # weights wherever they were, so the contract was half-stated and every caller had to
+    # remember the other half. `local_train`, `build_evaluate_fn`, `ServerValFitness` and
+    # `run_experiment` all did; `fl/app.py::evaluate_handler` did not, and on Kaggle's T4
+    # that ended every round with 10 of 10 clients failing:
+    #   RuntimeError: Input type (torch.cuda.FloatTensor) and weight type
+    #                 (torch.FloatTensor) should be the same
+    # Invisible on CPU, where both halves are the same device, which is why it survived
+    # 457 tests and every CPU run this project has ever done. `.to()` is in-place for an
+    # nn.Module and a no-op when the weights are already there, so this is free for the
+    # callers that were already correct.
+    model.to(device)
     model.eval()
     all_labels, all_preds, all_probs, total_loss = [], [], [], 0.0
 

@@ -34,6 +34,7 @@ from fedswarm.aco.fitness import (
     DataFreeFitnessConfig,
     ServerValFitness,
     corner_margin,
+    required_gamma_entropy,
 )
 from fedswarm.aco.gram import apply_delta, flatten_state_dicts, precompute_gram
 from fedswarm.aco.heuristics import HeuristicWeights, desirability_matrix, desirability_scores
@@ -46,6 +47,11 @@ class FedACOConfig:
     num_levels: int = 11
     level_low: float = 0.0
     level_high: float = 2.5
+    # "linear" (plan §14's explicit level set) or "log" (what shipped until 2026-09-19).
+    # Owned by A6, the hyperparameter-sensitivity ablation. See aco/schedules.level_set --
+    # the two differ by 100x in the alpha ratios a single ant can construct, which changes
+    # how reachable the degenerate single-client optimum is.
+    level_spacing: str = "linear"
     # Global shrinkage s (plan §4.1) is exposed as a fixed config value, not searched
     # per-ant as an extra decision variable -- a deliberate scope reduction to keep the
     # colony's construction graph exactly the K-station one §4.2 describes. Ablating it
@@ -125,7 +131,10 @@ class FedACO(FedAvg):
         self.val_loader = val_loader
         self.device = device
         self.levels = level_set(
-            self.aco_config.num_levels, self.aco_config.level_low, self.aco_config.level_high
+            self.aco_config.num_levels,
+            self.aco_config.level_low,
+            self.aco_config.level_high,
+            spacing=self.aco_config.level_spacing,
         )
         self.pheromone = Pheromone(self.aco_config.num_levels, self.aco_config.pheromone)
         self._current_arrays: ArrayRecord | None = None
@@ -157,6 +166,31 @@ class FedACO(FedAvg):
         client_arrays = [next(iter(rc.array_records.values())) for rc in reply_contents]
         client_metrics = [next(iter(rc.metric_records.values())) for rc in reply_contents]
 
+        # Canonical order by client id, because reply order is Ray's and Ray does not fix
+        # it. Everything downstream is built positionally from these lists -- `deltas`, the
+        # Gram matrix, the desirability, and the colony's stations -- so a permuted arrival
+        # order hands the same pseudo-random draws to different clients and the search takes
+        # a different path. The first two Kaggle gate runs, identical config and seed,
+        # disagreed on every metric; `participating_client_ids` shows the order changing
+        # even between rounds of a single run (['1','3','4',...] then ['3','1','4',...]).
+        #
+        # It also moves the trimmed set: `precompute_gram(trim_fraction=...)` drops the
+        # extremes, and near-ties break by position. The aggregate itself was never wrong --
+        # alpha is matched to clients by id throughout, and the pheromone is keyed by id --
+        # but "correct" and "reproducible" are different properties and only the first held.
+        try:
+            order = sorted(range(len(client_metrics)), key=lambda i: int(client_metrics[i]["client_id"]))
+        except KeyError as exc:
+            raise KeyError(
+                "FedACO requires every client reply's MetricRecord to include "
+                "'client_id' -- pheromone persistence (plan §4.3) is keyed by client "
+                "identity, and there is no safe fallback (e.g. reply position) that "
+                "wouldn't silently break persistence across rounds with a changing "
+                "participation set."
+            ) from exc
+        client_arrays = [client_arrays[i] for i in order]
+        client_metrics = [client_metrics[i] for i in order]
+
         try:
             client_ids = [str(int(m["client_id"])) for m in client_metrics]
         except KeyError as exc:
@@ -185,7 +219,7 @@ class FedACO(FedAvg):
         gram_time_ms = (time.perf_counter() - gram_start) * 1000.0
 
         d_k = desirability_scores(gram, num_examples, val_improvement, self.aco_config.heuristics)
-        eta = desirability_matrix(d_k, self.levels)
+        eta = desirability_matrix(d_k, self.levels, self.aco_config.heuristics.scaling)
 
         num_ants, num_iterations = colony_budget(
             # True round, not a process-local counter: on a resumed run `round_count`
@@ -205,7 +239,10 @@ class FedACO(FedAvg):
                 self.model, global_state, deltas, shapes, self.val_loader, self.device
             )
         else:
-            fitness = DataFreeFitness(gram, self.aco_config.fitness)
+            # `reference=base_weights` is what `dispersion_reference="base"` measures spread
+            # about -- the FedAvg point this round, not a fixed constant. Passed always;
+            # ignored under the default "weighted_mean".
+            fitness = DataFreeFitness(gram, self.aco_config.fitness, reference=base_weights)
 
         # Derived per round rather than once per run, so a resumed run (fl/app.py
         # checkpoints every round) reproduces the same colony trajectory it would have
@@ -334,6 +371,18 @@ class FedACO(FedAvg):
                 # `fitness_mode="server_val"`, so the number means the same thing across
                 # rounds and modes.
                 "corner_margin": corner_margin(
+                    gram, base_weights, self.aco_config.fitness
+                ),
+                # The fix for a positive `corner_margin`, in the same record as the
+                # diagnosis. The first real GPU run reported the margin at +0.6252 in 15 of
+                # 15 rounds and left "raise `aco-gamma-entropy`" as the only guidance, with
+                # no value attached -- so closing it meant another GPU session just to
+                # measure what this line computes for free. The margin is linear in
+                # gamma_entropy, so this is a closed form over the same Gram matrix, not a
+                # search. Logged per round because it moves with the deltas: the value that
+                # clears round 1 is not the value that clears round 15, and the one worth
+                # setting is the largest across the run.
+                "required_gamma_entropy": required_gamma_entropy(
                     gram, base_weights, self.aco_config.fitness
                 ),
                 "alpha": alpha_final.tolist(),

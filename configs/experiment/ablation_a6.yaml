@@ -11,9 +11,14 @@
 # already-completed. Intentional, not wasted compute: it's what lets each axis be
 # read as its own clean {below, default, above} triple in the resulting table.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/ablation_a6.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/ablation_a6.yaml
 
 base_overrides:
+  # Where results land. Without this the run falls through to pyproject's `output-dir`
+  # (`results/fl`), where `make tables-ablation` does not look -- so a finished sweep would
+  # produce an empty table, and every granular sweep would share one directory. Added
+  # 2026-09-24; the three aggregate configs (main/robustness/ablation_all) already did this.
+  output-dir: results/fl/ablation
   num-clients: 20
   min-client-size: 5
   fraction-train: 1.0
@@ -32,6 +37,57 @@ base_overrides:
   strategy-name: fedaco
 
 strategies:
+  # The level grid's *shape*, not just its size. docs/IMPLEMENTATION_PLAN.md §14
+  # specifies the linear set; the codebase shipped log-spaced until 2026-09-19, which
+  # allows alpha ratios of 1143:1 against linear's 10:1 and therefore makes the
+  # degenerate single-client optimum far easier for an ant to construct
+  # (`fitness.corner_margin`). "linear" is now the default; this cell measures what the
+  # old behaviour was worth rather than assuming the switch was free.
+  - name: levels_log_spaced
+    overrides: {aco-level-spacing: log}
+  # gamma_3, the concentration penalty weight -- added 2026-09-19, and the most
+  # consequential entry in this file. It is the only term standing against the degenerate
+  # single-client optimum: at a vertex the dispersion term is exactly zero, so the corner's
+  # score is `gamma_1*cos(delta_j, robust_mean) - gamma_3*log K` and gamma_3 alone decides
+  # whether "discard every client but one" outscores the FedAvg point. A6 swept seven
+  # hyperparameters and not this one, while the first real GPU run showed the default 0.1
+  # loses the corner in 15 of 15 rounds at K=10 (`required_gamma_entropy` >= 0.45 there).
+  #
+  # The default is deliberately NOT changed. Raising it repairs the corner but charges *any*
+  # concentration, including the genuine down-weighting of a straggler or an adversary that
+  # R1-R3 need FedACO to perform -- so the value is a measured trade-off, not a bug fix, and
+  # these three cells are what measures it. 0.5 brackets the K=10 requirement with headroom;
+  # 1.0 is deliberately past the point where the penalty should start costing accuracy, so
+  # the sweep shows the cost rather than only the fix.
+  - name: gamma_entropy=0.1_default
+    overrides: {aco-gamma-entropy: 0.1}
+  - name: gamma_entropy=0.5
+    overrides: {aco-gamma-entropy: 0.5}
+  - name: gamma_entropy=1.0
+    overrides: {aco-gamma-entropy: 1.0}
+  # What the dispersion term measures spread ABOUT -- added 2026-09-20, and arguably the most
+  # important single cell in the whole ablation suite. A weighted variance about Delta(alpha)
+  # is exactly ZERO at every vertex, which is why the corner wins at any sane gamma_3 and why
+  # the gamma_3 needed to close it (0.481 measured, see the cells above) drags the whole
+  # landscape negative: the first attempt at that left 7 of 15 rounds unable to deposit and
+  # FedACO 0.21 macro-F1 behind FedAvg. Measured about the FedAvg point instead, a vertex
+  # costs ||delta_j - Delta_base||^2 and the degeneracy disappears at the DEFAULT gamma_3.
+  #
+  # If this cell wins, it is not a hyperparameter result -- it is a correction to §4.5's
+  # fitness, and the paper has to say so.
+  - name: dispersion_about_fedavg_point
+    overrides: {aco-dispersion-reference: base}
+  # The one that actually works. "base" is exactly linear in alpha, so it has no interior
+  # optimum and a vertex on the nearest client is cheaper than any mix -- on real deltas it
+  # moved the corner margin from +0.6184 to +0.3136 and stopped. "aggregate" measures
+  # ||Delta(alpha) - Delta_rob||^2 instead: quadratic, minimized in the interior because
+  # averaging cancels per-client noise. Across K in {10,20} x noise in {1.5,3,6} x
+  # {uniform, dirichlet-skewed} base weights it is the only shape that both rules out the
+  # corner AND keeps F at the FedAvg point positive, at the default gamma_entropy.
+  # Kept alongside "base" rather than replacing it: the paper has to show why the obvious
+  # fixed-reference fix is not the one, and that needs the cell.
+  - name: dispersion_aggregate_drift
+    overrides: {aco-dispersion-reference: aggregate}
   - name: a=0.5
     overrides: {aco-pheromone-exp: 0.5}
   - name: a=1.0_default

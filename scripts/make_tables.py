@@ -30,6 +30,7 @@ Run:
 from __future__ import annotations
 
 import argparse
+import functools
 import csv
 import statistics
 import sys
@@ -45,6 +46,7 @@ from fedswarm.analysis import (
     seeds_needed_for,
     wilcoxon_paired_test,
 )
+from fedswarm.tables import main_results_table
 from fedswarm.utils.runner import load_result_files
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -69,7 +71,7 @@ def load_results(results_dir: Path) -> list[dict]:
     return out
 
 
-def cell_key(result: dict) -> tuple[str, str, str]:
+def cell_key(result: dict, varying: "frozenset[str] | None" = None) -> tuple[str, str, str]:
     config = result.get("config", {})
     run_config = config.get("run_config", {})
     strategy = str(config.get("strategy", run_config.get("strategy-name", "unknown")))
@@ -78,40 +80,171 @@ def cell_key(result: dict) -> tuple[str, str, str]:
     # are different experimental conditions and must never be pooled into one row.
     if regime == "dirichlet" and run_config.get("alpha") is not None:
         regime = f"dirichlet_{run_config['alpha']}"
-    return strategy, regime, _variant_of(run_config)
+    return strategy, regime, _variant_of(run_config, varying)
 
 
-def _variant_of(run_config: dict) -> str:
-    """Reconstruct the ablation variant from the run config.
+def varying_keys(results: list[dict]) -> frozenset[str]:
+    """Which config keys actually distinguish one loaded result from another.
 
-    The sweep runner knows the variant name, but a result file records only the resolved
-    config, so the variant has to be recovered from the knobs that differ from default.
-    Anything unrecognised falls back to "default" rather than being guessed at.
+    Exists because "differs from `pyproject.toml`'s default" and "is an experimental
+    condition in *this* results directory" are not the same question, and `_variant_of`
+    used to only ask the first one. `num-clients` is the key this broke on, 2026-10-11:
+    the bare default is `2` (a dev/CI smoke value), and no real sweep -- `main_reduced`,
+    every ablation, every robustness arm run so far -- uses it, so every real result read
+    as a non-"default" `K=...` variant. `figure_convergence`/`figure_comparison`
+    (`make_figures.py`), the paper's two headline figures, filter to
+    `variant == "default"` and so had no data to plot for any real sweep, ever.
+
+    The fix is not to exempt `num-clients` outright (`_NOT_A_CONDITION`) -- `R5`
+    (`configs/experiment/robustness_r5_client_scaling.yaml`) exists specifically to vary
+    it, and a results directory that actually contains multiple `num-clients` values must
+    keep treating it as the condition it is, or R5's own rows collapse into one exactly
+    the way the 2026-09-24 `aco-gamma-dispersion` bug collapsed A1's five search methods.
+    Instead: a key only counts as a condition if the *loaded results themselves* disagree
+    on its value. Constant across every row in this call -> not a condition here,
+    regardless of what `pyproject.toml` says (`main`/`ablation`/`robustness`, today, where
+    every row shares `num-clients=10`). Varies across at least two rows -> a real
+    condition, compared against `pyproject.toml`'s default as before (`R5`, if it is ever
+    run -- every sweep that has actually run so far holds `num-clients` fixed within its
+    own results directory, so this never fires on them).
     """
+    # A key set explicitly on some results and left unset (falling back to pyproject's
+    # default) on others is exactly as "varying" as one set to two different values --
+    # resolve every result against `_defaults()` before comparing, the same fallback
+    # `_variant_of` itself uses, rather than only looking at keys each run_config happens
+    # to carry literally. Missing the fallback here undercounts variation: a key absent
+    # from half the results and explicitly set on the other half would otherwise show as
+    # a single value (only the "set" half contributes one), reading as constant.
+    defaults = _defaults()
+    all_run_configs = [r.get("config", {}).get("run_config", {}) for r in results]
+    all_keys = {k for rc in all_run_configs for k in rc} | set(defaults)
+    seen: dict[str, set[str]] = defaultdict(set)
+    _missing = object()
+    for key in all_keys - _NOT_A_CONDITION:
+        for run_config in all_run_configs:
+            value = run_config.get(key, defaults.get(key, _missing))
+            seen[key].add(repr(value))
+    return frozenset(key for key, values in seen.items() if len(values) > 1)
+
+
+@functools.lru_cache(maxsize=1)
+def _defaults() -> dict:
+    """pyproject's `[tool.flwr.app.config]`, read once.
+
+    `_variant_of` used to hardcode the default it compared each knob against, and on
+    2026-09-24 that broke: reconciling `aco-gamma-dispersion` to plan §14's 0.50 (it had
+    drifted to 1.0) made **every** FedACO run read as a `g2=0.5` variant. Since `add_deltas`
+    only computes a delta for rows whose variant is "default", every comparison column in
+    every table would have come out empty -- a fifth copy of a default, failing the same way
+    the other four did. Read the real thing instead.
+    """
+    import tomllib
+
+    path = REPO_ROOT / "pyproject.toml"
+    return tomllib.loads(path.read_text())["tool"]["flwr"]["app"]["config"]
+
+
+# Keys that are not experimental conditions. Everything else in the resolved config is, and
+# `_variant_of` marks any of it that differs from the default -- see that function for why the
+# previous hand-listed approach could not work.
+_NOT_A_CONDITION = frozenset({
+    # Paths and bookkeeping.
+    "cache-dir", "checkpoint-dir", "manifest-path", "output-dir", "partition-cache-dir",
+    # Already part of the grouping key, so marking them would duplicate the row label.
+    "strategy-name", "regime", "alpha", "seed", "partition-seed",
+    # Reporting/plumbing rather than condition.
+    "deterministic", "num-classes", "num-rounds",
+})
+
+# Short names for the marks, so a label stays readable. Anything unlisted is marked by its
+# key with the `aco-`/`fedaco-` prefix stripped.
+_MARK_NAMES = {
+    "aco-persistence": "persistence", "aco-fitness-mode": "fitness", "model-norm": "norm",
+    "aco-target-sum": "s", "aco-gamma-dispersion": "g2", "aco-gamma-entropy": "g3",
+    "aco-gamma-alignment": "g1", "aco-q0": "q0", "aco-rho": "rho",
+    "aco-pheromone-exp": "a", "aco-heuristic-exp": "b", "aco-num-levels": "levels",
+    "aco-search-method": "search", "aco-desirability-scaling": "scaling",
+    "aco-dispersion-reference": "ref", "fraction-train": "participation",
+    "num-clients": "K", "aco-ants-start": "ants", "aco-iters-start": "iters",
+}
+
+
+def _mark_name(key: str) -> str:
+    if key in _MARK_NAMES:
+        return _MARK_NAMES[key]
+    for prefix in ("aco-", "fedaco-", "model-"):
+        if key.startswith(prefix):
+            return key[len(prefix):]
+    return key
+
+
+def _variant_of(run_config: dict, varying: "frozenset[str] | None" = None) -> str:
+    """Reconstruct the experimental condition from the resolved config.
+
+    `varying`, when given (see `varying_keys`), restricts marking to keys that actually
+    differ across the results being tabulated together -- a key constant across the whole
+    loaded set is never a condition *for this table*, whatever `pyproject.toml` says.
+    `None` keeps the old whole-config-vs-pyproject-default behavior, for any caller that
+    has not been updated to compute it.
+
+    The sweep runner knows the arm's name, but a result file records only the resolved
+    config, so the condition has to be recovered from whatever differs from the defaults.
+
+    **Why this compares everything rather than a hand-picked list.** It used to check about
+    eight knobs by name, and on 2026-09-24 a check of every declared sweep arm found that
+    **42 distinct arms collapsed onto the single key `(fedaco, dirichlet_0.3, default)`** --
+    including all five of `ablation_a1`'s search methods, which *is* the project's go/no-go
+    gate, plus most of A6's 27 arms, all of A5's, both of A8's, R5's four client counts and
+    R6's cold-start arms. `make_tables` groups by (strategy, regime, variant), so each
+    collision averages unrelated arms into one row: A1 would have reported ACO, random
+    search, coordinate grid, PSO and GA as a single number.
+
+    The log already recorded this failure for the robustness sweeps -- "whichever file was
+    read last would win, and the published table would average a clean control together with
+    a 30%-sign-flip run and report it as one number with n=5" -- and the fix then was to add
+    the two keys those sweeps varied. Adding keys one at a time is what left the ablations
+    broken, because every new ablation axis needs another entry here and nothing fails when
+    one is missing. Comparing the whole config cannot go stale that way.
+
+    `_NOT_A_CONDITION` holds the exclusions: paths, the keys already in the grouping label,
+    and plumbing. Defaults come from `_defaults()`, never from literals -- a default that
+    moves would otherwise relabel every existing result (which is exactly what reconciling
+    `aco-gamma-dispersion` to plan §14's 0.50 did).
+    """
+    defaults = _defaults()
     marks = []
-    if str(run_config.get("aco-persistence", "decayed")) != "decayed":
-        marks.append(f"persistence={run_config['aco-persistence']}")
-    if str(run_config.get("aco-fitness-mode", "data_free")) != "data_free":
-        marks.append(f"fitness={run_config['aco-fitness-mode']}")
-    if str(run_config.get("model-norm", "groupnorm")) != "groupnorm":
-        marks.append(f"norm={run_config['model-norm']}")
-    if float(run_config.get("aco-target-sum", 1.0)) != 1.0:
-        marks.append(f"s={run_config['aco-target-sum']}")
-    if float(run_config.get("aco-gamma-dispersion", 1.0)) != 1.0:
-        marks.append(f"g2={run_config['aco-gamma-dispersion']}")
-    if run_config.get("aco-safety-fallback") is False:
-        marks.append("no-fallback")
-    # Phase 8. Without these every robustness variant collapses to "default": the 9
-    # variants x 5 seeds per strategy would key into the same per-seed dict, whichever
-    # file was read last would win, and the published table would average a clean control
-    # together with a 30%-sign-flip run and report it as one number with n=5.
-    attack = str(run_config.get("attack", "none"))
-    if attack != "none":
-        marks.append(f"attack={attack}@{run_config.get('attack-fraction', 0)}")
-        if float(run_config.get("attack-scale", 1.0)) != 1.0:
-            marks.append(f"x{run_config['attack-scale']}")
-    if float(run_config.get("fraction-train", 1.0)) != 1.0:
-        marks.append(f"participation={run_config['fraction-train']}")
+
+    for key in sorted(run_config):
+        if key in _NOT_A_CONDITION or key not in defaults:
+            continue
+        if varying is not None and key not in varying:
+            continue
+        actual, default = run_config[key], defaults[key]
+        if isinstance(default, bool) or isinstance(actual, bool):
+            differs = bool(actual) != bool(default)
+        elif isinstance(default, (int, float)) and isinstance(actual, (int, float)):
+            differs = float(actual) != float(default)
+        else:
+            differs = str(actual) != str(default)
+        if not differs:
+            continue
+        if key == "aco-safety-fallback" and actual is False:
+            marks.append("no-fallback")
+        else:
+            marks.append(f"{_mark_name(key)}={actual}")
+
+    # The attack is one condition spread over several keys; collapsing it keeps the label
+    # readable and keeps "10% gaussian" distinct from "10% sign-flip".
+    attack = str(run_config.get("attack", defaults.get("attack", "none")))
+    if attack != str(defaults.get("attack", "none")):
+        marks = [m for m in marks if not m.startswith(("attack=", "attack-fraction=",
+                                                       "attack-scale=", "num-malicious-nodes="))]
+        mark = f"attack={attack}@{run_config.get('attack-fraction', 0)}"
+        scale = run_config.get("attack-scale")
+        if scale is not None and float(scale) != float(defaults.get("attack-scale", 1.0)):
+            mark += f"x{scale}"
+        marks.insert(0, mark)
+
     return ",".join(marks) if marks else "default"
 
 
@@ -131,9 +264,10 @@ def _round_mean(result: dict, key: str) -> float | None:
 
 
 def summarize(results: list[dict], expected_seeds: int | None) -> list[dict]:
+    varying = varying_keys(results)
     grouped: dict[tuple[str, str, str], list[dict]] = defaultdict(list)
     for result in results:
-        grouped[cell_key(result)].append(result)
+        grouped[cell_key(result, varying)].append(result)
 
     rows = []
     for (strategy, regime, variant), runs in sorted(grouped.items()):
@@ -179,22 +313,52 @@ def add_deltas(rows: list[dict], baseline: str) -> None:
     saw the same seeds, so the per-seed difference has far less variance than the
     difference of the means. `delta_paired` records which was used, so a reader is never
     left guessing whether a small margin survived pairing."""
-    by_regime_seed = {
-        (r["regime"], s): v
+    # Baseline values keyed by (regime, variant, seed), plus the same map restricted to the
+    # default variant as a fallback.
+    #
+    # Matching the variant matters because several sweeps set a tracked knob in
+    # `base_overrides`, so **every** row in them carries that mark and none is "default":
+    # `main_client_scale.yaml` sets fraction-train 0.3, and robustness_r1/r2/r3 set an
+    # attack. Keying the baseline on variant == "default" alone found nothing in those
+    # sweeps, so every delta came out None -- the robustness tables lost the exact column
+    # they exist for, silently, because an empty delta renders as the same "—" as a cell
+    # with no paired seeds.
+    #
+    # Within-variant first is also the comparison those sweeps intend: FedACO against FedAvg
+    # *at the same attack level*, not against an unattacked control. Falling back to the
+    # default variant preserves the ablation behaviour, where the baseline only ever exists
+    # at default and each variant is meant to be read against it.
+    by_variant_seed: dict[tuple[str, str, object], float] = {
+        (r["regime"], r["variant"], s): v
         for r in rows
-        if r["strategy"] == baseline and r["variant"] == "default"
+        if r["strategy"] == baseline
         for s, v in r["by_seed"].items()
     }
+    by_default_seed = {
+        (regime, seed): value
+        for (regime, variant, seed), value in by_variant_seed.items()
+        if variant == "default"
+    }
+
     for row in rows:
-        if row["strategy"] == baseline and row["variant"] == "default":
+        if row["strategy"] == baseline:
+            # A baseline row is its own reference, whatever variant it sits at.
             row["delta"] = 0.0
             row["delta_paired"] = True
             continue
-        shared = [s for s in row["by_seed"] if (row["regime"], s) in by_regime_seed]
+
+        same_variant = [
+            s for s in row["by_seed"] if (row["regime"], row["variant"], s) in by_variant_seed
+        ]
+        if same_variant:
+            reference = {s: by_variant_seed[(row["regime"], row["variant"], s)] for s in same_variant}
+            shared = same_variant
+        else:
+            shared = [s for s in row["by_seed"] if (row["regime"], s) in by_default_seed]
+            reference = {s: by_default_seed[(row["regime"], s)] for s in shared}
+
         if shared:
-            row["delta"] = statistics.fmean(
-                row["by_seed"][s] - by_regime_seed[(row["regime"], s)] for s in shared
-            )
+            row["delta"] = statistics.fmean(row["by_seed"][s] - reference[s] for s in shared)
             row["delta_paired"] = True
             row["delta_n"] = len(shared)
         else:
@@ -271,12 +435,10 @@ def power_note(rows: list[dict], alpha: float, alternative: str) -> str | None:
     "not significant" for every row while the data is as favourable as data can be. Saying
     so in the table beats leaving it for whoever writes the discussion section.
     """
-    tested = [r for r in rows if r.get("p_value") is not None and r.get("n_pairs")]
-    if not tested:
+    floor_info = _power_floor(rows, alternative)
+    if floor_info is None:
         return None
-    family = len(tested)
-    n_pairs = min(r["n_pairs"] for r in tested)
-    floor = min_achievable_p(n_pairs, alternative)
+    family, n_pairs, floor = floor_info
     if floor * family <= alpha:
         return None
 
@@ -292,6 +454,48 @@ def power_note(rows: list[dict], alpha: float, alternative: str) -> str | None:
         f"Every 'not significant' in this table is therefore a statement about the sample "
         f"size, not about the data. Clearing {alpha} over this family needs {target}, or a "
         f"smaller family of claims. Do not read these rows as evidence of no effect.\n"
+    )
+
+
+def _power_floor(rows: list[dict], alternative: str) -> tuple[int, int, float] | None:
+    """`(family_size, n_pairs, floor)` for the tested rows, or None if nothing was tested.
+
+    Factored out so `power_note` and `_latex_power_note` cannot disagree about whether a
+    table is underpowered -- two formatters computing the same thing separately is how the
+    markdown ended up warning about something the LaTeX advertised.
+    """
+    tested = [r for r in rows if r.get("p_value") is not None and r.get("n_pairs")]
+    if not tested:
+        return None
+    family = len(tested)
+    n_pairs = min(r["n_pairs"] for r in tested)
+    return family, n_pairs, min_achievable_p(n_pairs, alternative)
+
+
+def _latex_power_note(rows: list[dict], alpha: float, alternative: str) -> str | None:
+    """The same warning as `power_note`, as a caption sentence.
+
+    Separate from `power_note` because that one is markdown -- emoji, `**bold**`, newlines --
+    and none of it survives in a LaTeX caption. The substance has to, though: without it a
+    caption prints "$^{*}p<0.05$" for a threshold the signed-rank test cannot cross at this
+    pair count, and a reader of the paper has no way to know. The markdown table says so in a
+    paragraph the LaTeX never carried.
+    """
+    floor_info = _power_floor(rows, alternative)
+    if floor_info is None:
+        return None
+    family, n_pairs, floor = floor_info
+    if floor * family <= alpha:
+        return None
+    needed = seeds_needed_for(alpha, family, alternative)
+    target = f"{needed} seeds" if needed else "more than 40 seeds"
+    return (
+        f" No significance markers are shown: at $n={n_pairs}$ paired seeds the signed-rank "
+        f"test's smallest attainable {alternative} $p$ is {floor:.4f}, and across "
+        f"{family} comparison{'s' if family != 1 else ''} the Holm--Bonferroni adjusted "
+        f"floor is {min(floor * family, 1.0):.4f} -- so $p<{alpha}$ is unreachable at any "
+        f"data, and every non-significant result here reflects the sample size rather than "
+        f"the effect. Clearing {alpha} over this family requires {target}."
     )
 
 
@@ -351,6 +555,93 @@ def to_markdown(rows: list[dict], baseline: str) -> str:
             "claims was not happening. Neither is visible in the macro-F1 column.\n"
         )
     return "\n".join(lines)
+
+
+def to_latex(
+    rows: list[dict], baseline: str, path: Path, name: str, power_warning: str | None = None
+) -> None:
+    """Plan §9.3's deliverable: booktabs, best-in-bold, significance markers.
+
+    Built from the *same* `rows` the markdown and CSV come from, and rendered by
+    `fedswarm.tables.main_results_table` rather than a second LaTeX emitter -- the plan's
+    instruction is "never hand-type a number into the paper", and two formatters drifting
+    apart is the same failure one step later. `tables.py` takes the
+    `fedswarm.analysis`-shaped frame, so this adapts rather than reimplements.
+
+    Rows are labelled by `variant` when a sweep has more than one (the ablation tables,
+    where every row is FedACO) and by `strategy` otherwise (the main table). Labelling an
+    ablation by strategy would print twelve identical "fedaco" rows.
+    """
+    import pandas as pd
+
+    variants = {r["variant"] for r in rows}
+    label_key = "variant" if len(variants) > 1 else "strategy"
+
+    summary = pd.DataFrame(
+        [
+            {
+                "strategy": r[label_key],
+                "partition": r["regime"],
+                "mean": r["mean"],
+                "std": r["std"],
+                "n": r["n"],
+                # Carried into the LaTeX so an incomplete cell is marked THERE too. It was
+                # dropped here, which is how `0.510 $\pm$ 0.010` from 3 of 8 seeds reached the
+                # paper looking identical to a complete cell while the markdown beside it
+                # showed `3 ⚠️` and two paragraphs of warning.
+                "expected_n": r.get("expected_n"),
+            }
+            for r in rows
+        ]
+    )
+    # `main_results_table` reads markers off (partition, baseline) pairs, where `baseline`
+    # is the row being marked -- so the frame is keyed the same way the rows are labelled.
+    comparison = pd.DataFrame(
+        [
+            {
+                "partition": r["regime"],
+                "baseline": r[label_key],
+                "p_value_holm": r["p_value_holm"],
+            }
+            for r in rows
+            if r.get("p_value_holm") is not None
+        ]
+    )
+
+    # `main_results_table`'s `method=` parameter is "the row that gets no marker". Its own
+    # convention marks the baselines ("fedaco vs. this baseline"); ours marks the method
+    # ("this row differs significantly from fedavg"), which is what the caption states and
+    # what `rows` carries -- each row's p-value is its own comparison against the baseline.
+    # So the row to leave unmarked is the baseline's. Passing `baseline` here looks
+    # inverted and is not; do not "fix" it without changing the caption to match.
+    method = baseline if label_key == "strategy" else "default"
+    tex = main_results_table(
+        summary,
+        comparison if not comparison.empty else None,
+        method=method,
+        caption=(
+            f"{name}: test macro-F1 (mean $\\pm$ std over seeds). "
+            f"Significance vs.\\ {_escape(baseline)}, Wilcoxon signed-rank with "
+            "Holm--Bonferroni correction across the table"
+            # The legend is conditional. Printing "$^{*}p<0.05$" when the signed-rank test
+            # cannot reach 0.05 at this seed count advertises a threshold no data can cross,
+            # and a reader of the paper has no way to know that -- the markdown table says so
+            # in a paragraph the LaTeX never carried.
+            + (
+                "."
+                if power_warning
+                else " ($^{*}p<0.05$, $^{**}p<0.01$, $^{***}p<0.001$)."
+            )
+        ),
+        label=f"tab:{name}",
+        power_warning=power_warning,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tex + "\n")
+
+
+def _escape(text: str) -> str:
+    return str(text).replace("_", r"\_")
 
 
 def to_csv(rows: list[dict], path: Path) -> None:
@@ -427,9 +718,18 @@ def main() -> int:
     )
     (out_dir / f"{results_dir.name}.md").write_text(header + markdown + "\n")
     to_csv(rows, out_dir / f"{results_dir.name}.csv")
+    to_latex(
+        rows,
+        args.baseline,
+        out_dir / f"{results_dir.name}.tex",
+        results_dir.name,
+        # The same note the markdown carries. It belongs in the LaTeX caption too: a table
+        # copied into a draft takes its caption with it and nothing else.
+        power_warning=_latex_power_note(rows, args.alpha, args.alternative),
+    )
 
     print(header + markdown)
-    print(f"\nWrote {out_dir / f'{results_dir.name}.md'} and .csv")
+    print(f"\nWrote {out_dir / f'{results_dir.name}.md'}, .csv and .tex")
 
     incomplete = sum(1 for r in rows if r["incomplete"])
     if incomplete:

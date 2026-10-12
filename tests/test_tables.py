@@ -11,9 +11,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from make_tables import (  # noqa: E402
+    to_latex,
     add_significance,
     power_note,
     _variant_of,
@@ -21,6 +24,7 @@ from make_tables import (  # noqa: E402
     cell_key,
     summarize,
     to_markdown,
+    varying_keys,
 )
 
 
@@ -277,3 +281,415 @@ def test_a_one_sided_test_is_available_but_not_the_default() -> None:
     p_two = next(r for r in two_sided if r["strategy"] == "fedaco")["p_value"]
     p_one = next(r for r in one_sided if r["strategy"] == "fedaco")["p_value"]
     assert p_one < p_two
+
+
+# ======================================================================================
+# Phase 9.3 -- LaTeX output
+# ======================================================================================
+
+
+def test_the_latex_table_is_booktabs_with_the_best_in_bold(tmp_path: Path) -> None:
+    """Plan §9.3's deliverable, and its instruction: "never hand-type a number into the
+    paper". The .tex comes from the same rows as the .md and .csv, so all three cannot
+    disagree."""
+    rows = _rows(_best_case(8), 8)
+    out = tmp_path / "main.tex"
+
+    to_latex(rows, "fedavg", out, "main")
+    tex = out.read_text()
+
+    for required in ("\\toprule", "\\midrule", "\\bottomrule", "\\begin{tabular}"):
+        assert required in tex, required
+    assert "\\textbf{" in tex, "the best cell per partition must be bold"
+    assert "\\label{tab:main}" in tex
+
+
+def test_significance_markers_appear_only_when_significant(tmp_path: Path) -> None:
+    """At 8 seeds the best case reaches p=0.008 and earns `**`; at 5 seeds the same data
+    floors at 0.0625 and must earn nothing. A table that marked both would be asserting
+    significance the test never found."""
+    eight = tmp_path / "eight.tex"
+    five = tmp_path / "five.tex"
+
+    to_latex(_rows(_best_case(8), 8), "fedavg", eight, "eight")
+    to_latex(_rows(_best_case(5), 5), "fedavg", five, "five")
+
+    assert "**" in eight.read_text()
+    assert "*" not in five.read_text().split("\\midrule")[1], "no marker is achievable at n=5"
+
+
+def test_regenerating_the_table_is_byte_for_byte_identical(tmp_path: Path) -> None:
+    """Plan §9.3's literal acceptance criterion: "Deleting paper/figures/ and
+    paper/tables/ and re-running restores them byte-for-byte identical." A timestamp, a
+    dict iteration order or a set ordering anywhere in the path would break it, and the
+    breakage would only show up as noise in the paper's diff."""
+    rows = _rows(_best_case(8), 8)
+    first, second = tmp_path / "a.tex", tmp_path / "b.tex"
+
+    to_latex(rows, "fedavg", first, "main")
+    to_latex(_rows(_best_case(8), 8), "fedavg", second, "main")
+
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_an_ablation_table_is_labelled_by_variant_not_strategy(tmp_path: Path) -> None:
+    """Every row of an ablation sweep is FedACO. Labelling by strategy would print a
+    column of identical "fedaco" rows and lose the thing being ablated."""
+    results = []
+    for fallback_off, score in ((False, 0.90), (True, 0.87)):
+        for seed in range(5):
+            # dirichlet_0.3 carries an underscore, which LaTeX needs escaped -- the
+            # variant labels this sweep produces happen to be hyphenated.
+            r = _result("fedaco", "dirichlet", seed, score + 0.001 * seed, alpha=0.3)
+            if fallback_off:
+                r["config"]["run_config"]["aco-safety-fallback"] = False
+            results.append(r)
+    rows = summarize(results, 5)
+    add_deltas(rows, "fedavg")
+    add_significance(rows, "fedavg")
+    out = tmp_path / "abl.tex"
+
+    to_latex(rows, "fedavg", out, "ablation")
+    tex = out.read_text()
+
+    assert {r["variant"] for r in rows} == {"default", "no-fallback"}
+    assert "default" in tex and "no-fallback" in tex
+    assert tex.count("fedaco") == 0, "ablation rows are the variants, not the strategy"
+    assert "dirichlet\\_0.3" in tex, "underscores must be escaped for LaTeX"
+
+
+# ======================================================================================
+# The LaTeX table is what goes in the paper, and it was dropping both warnings
+# ======================================================================================
+
+def _latex_rows(fedaco_n: int, fedavg_n: int = 8, expected: int = 8) -> list[dict]:
+    """Real rows via `summarize`, not hand-built dicts: `add_significance` reads `by_seed`,
+    which only the real pipeline produces, and a fixture that skips it would test a shape the
+    code never sees."""
+    results = []
+    for seed in range(fedavg_n):
+        results.append(_result("fedavg", "iid", seed, 0.880 + 0.002 * seed))
+    for seed in range(fedaco_n):
+        results.append(_result("fedaco", "iid", seed, 0.905 + 0.002 * seed))
+    return _rows(results, expected)
+
+
+def test_an_incomplete_cell_is_marked_in_the_latex_not_only_the_markdown(tmp_path: Path) -> None:
+    """The defect: `to_latex` built its frame from strategy/partition/mean/std/n and dropped
+    `expected_n`, so a cell averaging 3 of 8 seeds printed `0.510 $\\pm$ 0.010` --
+    character-for-character identical to a complete one -- while the markdown beside it showed
+    `3 ⚠️` and a paragraph of warning.
+
+    The markdown is read by whoever ran the sweep. The LaTeX is what goes in the paper, and
+    the main sweep runs over many sessions, so a partially-filled table is its normal state
+    for weeks. The plan's own rule is "never hand-type a number into the paper", which makes
+    this emitter the number.
+    """
+    path = tmp_path / "t.tex"
+    to_latex(_latex_rows(fedaco_n=3), "fedavg", path, "t")
+    tex = path.read_text()
+
+    assert "$^{\\dagger}$" in tex, "the incomplete cell carries no marker"
+    # In the caption, because a caption is the only thing that travels with a table someone
+    # pastes into a draft.
+    assert "fewer seeds than planned" in tex
+    assert "fedaco/iid (3 of 8)" in tex
+    assert "Do not quote these numbers" in tex
+
+
+def test_a_complete_table_carries_no_dagger(tmp_path: Path) -> None:
+    """The warning has to be absent when it does not apply, or it becomes wallpaper."""
+    path = tmp_path / "t.tex"
+    to_latex(_latex_rows(fedaco_n=8), "fedavg", path, "t")
+
+    assert "\\dagger" not in path.read_text()
+
+
+def test_the_significance_legend_is_withheld_when_the_alpha_is_unreachable(tmp_path: Path) -> None:
+    """A caption printing `$^{*}p<0.05$` while the signed-rank test cannot reach 0.05 at this
+    pair count advertises a threshold no data can cross, and a reader of the paper has no way
+    to know. The markdown said so in a paragraph the LaTeX never carried."""
+    from make_tables import _latex_power_note
+
+    rows = _latex_rows(fedaco_n=3, fedavg_n=3, expected=3)
+    warning = _latex_power_note(rows, alpha=0.05, alternative="two-sided")
+    assert warning is not None, "n=3 pairs cannot reach 0.05; the note should fire"
+
+    path = tmp_path / "t.tex"
+    to_latex(rows, "fedavg", path, "t", power_warning=warning)
+    tex = path.read_text()
+
+    assert "$^{*}p<0.05$" not in tex, "the legend promises a threshold the test cannot cross"
+    assert "unreachable at any data" in tex
+    assert "reflects the sample size rather than the effect" in tex
+
+
+def test_an_adequately_powered_table_keeps_its_legend(tmp_path: Path) -> None:
+    from make_tables import _latex_power_note
+
+    rows = _latex_rows(fedaco_n=8, fedavg_n=8, expected=8)
+
+    assert _latex_power_note(rows, alpha=0.05, alternative="two-sided") is None
+
+    path = tmp_path / "t.tex"
+    to_latex(rows, "fedavg", path, "t", power_warning=None)
+
+    assert "$^{*}p<0.05$" in path.read_text()
+
+
+def test_both_power_notes_agree_about_whether_a_table_is_underpowered() -> None:
+    """The markdown and LaTeX warnings compute the same thing, and two formatters computing it
+    separately is exactly how the markdown ended up warning about something the LaTeX
+    advertised. They share `_power_floor`; this pins that they cannot diverge."""
+    from make_tables import _latex_power_note
+
+    for n in (3, 5, 6, 8, 10):
+        rows = _latex_rows(fedaco_n=n, fedavg_n=n, expected=n)
+        markdown = power_note(rows, alpha=0.05, alternative="two-sided")
+        latex = _latex_power_note(rows, alpha=0.05, alternative="two-sided")
+
+        assert (markdown is None) == (latex is None), (
+            f"at n={n} the markdown and LaTeX disagree about whether this table is "
+            f"underpowered: markdown={markdown is not None}, latex={latex is not None}"
+        )
+
+
+# ======================================================================================
+# The variant label must be derived from the real defaults, never from a literal
+# ======================================================================================
+
+
+def test_a_run_at_the_shipped_defaults_is_labelled_default() -> None:
+    """`_variant_of` used to hardcode the default it compared each knob against. On
+    2026-09-24 `aco-gamma-dispersion` was reconciled to plan §14's 0.50 (it had drifted to
+    1.0 in pyproject) and every FedACO run promptly read as a `g2=0.5` variant.
+
+    That is not cosmetic: `add_deltas` computes a delta only for rows whose variant is
+    "default", so every comparison column in every table would have come out empty -- from a
+    correct change to a value, made in the right place.
+    """
+    import tomllib
+    from pathlib import Path
+
+    import make_tables
+
+    defaults = tomllib.loads(
+        (Path(make_tables.__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    )["tool"]["flwr"]["app"]["config"]
+
+    make_tables._defaults.cache_clear()
+    assert make_tables._variant_of(dict(defaults)) == "default"
+
+
+def test_each_knob_off_default_is_named() -> None:
+    import tomllib
+    from pathlib import Path
+
+    import make_tables
+
+    root = Path(make_tables.__file__).resolve().parents[1]
+    defaults = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["flwr"]["app"]["config"]
+    make_tables._defaults.cache_clear()
+
+    for key, value, expected in [
+        ("aco-persistence", "none", "persistence=none"),
+        ("aco-fitness-mode", "server_val", "fitness=server_val"),
+        ("model-norm", "batchnorm", "norm=batchnorm"),
+        ("aco-q0", 0.9, "q0=0.9"),
+        ("aco-desirability-scaling", "standardized", "scaling=standardized"),
+        ("aco-dispersion-reference", "aggregate", "ref=aggregate"),
+    ]:
+        assert defaults[key] != value, f"{key} test value equals the default; pick another"
+        assert make_tables._variant_of({**defaults, key: value}) == expected
+
+
+def test_the_variant_label_tracks_a_default_that_moves() -> None:
+    """The property that failed: change a default and a run *at* that new default must still
+    be "default", while a run at the old value becomes the variant."""
+    import make_tables
+
+    real = make_tables._defaults
+    try:
+        make_tables._defaults = lambda: {"aco-q0": 0.5}
+        assert make_tables._variant_of({"aco-q0": 0.5}) == "default"
+        assert make_tables._variant_of({"aco-q0": 0.7}) == "q0=0.7"
+    finally:
+        make_tables._defaults = real
+
+
+def test_an_unknown_key_in_the_config_does_not_become_a_variant() -> None:
+    """A key absent from pyproject cannot be compared, and guessing would turn any new
+    run_config key into a spurious variant across every existing result."""
+    import make_tables
+
+    make_tables._defaults.cache_clear()
+    assert make_tables._variant_of({"some-future-key": 42}) == "default"
+
+
+# ======================================================================================
+# The delta column must survive a sweep whose base_overrides set a tracked knob
+# ======================================================================================
+
+
+def _row(strategy: str, variant: str, by_seed: dict, regime: str = "dirichlet_0.3") -> dict:
+    return {
+        "strategy": strategy, "regime": regime, "variant": variant,
+        "by_seed": dict(by_seed), "seeds": sorted(by_seed),
+        "n": len(by_seed), "expected_n": len(by_seed), "incomplete": False,
+        "mean": sum(by_seed.values()) / len(by_seed), "std": 0.0,
+        "val_mean": None, "fallback_rate": None, "pheromone_entropy": None,
+    }
+
+
+def test_deltas_survive_a_sweep_with_no_default_variant() -> None:
+    """`robustness_r1/r2/r3` set an attack in `base_overrides` and `main_client_scale` sets
+    fraction-train, so *every* row in those sweeps carries that mark and none is "default".
+    Keying the baseline on variant == "default" found nothing there, so every delta came out
+    None and the robustness tables silently lost the column they exist for -- an empty delta
+    renders as the same "—" as a cell with no paired seeds.
+    """
+    from make_tables import add_deltas
+
+    rows = [
+        _row("fedavg", "attack=label_flip@0.1", {0: 0.50, 1: 0.52}),
+        _row("fedaco", "attack=label_flip@0.1", {0: 0.55, 1: 0.58}),
+    ]
+    add_deltas(rows, "fedavg")
+
+    assert rows[0]["delta"] == 0.0
+    assert rows[1]["delta"] == pytest.approx(0.055)
+    assert rows[1]["delta_paired"] is True
+
+
+def test_the_baseline_is_matched_within_the_same_variant() -> None:
+    """FedACO at 30% attackers must be read against FedAvg at 30% attackers, not against an
+    unattacked control -- otherwise the robustness table reports the cost of the attack as if
+    it were the method's deficit."""
+    from make_tables import add_deltas
+
+    rows = [
+        _row("fedavg", "default", {0: 0.80}),
+        _row("fedavg", "attack=sign_flip@0.3", {0: 0.40}),
+        _row("fedaco", "attack=sign_flip@0.3", {0: 0.45}),
+    ]
+    add_deltas(rows, "fedavg")
+
+    attacked_aco = next(r for r in rows if r["strategy"] == "fedaco")
+    assert attacked_aco["delta"] == pytest.approx(0.05), (
+        "matched against the unattacked fedavg this would read -0.35, reporting the attack's "
+        "damage as FedACO's"
+    )
+
+
+def test_an_ablation_variant_still_falls_back_to_the_default_baseline() -> None:
+    """The pre-existing behaviour that must not regress: in an ablation sweep the baseline
+    exists only at default, and each variant is meant to be read against it."""
+    from make_tables import add_deltas
+
+    rows = [
+        _row("fedavg", "default", {0: 0.50, 1: 0.50}),
+        _row("fedaco", "persistence=none", {0: 0.55, 1: 0.57}),
+    ]
+    add_deltas(rows, "fedavg")
+
+    assert rows[1]["delta"] == pytest.approx(0.06)
+    assert rows[1]["delta_paired"] is True
+
+
+def test_no_shared_seed_still_reports_no_delta() -> None:
+    from make_tables import add_deltas
+
+    rows = [
+        _row("fedavg", "default", {0: 0.5}),
+        _row("fedaco", "persistence=none", {7: 0.6}),
+    ]
+    add_deltas(rows, "fedavg")
+
+    assert rows[1]["delta"] is None
+    assert rows[1]["delta_paired"] is False
+
+
+# ======================================================================================
+# `varying_keys` -- a key is a condition only if the loaded results disagree on it
+# (2026-10-11: Figures 1-2, figure_convergence/figure_comparison, filter to
+# `variant == "default"` and had never had data for any real sweep, because
+# pyproject.toml's bare `num-clients` default (2) matches no real config -- every real
+# result read as a non-"default" `K=...` variant. docs/OPEN_QUESTIONS.md, "Figures 1 and 2
+# ... skip every real sweep".)
+# ======================================================================================
+
+
+def test_a_key_constant_across_the_loaded_results_is_not_a_condition() -> None:
+    """The actual bug: every real sweep fixes num-clients at one value (10 or 20), never
+    pyproject's bare default (2) -- so every real result used to read as a `K=...`
+    variant and figure_convergence/figure_comparison never had a "default" row to plot."""
+    results = [
+        _result("fedavg", "dirichlet", seed, 0.5, alpha=0.3, **{"num-clients": 10})
+        for seed in range(3)
+    ]
+    varying = varying_keys(results)
+    assert "num-clients" not in varying
+    for r in results:
+        assert cell_key(r, varying)[2] == "default"
+
+
+def test_a_key_that_actually_varies_is_still_a_real_condition() -> None:
+    """The reason the fix cannot just add num-clients to _NOT_A_CONDITION:
+    configs/experiment/robustness_r5_client_scaling.yaml exists specifically to vary it,
+    and a results directory that genuinely holds multiple num-clients values must keep
+    distinguishing them -- collapsing them would be the exact 2026-09-24
+    aco-gamma-dispersion bug (42 distinct arms collapsing onto one cell key) again."""
+    results = [
+        _result("fedavg", "dirichlet", 0, 0.5, alpha=0.3, **{"num-clients": k})
+        for k in (5, 10, 20)
+    ]
+    varying = varying_keys(results)
+    assert "num-clients" in varying
+    labels = {cell_key(r, varying)[2] for r in results}
+    assert labels == {"K=5", "K=10", "K=20"}
+
+
+def test_a_key_set_on_only_some_results_counts_as_varying() -> None:
+    """A key present (and non-default) on half the loaded results and simply absent --
+    falling back to pyproject's default -- on the other half is exactly as much a real
+    condition as one explicitly set to two different values. Missing this undercounts
+    variation: only the "set" half would contribute a value, reading as a constant
+    single-valued key rather than as varying."""
+    on = _result("fedaco", "iid", 0, 0.9, **{"aco-safety-fallback": False})
+    off = _result("fedaco", "iid", 1, 0.8)  # key absent -- implicit pyproject default
+    varying = varying_keys([on, off])
+    assert "aco-safety-fallback" in varying
+    assert cell_key(on, varying)[2] == "no-fallback"
+    assert cell_key(off, varying)[2] == "default"
+
+
+def test_varying_is_none_by_default_and_keeps_the_old_whole_config_behavior() -> None:
+    """Callers that have not been updated to compute `varying_keys` (none left in this
+    repo, but the parameter defaults to None rather than requiring it) get the original
+    behavior: every knob that differs from pyproject.toml's default is marked, regardless
+    of whether this particular call's results agree on it."""
+    import tomllib
+    from pathlib import Path
+
+    import make_tables
+
+    defaults = tomllib.loads(
+        (Path(make_tables.__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    )["tool"]["flwr"]["app"]["config"]
+    make_tables._defaults.cache_clear()
+
+    assert make_tables._variant_of({**defaults, "num-clients": 10}) == "K=10"
+
+
+def test_summarize_feeds_varying_keys_through_so_real_sweeps_label_as_default() -> None:
+    """The integration point: `summarize` (what `make_tables.py` and `make_figures.py`
+    both actually call) must compute `varying_keys` itself and use it -- a unit-level pass
+    on `cell_key` alone would not have caught the original bug, since nothing forced the
+    real entry point to pass it through."""
+    results = [
+        _result("fedavg", "dirichlet", seed, 0.6, alpha=0.3, **{"num-clients": 10})
+        for seed in range(3)
+    ]
+    rows = summarize(results, expected_seeds=3)
+    assert len(rows) == 1
+    assert rows[0]["variant"] == "default"

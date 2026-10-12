@@ -8,7 +8,7 @@
 # Only 5 rounds needed: this measures per-round wall-clock overhead, not final
 # accuracy -- no reason to pay for a full 100-round run per K here.
 #
-# Run: .venv/bin/python scripts/run_sweep.py --config configs/experiment/overhead.yaml
+# Run: .venv/bin/python scripts/run_sweep_granular.py --config configs/experiment/overhead.yaml
 
 base_overrides:
   min-client-size: 5

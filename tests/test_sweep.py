@@ -290,6 +290,39 @@ def test_configure_federation_is_required_not_optional() -> None:
     assert "Refusing" in source, "a failed federation setup must abort, not warn"
 
 
+def test_time_limit_is_checked_before_a_cell_not_during_one() -> None:
+    """A Kaggle session is a hard wall clock, not a `flwr run` the runner can safely
+    interrupt mid-simulation -- killing one orphans the Ray actors it started and leaves
+    no result file. `--time-limit-hours` must stop the loop only at a cell boundary, and
+    always let at least one cell run so a single invocation that is already over budget
+    (a slow first cell, a short limit) still makes progress instead of exiting having
+    done nothing -- which, re-run forever, would never finish the sweep at all."""
+    import inspect
+
+    source = inspect.getsource(run_sweep.main)
+    assert "time_limit_hours" in source
+    # The check sits inside the per-cell loop, before `run_cell` is called -- i.e. it
+    # gates starting a new cell, not something awaited mid-run.
+    loop_start = source.index("for i, cell in enumerate(todo, 1):")
+    check = source.index("time_limit_hours", loop_start)
+    run_call = source.index("run_cell(", loop_start)
+    assert check < run_call, "the time-limit check must precede run_cell, not follow it"
+    # `i > 1` (not `i >= 1`) is the actual progress guarantee: a true `i > 1` guard means
+    # cell 1 always runs before the limit can stop anything.
+    assert "i > 1 and elapsed" in source or "i > 1\n" in source or "i > 1 and" in source
+
+
+def test_time_limit_hit_does_not_count_unattempted_cells_as_completed() -> None:
+    """`attempted` must shrink to what actually ran when the time limit stops the loop
+    early -- using the full `todo` length here would report cells nothing was ever
+    attempted on as silently "completed", which is the same class of bug the manifest's
+    own completed-vs-indexed distinction exists to prevent elsewhere in this file."""
+    import inspect
+
+    source = inspect.getsource(run_sweep.main)
+    assert "attempted = (i - 1) if time_limit_hit else len(todo)" in source
+
+
 def test_a_variantless_control_still_matches_its_own_result(tmp_path: Path) -> None:
     """The other half of the discrimination, and the one a key-presence check gets wrong.
 
@@ -347,3 +380,351 @@ def test_two_variants_sharing_a_key_value_are_still_told_apart(tmp_path: Path) -
     for name, cell in cells.items():
         found = find_result(tmp_path, cell, common, variants)
         assert found is not None and found.name == f"{name}.json", name
+
+
+# ======================================================================================
+# Per-cell federation configuration (fedswarm.sweep)
+# ======================================================================================
+
+
+def test_the_granular_runner_sets_supernodes_per_cell(tmp_path: Path) -> None:
+    """`overhead.yaml` sweeps num-clients from 5 to 150 and `main_client_scale` from 10 to
+    50, but `num_supernodes` is a *federation* setting -- no `--run-config` key can carry
+    it, and it defaults to 2.
+
+    Left unset, a cell labelled K=150 trains on 2 clients while recording 150, and the
+    overhead curve those sweeps exist to produce comes out **flat** -- which reads as
+    evidence that the O(K^2) server cost is negligible, the exact claim (C3) they are meant
+    to test. The runner never set it until 2026-09-19.
+    """
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    calls: list[list[str]] = []
+
+    def recording_runner(cmd: list[str]) -> int:
+        calls.append(cmd)
+        return 0
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[
+            {"name": "k5", "overrides": {"num-clients": 5}},
+            {"name": "k50", "overrides": {"num-clients": 50}},
+        ],
+        seeds=[0],
+        base_overrides={},
+        group="scale",
+        base_dir=REPO_ROOT,
+    )
+    run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=recording_runner,
+    )
+
+    supernode_args = [
+        cmd[cmd.index("--num-supernodes") + 1]
+        for cmd in calls
+        if "--num-supernodes" in cmd
+    ]
+    assert supernode_args == ["5", "50"], f"got {supernode_args}"
+
+
+def test_the_federation_is_not_reconfigured_when_the_count_is_unchanged(tmp_path: Path) -> None:
+    """main.yaml holds num-clients constant across all 576 cells. Shelling out to
+    `flwr federation simulation-config` before each one would add 576 subprocess launches
+    for no change."""
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    calls: list[list[str]] = []
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[
+            {"name": "iid", "overrides": {"regime": "iid"}},
+            {"name": "dir", "overrides": {"regime": "dirichlet"}},
+        ],
+        seeds=[0, 1],
+        base_overrides={"num-clients": 20},
+        group="main",
+        base_dir=REPO_ROOT,
+    )
+    run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: (calls.append(cmd), 0)[1],
+    )
+
+    configured = [c for c in calls if "--num-supernodes" in c]
+    assert len(configured) == 1, "one config call for four cells at a constant K"
+
+
+def test_a_failed_federation_config_refuses_the_cell(tmp_path: Path) -> None:
+    """Running anyway is worse than stopping: the cell either hangs at round 0 forever
+    (min-train-nodes above the supernode count) or silently mislabels its client count."""
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    def failing_runner(cmd: list[str]) -> int:
+        return 1 if "--num-supernodes" in cmd else 0
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[{"name": "k5", "overrides": {"num-clients": 5}}],
+        seeds=[0],
+        base_overrides={},
+        group="scale",
+        base_dir=REPO_ROOT,
+    )
+    entries = run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=failing_runner,
+    )
+
+    assert entries[0]["status"] == "failed_federation_config"
+
+
+# ======================================================================================
+# Per-ClientApp GPU allocation
+# ======================================================================================
+
+
+def test_a_cpu_box_is_untouched_when_no_gpu_fraction_is_asked_for() -> None:
+    """Passing `--client-resources-num-gpus 0` explicitly is not the same as omitting it,
+    and the default has to be the omission: this repo's dev machine and its CI runner both
+    have no GPU, and pinning a resource they cannot supply is a way to make every local
+    sweep stop working in service of a cloud-only option."""
+    from fedswarm.sweep import configure_federation
+
+    calls: list[list[str]] = []
+    configure_federation(10, runner=lambda cmd: (calls.append(cmd), 0)[1])
+
+    assert "--client-resources-num-gpus" not in calls[0]
+
+
+def test_the_gpu_fraction_is_reissued_on_every_reconfiguration(tmp_path: Path) -> None:
+    """The reason the fraction belongs *inside* `configure_federation` rather than in one
+    manual `flwr federation simulation-config` call before the sweep.
+
+    `run_sweep` re-issues `simulation-config` whenever a cell's K changes, and it is not
+    established that options it does not name survive that. overhead.yaml sweeps
+    K = 5 -> 200, so a fraction set once up front could be dropped at the first K change
+    and every later cell would run on CPU -- which for the overhead sweep is the worst
+    possible failure, because a CPU-bound wall-clock curve is still *a curve*, and it
+    would be read as the measured O(K^2) cost the sweep exists to report.
+    """
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    calls: list[list[str]] = []
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[
+            {"name": "k5", "overrides": {"num-clients": 5}},
+            {"name": "k50", "overrides": {"num-clients": 50}},
+        ],
+        seeds=[0],
+        base_overrides={},
+        group="scale",
+        base_dir=REPO_ROOT,
+    )
+    run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: (calls.append(cmd), 0)[1],
+        gpus_per_client=0.2,
+    )
+
+    configured = [c for c in calls if "--num-supernodes" in c]
+    assert len(configured) == 2, "one config call per distinct K"
+    for cmd in configured:
+        assert cmd[cmd.index("--client-resources-num-gpus") + 1] == "0.2"
+
+
+@pytest.mark.parametrize("script", ["run_sweep", "run_sweep_granular"])
+def test_both_runners_expose_the_gpu_fraction(script: str) -> None:
+    """The recurring failure in this repo is a capability that exists and nothing calls:
+    A1's controls had 14 passing tests and no caller, R4's DP noise was in every config and
+    implemented nowhere. A GPU fraction reachable only from the library is the same shape --
+    the sweeps are launched from the two CLIs, so an option they cannot pass is an option
+    the experiments cannot use."""
+    import importlib
+    import inspect
+
+    source = inspect.getsource(importlib.import_module(script).main)
+
+    assert "--gpus-per-client" in source, "the flag must be declared on the CLI"
+    assert "gpus_per_client" in source, "and forwarded, not just parsed"
+
+
+# ======================================================================================
+# The output directory the runner checks must be the one the run writes to
+# ======================================================================================
+
+
+def test_a_custom_output_dir_is_injected_into_the_run_config() -> None:
+    """`run_sweep` checked `is_completed(run_id, output_dir)` while `execute_run` never put
+    `output-dir` in the run_config, so the run wrote to pyproject's directory and the runner
+    looked in the one it was passed. With both at the default `results/fl` they coincided and
+    nothing showed.
+    """
+    from fedswarm.sweep import RunSpec, resolve_output_dir
+
+    run = RunSpec(label="x", group="g", overrides={"seed": 0})
+    defaults = {"output-dir": "results/fl"}
+
+    resolved, overrides = resolve_output_dir(run, defaults, "/kaggle/working/out")
+    assert resolved == "/kaggle/working/out"
+    assert overrides["output-dir"] == "/kaggle/working/out", (
+        "without this the run writes to results/fl and the completion check looks at "
+        "/kaggle/working/out -- every cell records status 'unknown' and resume re-runs "
+        "everything"
+    )
+
+
+def test_the_default_output_dir_is_not_injected() -> None:
+    """Injecting it unnecessarily would change every existing run_id -- `make_run_id` hashes
+    the whole resolved config -- and invalidate every result already on disk."""
+    from fedswarm.sweep import RunSpec, resolve_output_dir
+
+    run = RunSpec(label="x", group="g", overrides={"seed": 0})
+    resolved, overrides = resolve_output_dir(run, {"output-dir": "results/fl"}, "results/fl")
+
+    assert resolved == "results/fl"
+    assert "output-dir" not in overrides
+
+
+def test_an_output_dir_in_the_experiment_config_wins() -> None:
+    """The experiment YAML is the more specific statement, and it is the one whose value is
+    already in the hash."""
+    from fedswarm.sweep import RunSpec, resolve_output_dir
+
+    run = RunSpec(label="x", group="g", overrides={"output-dir": "/from/yaml"})
+    resolved, overrides = resolve_output_dir(run, {"output-dir": "results/fl"}, "/from/cli")
+
+    assert resolved == "/from/yaml"
+    assert overrides["output-dir"] == "/from/yaml"
+
+
+def test_resume_works_across_a_custom_output_dir(tmp_path) -> None:
+    """The failure this guards, end to end: a sweep restarted after a session timeout must
+    skip the cells it already finished, not silently repeat them."""
+    import json
+
+    from fedswarm.sweep import RunSpec, predict_run_id, run_sweep
+
+    out = tmp_path / "elsewhere"
+    out.mkdir()
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[tool.flwr.app.config]\noutput-dir = "results/fl"\nseed = 0\n'
+        'strategy-name = "fedavg"\nnum-clients = 2\n'
+    )
+
+    runs = [RunSpec(label="a", group="g", overrides={"seed": 0, "output-dir": str(out)})]
+    defaults = {"output-dir": "results/fl", "seed": 0, "strategy-name": "fedavg", "num-clients": 2}
+    run_id = predict_run_id(defaults, runs[0].overrides)
+    (out / f"{run_id}.json").write_text(json.dumps({"status": "completed"}))
+
+    entries = run_sweep(
+        runs,
+        pyproject_path=pyproject,
+        output_dir=str(out),
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: pytest.fail(f"should not have run anything: {cmd}"),
+    )
+
+    assert [e["status"] for e in entries] == ["skipped_completed"]
+
+
+def test_time_limit_stops_the_granular_runner_before_a_run_not_mid_one(tmp_path: Path) -> None:
+    """Same contract as `run_sweep.py`'s own `--time-limit-hours`, for the other runner
+    (`robustness_r1/r2_reduced.yaml` and friends go through this one): a Kaggle session is
+    a hard wall clock the runner must stop ahead of, never a `flwr run` it can safely kill
+    mid-simulation. A fake clock that jumps a fixed amount per call stands in for real
+    elapsed time, since this must not take real minutes to verify."""
+    from fedswarm.sweep import expand_grid, run_sweep
+
+    runs = expand_grid(
+        strategies=[{"name": "fedaco", "overrides": {"strategy-name": "fedaco"}}],
+        partitions=[{"name": "iid", "overrides": {}}],
+        seeds=[0, 1, 2, 3],
+        base_overrides={},
+        group="g",
+        base_dir=REPO_ROOT,
+    )
+
+    clock = {"t": 0.0}
+
+    def fake_now() -> float:
+        clock["t"] += 1000.0
+        return clock["t"]
+
+    entries = run_sweep(
+        runs,
+        pyproject_path=REPO_ROOT / "pyproject.toml",
+        output_dir=tmp_path / "out",
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: 0,
+        time_limit_hours=0.1,  # 360s -- the fake clock's first jump alone exceeds this
+        now=fake_now,
+    )
+
+    # Progress guaranteed (at least the first run attempted) but not everything, and
+    # nothing beyond the limit was silently skipped-as-done -- it is just absent, for the
+    # caller to detect via len(entries) < len(runs) and re-run.
+    assert 1 <= len(entries) < len(runs)
+
+
+def test_time_limit_never_blocks_free_skip_or_dry_run_entries(tmp_path: Path) -> None:
+    """A cell that is already completed, or a dry run, costs no GPU time -- the limit
+    must never count against those, or a mostly-finished sweep would falsely report
+    'time limit reached' while every real cell left to run is actually free to check."""
+    import json
+
+    from fedswarm.sweep import RunSpec, predict_run_id, run_sweep
+
+    out = tmp_path / "out"
+    out.mkdir()
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[tool.flwr.app.config]\noutput-dir = "results/fl"\nseed = 0\n'
+        'strategy-name = "fedavg"\nnum-clients = 2\n'
+    )
+
+    runs = [
+        RunSpec(label=f"a{i}", group="g", overrides={"seed": i, "output-dir": str(out)})
+        for i in range(5)
+    ]
+    defaults = {"output-dir": "results/fl", "seed": 0, "strategy-name": "fedavg", "num-clients": 2}
+    for run in runs:
+        run_id = predict_run_id(defaults, run.overrides)
+        (out / f"{run_id}.json").write_text(json.dumps({"status": "completed"}))
+
+    entries = run_sweep(
+        runs,
+        pyproject_path=pyproject,
+        output_dir=str(out),
+        manifest_path=tmp_path / "m.jsonl",
+        lock_dir=tmp_path / "locks",
+        runner=lambda cmd: pytest.fail(f"should not have run anything: {cmd}"),
+        time_limit_hours=0.0,  # already "expired" from the first instant
+        now=lambda: 10_000.0,
+    )
+
+    assert len(entries) == len(runs)
+    assert all(e["status"] == "skipped_completed" for e in entries)

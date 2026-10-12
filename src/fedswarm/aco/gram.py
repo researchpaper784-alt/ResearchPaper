@@ -133,8 +133,80 @@ def weighted_norm_sq(alpha: torch.Tensor, gram: torch.Tensor) -> torch.Tensor:
 
 def weighted_dispersion(alpha: torch.Tensor, gram: torch.Tensor) -> torch.Tensor:
     """sum_k alpha_k * ||delta_k - Delta(alpha)||^2, expanded per §4.6 so it only ever
-    touches G, never a materialized d-dim vector."""
+    touches G, never a materialized d-dim vector.
+
+    ⚠️ The mean is `Delta(alpha)`, which MOVES WITH alpha, and that is the origin of the
+    project's degenerate-optimum problem: at `alpha = e_j` the mean *is* `delta_j`, so every
+    term is zero and a single-client answer pays nothing at all. See
+    `dispersion_about_reference` for the fixed-reference alternative.
+    """
     g_alpha = gram @ alpha
     a_g_a = alpha @ g_alpha
     diag = torch.diagonal(gram)
     return (alpha * (diag - 2 * g_alpha + a_g_a)).sum()
+
+
+def dispersion_about_reference(
+    alpha: torch.Tensor, reference: torch.Tensor, gram: torch.Tensor
+) -> torch.Tensor:
+    """sum_k alpha_k * ||delta_k - Delta(reference)||^2 -- the same quantity about a mean
+    that does NOT move with alpha.
+
+    This exists because the degeneracy `weighted_dispersion` creates is structural, not a
+    matter of tuning. Measuring spread about `Delta(alpha)` makes the term a weighted
+    variance about its own mean, which any vertex minimizes exactly, so "discard every client
+    but one" is free and only the concentration penalty stands against it. The first real GPU
+    runs showed what that costs: at `gamma_entropy=0.1` the corner won 15/15 rounds, and the
+    `gamma_entropy=0.6` needed to stop it pushed the whole landscape negative -- the MAX-MIN
+    rule deposits `rho * Q * max(F, 0)`, so 7 of 15 rounds deposited nothing and FedACO came
+    in 0.21 macro-F1 BEHIND plain FedAvg.
+
+    About a fixed reference (`base_weights`, i.e. the FedAvg point), a vertex costs
+    `||delta_j - Delta_base||^2`, which is large -- exactly what it should be. The
+    degeneracy is removed at the root, with no penalty term doing the work.
+
+    It is also the more defensible quantity to regularize. FedACO's job is to find weights
+    that improve on FedAvg, so "how far are these clients from the aggregate I am trying to
+    beat" is a meaningful thing to charge for; "how far are they from wherever I happened to
+    put the mean" is trivially answered by collapsing onto one client.
+
+    Same O(K^2) Gram-only expansion, with the fixed `reference` in place of alpha inside the
+    mean:
+
+        sum_k alpha_k [G_kk - 2 (G r)_k + r' G r]
+    """
+    g_ref = gram @ reference
+    r_g_r = reference @ g_ref
+    diag = torch.diagonal(gram)
+    return (alpha * (diag - 2 * g_ref + r_g_r)).sum()
+
+
+def aggregate_drift(
+    alpha: torch.Tensor, g_rob: torch.Tensor, rob_norm_sq: float, gram: torch.Tensor
+) -> torch.Tensor:
+    """||Delta(alpha) - Delta_rob||^2 -- how far the AGGREGATE lands from the robust
+    consensus, rather than how scattered the clients are around some mean.
+
+    The third and, on the evidence, the only shape of this term that actually rules out a
+    single-client answer. The other two cannot, and for different reasons:
+
+    * `weighted_dispersion` is a variance about `Delta(alpha)`, which every vertex minimizes
+      to exactly zero.
+    * `dispersion_about_reference` is `sum_k alpha_k * c_k` with `c_k = ||delta_k - Delta_ref||^2`
+      fixed -- **exactly linear in alpha**, so it has no interior optimum at all. It charges
+      per client, not for concentration, and a vertex on the client with the smallest `c_k`
+      is therefore CHEAPER than any interior point. Measured at K=10, noise 3.0: cheapest
+      vertex 7.29 against 8.01 at every interior point. On real MRI deltas it took the corner
+      margin from +0.6184 to +0.3136 and stopped -- it could not have flipped the sign.
+
+    This one is quadratic in alpha and minimized in the interior, because averaging cancels
+    the per-client noise: a single client keeps all of its own deviation from the consensus,
+    while a K-way mix keeps roughly 1/K of it. That is a real property of the quantity, not a
+    penalty bolted on, and it is what makes an interior point genuinely better rather than
+    merely less penalized.
+
+    Expanded from the same precompute, no new O(K*d) work:
+
+        ||Delta(alpha) - Delta_rob||^2 = alpha' G alpha - 2 alpha . g_rob + ||Delta_rob||^2
+    """
+    return alpha @ (gram @ alpha) - 2 * (alpha @ g_rob) + rob_norm_sq

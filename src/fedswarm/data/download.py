@@ -50,6 +50,53 @@ def resolve_root(explicit: str | Path | None = None) -> Path:
     return Path(env) if env else DEFAULT_ROOT
 
 
+def locate_or_fetch_kaggle_dataset(
+    slug: str = DATASET_SLUG,
+    mount_root: str | Path = "/kaggle/input",
+    fetch: Any = None,
+) -> Path | None:
+    """A directory holding the dataset's Training/ and Testing/ -- attached, or fetched.
+
+    Written after a user ran the Day 1 notebook twice and stopped both times at "no dataset
+    attached", the one step that needed a click. The click is unnecessary: inside a Kaggle
+    notebook, `kagglehub.dataset_download` attaches a public dataset to the running session
+    with no credentials and returns where it mounted.
+
+    Order: (1) anything already under `mount_root` that contains both splits -- a dataset
+    attached through the sidebar, possibly beside unrelated inputs such as a previous
+    session's results; (2) `kagglehub.dataset_download(slug)`. Returns None if neither works
+    and leaves the failure message to the caller, which knows its UI.
+
+    `fetch` replaces kagglehub.dataset_download in tests.
+    """
+    def holds_splits(path: Path) -> bool:
+        try:
+            find_split_parent(path)
+            return True
+        except FileNotFoundError:
+            return False
+
+    root = Path(mount_root)
+    if root.exists():
+        for candidate in sorted(p for p in root.iterdir() if p.is_dir()):
+            if holds_splits(candidate):
+                return candidate
+
+    if fetch is None:
+        try:
+            import kagglehub  # preinstalled on Kaggle's image
+        except ImportError:
+            return None
+        fetch = kagglehub.dataset_download
+
+    try:
+        fetched = Path(fetch(slug))
+    except Exception as exc:  # network, auth, API drift -- the caller reports it
+        print(f"kagglehub could not fetch {slug}: {exc!r}"[:400])
+        return None
+    return fetched if fetched.exists() and holds_splits(fetched) else None
+
+
 def find_split_parent(root: Path) -> Path:
     """Locate the directory that actually contains Training/ and Testing/.
 
