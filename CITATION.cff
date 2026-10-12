@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use this software or its results, please cite it as below."
+title: "FedSwarm: An Ant-Colony Metaheuristic for Federated Aggregation Weights"
+abstract: >-
+  Code, experiments, and paper materials for FedSwarm, which studies whether an
+  ant-colony metaheuristic over the federated-learning aggregation weight vector
+  improves on fixed and learned weighting for non-IID, multi-site brain-tumour MRI
+  classification. See paper/00_ABSTRACT.md and HANDOVER.md in this repository for the
+  full, current account of what was found.
+authors:
+  # TODO (human): fill in your real name and, optionally, ORCID before tagging v1.0.
+  # Zenodo requires at least one author with a name; this placeholder will not pass
+  # review as-is. See https://orcid.org/register if you do not have an ORCID iD.
+  - family-names: "TODO-FAMILY-NAME"
+    given-names: "TODO-GIVEN-NAME"
+    # orcid: "https://orcid.org/0000-0000-0000-0000"
+license: MIT
+repository-code: "https://github.com/researchpaper784-alt/ResearchPaper"
+version: "1.0.0"
+date-released: "2026-10-12"
