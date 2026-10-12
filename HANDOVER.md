@@ -140,7 +140,7 @@ check are **done** as of 2026-10-11. What is actually left:
 | 2 | ~~Fix `figure_convergence`/`figure_comparison`~~ | 0 | **done 2026-10-11** -- `scripts/make_tables.py`'s new `varying_keys()` makes "default" mean "constant across the results being tabulated together", not "matches pyproject.toml's bare value". Figures 1/2/colony-health all regenerate on real data now; `tests/test_tables.py` has both the real bug (constant `num-clients` → `default`) and the thing a naive fix would have broken (R5-like varying `num-clients` stays distinct) as actual tests. Full writeup: `docs/OPEN_QUESTIONS.md`, the "FIXED" entry under "Figures 1 and 2 ... skip every real sweep". |
 | 3 | ~~`make verify-phase9` -- an actual run~~ | 0 | **done 2026-10-11** -- the single `--expected-seeds`/combined `results/fl` design never fit this project's mixed seed counts (8 for main/A1, 5 for A2/robustness) or the unrelated `results/fl/gate` health-check runs; running it for the first time surfaced exactly that (6 false "incomplete cell" failures). Split into `verify-phase9-main`/`-ablation`/`-robustness`, each with the same `--results-dir`/`--expected-seeds` pairing `tables`/`tables-ablation`/`tables-robustness` already use. All three now PASS byte-for-byte on a second pass. |
 | 4 | Add **Adp-FL-PSO as a baseline** | ~8 | **declined by the project owner, 2026-10-11** ("adp-FL-PSO ko add mat karo") -- not implemented, not planned. The paper's finding does not depend on it; it stays a related-work citation (`paper/REFERENCES.md`), not an experiment. |
-| 5 | Zenodo DOI, `v1.0` tag | 0 | tag pushes 403 here (§6) |
+| 5 | Zenodo DOI, ~~`v1.0` tag~~ | 0 | **`v1.0` tag/release done, 2026-10-12** (via GitHub's web UI, not `git push` -- see §6). `CITATION.cff` added the same day so Zenodo has real citation metadata once connected. Zenodo DOI itself still needs the project owner to connect the repo at zenodo.org (one-time) -- not something this session can do. |
 | 6 | **Human pass on citations, §5's framing, and the abstract** | 0 | everything was written/resolved by an agent this session -- automated literature search and a first read of the tables, not peer judgment. Worth a close read before submission, `paper/00_ABSTRACT.md`'s own checklist says the same. The stale `[CITE]`-era banners in `paper/README.md`/`paper/02_RELATED_WORK.md` pointing at the old "no literature access" state were cleaned up 2026-10-11 so this read starts from an accurate map, not a leftover warning. |
 
 **When regenerating figures for more than one sweep by hand:** `make_figures.py` writes
@@ -228,9 +228,17 @@ looks right in hindsight, not just in expectation.
 **This container specifically**
 - `data/raw` holds a dataset card and **no images**. `www.kaggle.com` is blocked by the egress
   proxy (curl returns 000) and there are no credentials. You cannot train here.
-- **Tag pushes return HTTP 403** while branch pushes succeed, so `v0.5-pipeline` and
-  `v0.6-pipeline-verified` exist locally but not on the remote. Commit SHAs in the log are the
-  durable references. Phase 10's release step will hit this.
+- **`git push` of a tag returns HTTP 403 from this session specifically** (confirmed empty
+  `recentRelayFailures` in the agent proxy status -- it's GitHub rejecting this session's push
+  credential for `refs/tags/*`, not a network/proxy block; repo tag protection was checked and
+  is empty/deprecated, and the Claude GitHub App already has Contents read/write, so it looks
+  like a deliberate scope restriction on this session's credential, not a fixable repo setting).
+  `v0.5-pipeline` and `v0.6-pipeline-verified` exist locally but not on the remote for this
+  reason. Commit SHAs in the log are the durable references for those. **Workaround that
+  works:** GitHub's own "Draft a new release" web UI creates the tag as a side effect of
+  publishing, using the human's own account permissions -- no `git push` involved, so the 403
+  never triggers. `v1.0` was created this way, 2026-10-12 (`github.com/.../releases`), and
+  points at the same commit as `origin/main`'s HEAD at the time.
 
 **The rule that matters most** (from `CLAUDE.md`): *never fabricate a number, dataset property,
 or API signature — if it can't be verified, stop and record it in `docs/OPEN_QUESTIONS.md`.*
