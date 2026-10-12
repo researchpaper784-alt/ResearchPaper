@@ -28,24 +28,29 @@ runs**, across all three regimes, not recovering by the final round. Its row in 
 to the score of a trivial one-class classifier and should not be read as a measurement of
 SCAFFOLD's relative merit on this task.
 
-**Root-caused and fixed, 2026-10-11 (`docs/OPEN_QUESTIONS.md`, "FIXED, confirmed over the full
-100-round budget") — not yet re-run on real data.** A genuine numerical blow-up in the SCAFFOLD
-control-variate update (not an environment artifact): under this sweep's real settings
-(`min-client-size=5`, `local-batch-size=32`, skewed partitioning), several clients legitimately
-see one local batch per round, which the update rule's `/(tau·lr)` term then turns into a ~100x
-amplified contribution to the shared control variate — an undamped positive feedback loop that
-reaches NaN by round ~16 of 100. Reproduced directly (`scripts/debug_scaffold_divergence.py`,
-no Ray, no Kaggle needed) and fixed with three bounds, none of them alone sufficient: clipping a
-client's contribution to its own actual update magnitude, an EMA + hard norm clip on the server
-side's accumulator, and clipping the correction term itself where it is injected into local
-training (a single bounded-but-nonzero correction, applied every round under SGD momentum, was
-enough to still diverge even with the first two in place). Confirmed stable over the real
-100-round budget: `‖w‖` grows from 67.7 to 73.7 — ordinary training, not divergence.
+**Root-caused and fixed in code, 2026-10-11 (`docs/OPEN_QUESTIONS.md`, "FIXED, confirmed over the
+full 100-round budget"), but never re-run on real Kaggle hardware — closed with the old result,
+not re-opened pending that run.** A genuine numerical blow-up in the SCAFFOLD control-variate
+update (not an environment artifact): under this sweep's real settings (`min-client-size=5`,
+`local-batch-size=32`, skewed partitioning), several clients legitimately see one local batch per
+round, which the update rule's `/(tau·lr)` term then turns into a ~100x amplified contribution to
+the shared control variate — an undamped positive feedback loop that reaches NaN by round ~16 of
+100. Reproduced directly (`scripts/debug_scaffold_divergence.py`, no Ray, no Kaggle needed) and
+fixed with three bounds, none of them alone sufficient: clipping a client's contribution to its
+own actual update magnitude, an EMA + hard norm clip on the server side's accumulator, and
+clipping the correction term itself where it is injected into local training (a single
+bounded-but-nonzero correction, applied every round under SGD momentum, was enough to still
+diverge even with the first two in place). Confirmed stable over the real 100-round budget in an
+in-process repro: `‖w‖` grows from 67.7 to 73.7 — ordinary training, not divergence. A Kaggle
+re-run to confirm this on the actual sweep (`notebooks/kaggle_day3_scaffold_refit.ipynb`) was
+attempted on 2026-10-12 but the session became unresponsive (a `ConcurrencyViolation` on commit,
+then the notebook stopped loading) before it finished; it was not retried, and this table reports
+the old run instead of waiting on it.
 
-**This table's SCAFFOLD row is still the old, broken one** — the fix has not yet been re-run on
-Kaggle (~3.7 GPU-h: SCAFFOLD is 24 of `main_reduced.yaml`'s 168 cells, not the whole sweep). Until that real re-run
-lands, the action from before still holds: **exclude the SCAFFOLD row or mark it explicitly as
-non-convergent** wherever this table is read. Krum and FedLAW also sit below the
+**This table's SCAFFOLD row is, and will stay, the old, broken one.** The fix above is real and
+tested, but unconfirmed on the actual sweep, so this paper never claims it: **the SCAFFOLD row is
+excluded from every headline comparison and reported only as non-convergent**, permanently for
+this draft, not as an open item. Krum and FedLAW also sit below the
 FedAvg/FedProx/Trimmed-Mean/FedACO cluster even under `iid` and are worth the same scrutiny,
 though neither shows SCAFFOLD's single-class signature.
 

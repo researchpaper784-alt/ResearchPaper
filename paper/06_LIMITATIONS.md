@@ -95,7 +95,7 @@ GPU-hours:
 |---|---|---|---|
 | clients K | 10 | 20 | the one K with a measured per-round cost; R5 varies it |
 | partition regimes | 3 | 6 | pathological, quantity-skew, source-shift dropped — **quantity-skew is the costly one**, it attacks $n_k$ weighting directly |
-| strategies | 6 | 12 | FedAdam, FedYogi, median, FedNova, loss-based, SCAFFOLD dropped |
+| strategies | 7 | 12 | FedAdam, FedYogi, median, FedNova, loss-based dropped (SCAFFOLD was added back 2026-09-27, then found non-convergent on this sweep and excluded from headline comparisons — §5.1, not dropped from the run) |
 | attacker fractions | 1 (30%) | 3 (10/20/30%) | figure 6 is a bar comparison, not a degradation curve |
 | ablations | A1, A2 | A1–A9 | sensitivity (A6), fitness-term ablations (A4/A5/A7/A8) absent |
 | robustness | R1, R2 | R1–R6 | stragglers, DP noise, client scaling, cold start absent |

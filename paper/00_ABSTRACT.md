@@ -35,10 +35,10 @@ search method improves federated aggregation.
 
 ## Checklist before this is final
 
-- [ ] Confirm every number above against the regenerated tables one more time after items in
-      `HANDOVER.md` §5 (robustness raw JSONs, SCAFFOLD fix, Figures 1-2) land — none of those
-      change this abstract's numbers, but SCAFFOLD's fix could change "6 converged baselines"
-      to 7, which would need a wording pass here too.
+- [x] Confirmed, 2026-10-12: robustness raw JSONs and Figures 1-2 landed and don't change this
+      abstract's numbers. SCAFFOLD's fix was never re-run on real Kaggle hardware (`HANDOVER.md`
+      §5 item 1, closed without it) and this draft closes on that basis — "6 converged baselines
+      (a seventh, SCAFFOLD, ... excluded)" stays as written, not a placeholder for 7.
 - [ ] A human, not an automated search, should re-read the four findings against the full
       `05_RESULTS.md` and confirm none of them overstate what a first read of the tables
       supports — particularly finding 2 (real-data equal-budget) and finding 3 (A2 at 5 seeds).

@@ -1951,8 +1951,15 @@ individually a no-op whenever the pathology they target is not present (confirme
 `tests/test_baselines.py`/`tests/test_fl_app.py` scaffold unit tests and the full 913-test
 suite pass unchanged).
 
-**Not yet done:** re-run on real Kaggle hardware (cheap — scaffold is one arm of
-`main_reduced.yaml`, ~3.7 GPU-h -- 24 cells, measured from the broken run's own log) to get a real, trustworthy `scaffold` row for Table 1 and
-re-check `scripts/check_iid_band.py`. `paper/05_RESULTS.md` §5.1 and `docs/OPEN_QUESTIONS.md`'s
-earlier "SCAFFOLD collapses..." entry above still describe the *symptom* correctly — this entry
-is the resolution, not a replacement for them.
+**Not done, and closed without doing it, 2026-10-12.** The re-run (cheap — scaffold is one arm of
+`main_reduced.yaml`, ~3.7 GPU-h -- 24 cells, measured from the broken run's own log) was attempted
+on `notebooks/kaggle_day3_scaffold_refit.ipynb`; the Kaggle session hit a `ConcurrencyViolation`
+on commit and then stopped loading entirely before finishing. Rather than keep waiting on a stuck
+kernel, the project owner chose to finalize the paper with the existing (broken) `scaffold` row
+rather than retry. `paper/05_RESULTS.md` §5.1 now states this as final: the fix above is real and
+tested in-process, but **unconfirmed on the real sweep**, so the paper never claims it — the
+`scaffold` row stays excluded from every headline comparison, permanently for this draft, not an
+open item. `docs/OPEN_QUESTIONS.md`'s earlier "SCAFFOLD collapses..." entry above still describes
+the *symptom* correctly — this entry is the fix's writeup, not a trustworthy Table 1 row. The
+notebook itself is untouched, so re-running is still possible later if someone gets a clean
+Kaggle session, but nothing in this repo depends on that happening.
